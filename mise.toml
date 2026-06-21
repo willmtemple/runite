@@ -29,6 +29,21 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 description = "Build documentation"
 run = "cargo doc --workspace --all-features --no-deps"
 
+[tasks.bench]
+description = "Run criterion benchmarks (runtime + I/O)"
+run = "cargo bench --workspace --all-features"
+
+[tasks.coverage]
+description = "Generate an HTML + lcov coverage report with cargo-llvm-cov"
+run = [
+  "cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info",
+  "cargo llvm-cov report --html",
+]
+
+[tasks.coverage-ci]
+description = "Emit lcov coverage for CI consumption"
+run = "cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info"
+
 [tasks.cop]
 description = "Run Agent Cop static-analysis checks"
 run = "cop cop-checks/main.cop -t ."
