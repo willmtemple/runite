@@ -44,9 +44,13 @@ impl UnixStream {
         right.set_nonblocking(true)?;
         Ok((
             Self {
+                // SAFETY: `into_raw_fd` transfers ownership of this fresh pair
+                // endpoint, and `OwnedFd` takes it exactly once.
                 fd: unsafe { OwnedFd::from_raw_fd(left.into_raw_fd()) },
             },
             Self {
+                // SAFETY: `into_raw_fd` transfers ownership of this fresh pair
+                // endpoint, and `OwnedFd` takes it exactly once.
                 fd: unsafe { OwnedFd::from_raw_fd(right.into_raw_fd()) },
             },
         ))
@@ -92,6 +96,8 @@ impl UnixStream {
 
     /// Returns the local socket address of this stream.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        // SAFETY: `self.raw_fd()` remains owned by `self`; `ManuallyDrop`
+        // prevents the temporary std stream from closing it.
         let stream = ManuallyDrop::new(unsafe {
             std::os::unix::net::UnixStream::from_raw_fd(self.raw_fd())
         });
@@ -100,6 +106,8 @@ impl UnixStream {
 
     /// Returns the remote peer address of this stream.
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        // SAFETY: `self.raw_fd()` remains owned by `self`; `ManuallyDrop`
+        // prevents the temporary std stream from closing it.
         let stream = ManuallyDrop::new(unsafe {
             std::os::unix::net::UnixStream::from_raw_fd(self.raw_fd())
         });
@@ -141,6 +149,8 @@ impl UnixListener {
 
     /// Returns the local socket address of this listener.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        // SAFETY: `self.raw_fd()` remains owned by `self`; `ManuallyDrop`
+        // prevents the temporary std listener from closing it.
         let listener = ManuallyDrop::new(unsafe {
             std::os::unix::net::UnixListener::from_raw_fd(self.raw_fd())
         });
@@ -173,9 +183,13 @@ impl UnixDatagram {
         right.set_nonblocking(true)?;
         Ok((
             Self {
+                // SAFETY: `into_raw_fd` transfers ownership of this fresh pair
+                // endpoint, and `OwnedFd` takes it exactly once.
                 fd: unsafe { OwnedFd::from_raw_fd(left.into_raw_fd()) },
             },
             Self {
+                // SAFETY: `into_raw_fd` transfers ownership of this fresh pair
+                // endpoint, and `OwnedFd` takes it exactly once.
                 fd: unsafe { OwnedFd::from_raw_fd(right.into_raw_fd()) },
             },
         ))
@@ -259,6 +273,8 @@ impl RawUnixSocketAddr {
             ));
         }
 
+        // SAFETY: sockaddr_un is a plain C address struct; an all-zero value is
+        // valid before filling sun_family and sun_path.
         let mut addr = unsafe { MaybeUninit::<libc::sockaddr_un>::zeroed().assume_init() };
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
@@ -303,16 +319,23 @@ impl RawUnixSocketAddr {
 }
 
 fn socket(socket_type: i32) -> io::Result<OwnedFd> {
+    // SAFETY: socket takes only integer arguments; no user pointers are passed.
     let fd = cvt(unsafe { libc::socket(libc::AF_UNIX, socket_type, 0) })?;
     if let Err(error) = set_cloexec(fd).and_then(|_| set_nonblocking(fd)) {
+        // SAFETY: `fd` is the fresh descriptor returned by socket and has not
+        // been wrapped, so closing it here releases it exactly once.
         let _ = unsafe { libc::close(fd) };
         return Err(error);
     }
+    // SAFETY: `fd` is a fresh descriptor returned by successful socket and
+    // ownership is transferred to `OwnedFd` exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 async fn connect_async(fd: RawFd, addr: &RawUnixSocketAddr) -> io::Result<()> {
     loop {
+        // SAFETY: `fd` is valid for the duration of the call, and `addr`
+        // points to `addr.len` initialized bytes describing a sockaddr_un.
         let result = unsafe { libc::connect(fd, addr.as_ptr(), addr.len) };
         if result == 0 {
             return Ok(());
@@ -332,14 +355,20 @@ async fn connect_async(fd: RawFd, addr: &RawUnixSocketAddr) -> io::Result<()> {
 }
 
 fn bind_sync(fd: RawFd, addr: &RawUnixSocketAddr) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the call, and `addr` points to
+    // `addr.len` initialized bytes describing a sockaddr_un.
     cvt(unsafe { libc::bind(fd, addr.as_ptr(), addr.len) }).map(|_| ())
 }
 
 fn listen_sync(fd: RawFd, backlog: i32) -> io::Result<()> {
+    // SAFETY: `fd` is a valid socket descriptor for the duration of the call;
+    // listen takes no user pointers.
     cvt(unsafe { libc::listen(fd, backlog) }).map(|_| ())
 }
 
 fn accept_sync(fd: RawFd) -> io::Result<(OwnedFd, SocketAddr)> {
+    // SAFETY: `fd` is a valid listener descriptor; null address pointers are
+    // allowed when the peer address is not requested from accept.
     let accepted = cvt(unsafe {
         libc::accept(
             fd,
@@ -348,12 +377,18 @@ fn accept_sync(fd: RawFd) -> io::Result<(OwnedFd, SocketAddr)> {
         )
     })?;
     if let Err(error) = set_cloexec(accepted).and_then(|_| set_nonblocking(accepted)) {
+        // SAFETY: `accepted` is a fresh descriptor not wrapped by OwnedFd yet,
+        // so closing it here releases it exactly once.
         let _ = unsafe { libc::close(accepted) };
         return Err(error);
     }
 
+    // SAFETY: `accepted` is a fresh descriptor returned by accept and ownership
+    // is transferred to `OwnedFd` exactly once.
     let owned = unsafe { OwnedFd::from_raw_fd(accepted) };
     let addr = {
+        // SAFETY: `owned` retains ownership of the descriptor; `ManuallyDrop`
+        // prevents the temporary std stream from closing it.
         let stream = ManuallyDrop::new(unsafe {
             std::os::unix::net::UnixStream::from_raw_fd(owned.as_raw_fd())
         });
@@ -363,11 +398,15 @@ fn accept_sync(fd: RawFd) -> io::Result<(OwnedFd, SocketAddr)> {
 }
 
 fn recv_from_sync(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    // SAFETY: `fd` remains owned by the caller; `ManuallyDrop` prevents the
+    // temporary std datagram socket from closing it.
     let socket = ManuallyDrop::new(unsafe { std::os::unix::net::UnixDatagram::from_raw_fd(fd) });
     socket.recv_from(buf)
 }
 
 fn send_to_sync(fd: RawFd, buf: &[u8], addr: &RawUnixSocketAddr) -> io::Result<usize> {
+    // SAFETY: `fd` is valid for the duration of the call; `buf` is readable for
+    // `buf.len()` bytes and `addr` points to an initialized sockaddr_un.
     let sent = unsafe {
         libc::sendto(
             fd,
@@ -382,13 +421,21 @@ fn send_to_sync(fd: RawFd, buf: &[u8], addr: &RawUnixSocketAddr) -> io::Result<u
 }
 
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the fcntl call; F_GETFD uses no
+    // user pointers.
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFD) })?;
+    // SAFETY: `fd` is valid for the duration of the fcntl call; F_SETFD uses
+    // the integer flags argument and no user pointers.
     cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) })?;
     Ok(())
 }
 
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the fcntl call; F_GETFL uses no
+    // user pointers.
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
+    // SAFETY: `fd` is valid for the duration of the fcntl call; F_SETFL uses
+    // the integer flags argument and no user pointers.
     cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) })?;
     Ok(())
 }
@@ -396,6 +443,8 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 fn socket_error(fd: RawFd) -> io::Result<()> {
     let mut so_error: libc::c_int = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `fd` is valid for the duration of the call, and `so_error`/`len`
+    // point to writable initialized storage for SO_ERROR.
     cvt(unsafe {
         libc::getsockopt(
             fd,

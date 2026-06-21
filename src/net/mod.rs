@@ -415,6 +415,8 @@ impl TcpListener {
         let accepted =
             crate::sys::current::net::accept(NetOp::Accept { fd: self.raw_fd() }).await?;
 
+        // SAFETY: `accepted.fd` is the fresh descriptor returned by accept and
+        // ownership is transferred to `OwnedFd` exactly once here.
         let stream = TcpStream::from_owned_fd(unsafe { OwnedFd::from_raw_fd(accepted.fd) });
         Ok((stream, accepted.peer_addr))
     }

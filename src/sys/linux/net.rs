@@ -89,6 +89,8 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
             sqe.len = protocol as u32;
             sqe.op_flags = flags;
         },
+        // SAFETY: `fd` is the non-negative descriptor returned by a successful
+        // socket CQE and ownership is transferred to `OwnedFd` exactly once.
         move |cqe| cqe_to_result(cqe).map(|fd| unsafe { OwnedFd::from_raw_fd(fd as RawFd) }),
     )
     .await
@@ -202,6 +204,8 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
         },
         move |cqe| {
             let accepted_fd = cqe_to_result(cqe)? as RawFd;
+            // SAFETY: a successful accept CQE means the kernel initialized
+            // `*addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
             let peer_addr = socket_addr_from_storage(&storage, *addr_len)?;
             Ok(AcceptedSocket {
@@ -299,6 +303,8 @@ pub async fn send_to(op: NetOp) -> io::Result<usize> {
         iov_base: data.as_ptr() as *mut c_void,
         iov_len: data.len(),
     });
+    // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
+    // state; the fields used by sendmsg are filled before submission.
     let mut msg = Box::new(unsafe { std::mem::zeroed::<libc::msghdr>() });
     msg.msg_name = raw_addr.as_ptr() as *mut c_void;
     msg.msg_namelen = raw_addr.len();
@@ -369,6 +375,8 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
         iov_base: data.as_mut_ptr() as *mut c_void,
         iov_len: data.len(),
     });
+    // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
+    // state; the fields used by recvmsg are filled before submission.
     let mut msg = Box::new(unsafe { std::mem::zeroed::<libc::msghdr>() });
     msg.msg_name = storage.as_mut_ptr() as *mut c_void;
     msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -391,6 +399,8 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
             drop(msg);
             let read = cqe_to_result(cqe)? as usize;
             data.truncate(read);
+            // SAFETY: a successful recvmsg CQE means the kernel initialized
+            // `addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
             let peer_addr = socket_addr_from_storage(&storage, addr_len)?;
             Ok(ReceivedDatagram { data, peer_addr })
@@ -511,7 +521,11 @@ pub async fn bind_datagram(addr: SocketAddr) -> io::Result<OwnedFd> {
 pub async fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
     // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so run it inline rather than on the
     // blocking pool.
+    // SAFETY: `fd` is a valid descriptor for the duration of the fcntl call;
+    // F_DUPFD_CLOEXEC does not access user pointers.
     let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: `duplicated` is a fresh descriptor returned by successful fcntl
+    // and ownership is transferred to `OwnedFd` exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
@@ -582,6 +596,8 @@ pub async fn recv_from_timeout(
         iov_base: data.as_mut_ptr() as *mut c_void,
         iov_len: data.len(),
     });
+    // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
+    // state; the fields used by recvmsg are filled before submission.
     let mut msg = Box::new(unsafe { std::mem::zeroed::<libc::msghdr>() });
     msg.msg_name = storage.as_mut_ptr() as *mut c_void;
     msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -605,6 +621,8 @@ pub async fn recv_from_timeout(
             drop(msg);
             let read = cqe_to_timed_result(cqe)? as usize;
             data.truncate(read);
+            // SAFETY: a successful recvmsg CQE means the kernel initialized
+            // `addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
             let peer_addr = socket_addr_from_storage(&storage, addr_len)?;
             Ok(ReceivedDatagram { data, peer_addr })
@@ -625,6 +643,8 @@ pub async fn send_to_timeout(
         iov_base: data.as_ptr() as *mut c_void,
         iov_len: data.len(),
     });
+    // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
+    // state; the fields used by sendmsg are filled before submission.
     let mut msg = Box::new(unsafe { std::mem::zeroed::<libc::msghdr>() });
     msg.msg_name = raw_addr.as_ptr() as *mut c_void;
     msg.msg_namelen = raw_addr.len();
@@ -696,6 +716,8 @@ pub fn peer_addr(fd: RawFd) -> io::Result<SocketAddr> {
 pub fn nodelay(fd: RawFd) -> io::Result<bool> {
     let mut value = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `fd` is a valid TCP socket descriptor; `value` and `len` point
+    // to writable initialized storage for the duration of getsockopt.
     cvt(unsafe {
         libc::getsockopt(
             fd,
@@ -745,6 +767,8 @@ pub fn set_ttl(fd: RawFd, ttl: u32) -> io::Result<()> {
 
 pub fn set_nodelay(fd: RawFd, enabled: bool) -> io::Result<()> {
     let value: libc::c_int = enabled.into();
+    // SAFETY: `fd` is a valid TCP socket descriptor; `value` points to an
+    // initialized c_int with the exact length passed to setsockopt.
     cvt(unsafe {
         libc::setsockopt(
             fd,
@@ -882,7 +906,11 @@ fn socket_addr_with(
 ) -> io::Result<SocketAddr> {
     let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `fd` is valid for the duration of the call, and `storage`/`len`
+    // point to writable storage sized for a sockaddr_storage result.
     cvt(unsafe { op(fd, storage.as_mut_ptr().cast::<libc::sockaddr>(), &mut len) })?;
+    // SAFETY: a successful socket address query initializes `len` bytes of the
+    // zeroed sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
     socket_addr_from_storage(&storage, len)
 }
@@ -894,7 +922,11 @@ fn set_reuse_addr(fd: RawFd, enabled: bool) -> io::Result<()> {
 fn socket_family(fd: RawFd) -> io::Result<i32> {
     let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `fd` is valid for the duration of the call, and `storage`/`len`
+    // point to writable storage sized for a sockaddr_storage result.
     cvt(unsafe { libc::getsockname(fd, storage.as_mut_ptr().cast::<libc::sockaddr>(), &mut len) })?;
+    // SAFETY: successful getsockname initialized the zeroed sockaddr_storage
+    // buffer with at least the family field read below.
     let storage = unsafe { storage.assume_init() };
     Ok(storage.ss_family as i32)
 }
@@ -902,6 +934,8 @@ fn socket_family(fd: RawFd) -> io::Result<i32> {
 fn getsockopt_int(fd: RawFd, level: i32, name: i32) -> io::Result<i32> {
     let mut value = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `fd` is valid for the duration of the call, and `value`/`len`
+    // point to writable initialized storage for an integer socket option.
     cvt(unsafe {
         libc::getsockopt(
             fd,
@@ -915,6 +949,8 @@ fn getsockopt_int(fd: RawFd, level: i32, name: i32) -> io::Result<i32> {
 }
 
 fn setsockopt_int(fd: RawFd, level: i32, name: i32, value: i32) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the call, and `value` points
+    // to an initialized c_int with the exact length passed to setsockopt.
     cvt(unsafe {
         libc::setsockopt(
             fd,
@@ -940,6 +976,8 @@ fn socket_addr_from_storage(
                 ));
             }
 
+            // SAFETY: the family is AF_INET and `len` was checked large enough
+            // for a sockaddr_in before casting the sockaddr_storage bytes.
             let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in) };
             Ok(SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()),
@@ -954,6 +992,8 @@ fn socket_addr_from_storage(
                 ));
             }
 
+            // SAFETY: the family is AF_INET6 and `len` was checked large enough
+            // for a sockaddr_in6 before casting the sockaddr_storage bytes.
             let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in6) };
             Ok(SocketAddr::V6(SocketAddrV6::new(
                 Ipv6Addr::from(addr.sin6_addr.s6_addr),
@@ -988,7 +1028,11 @@ impl RawSocketAddr {
                     sin_zero: [0; 8],
                 };
                 let mut storage =
+                    // SAFETY: sockaddr_storage is a plain storage buffer; an
+                    // all-zero value is valid before writing a sockaddr_in into it.
                     unsafe { MaybeUninit::<libc::sockaddr_storage>::zeroed().assume_init() };
+                // SAFETY: `storage` is properly aligned and large enough for
+                // sockaddr_in; the written bytes are tracked by `len`.
                 unsafe {
                     std::ptr::write(
                         &mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in,
@@ -1011,7 +1055,11 @@ impl RawSocketAddr {
                     sin6_scope_id: addr.scope_id(),
                 };
                 let mut storage =
+                    // SAFETY: sockaddr_storage is a plain storage buffer; an
+                    // all-zero value is valid before writing a sockaddr_in6 into it.
                     unsafe { MaybeUninit::<libc::sockaddr_storage>::zeroed().assume_init() };
+                // SAFETY: `storage` is properly aligned and large enough for
+                // sockaddr_in6; the written bytes are tracked by `len`.
                 unsafe {
                     std::ptr::write(
                         &mut storage as *mut libc::sockaddr_storage as *mut libc::sockaddr_in6,
@@ -1070,25 +1118,36 @@ fn should_fallback_to_offload(error: &io::Error) -> bool {
 }
 
 fn socket_sync(domain: i32, socket_type: i32, protocol: i32, flags: u32) -> io::Result<OwnedFd> {
+    // SAFETY: socket takes only integer arguments; no user pointers are passed.
     let fd = cvt(unsafe { libc::socket(domain, socket_type | flags as i32, protocol) })?;
+    // SAFETY: `fd` is a fresh descriptor returned by successful socket and
+    // ownership is transferred to `OwnedFd` exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn connect_sync(fd: RawFd, addr: RawSocketAddr) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the call, and `addr` points to
+    // `addr.len()` initialized bytes describing a sockaddr.
     cvt(unsafe { libc::connect(fd, addr.as_ptr(), addr.len()) }).map(|_| ())
 }
 
 fn bind_sync(fd: RawFd, addr: RawSocketAddr) -> io::Result<()> {
+    // SAFETY: `fd` is valid for the duration of the call, and `addr` points to
+    // `addr.len()` initialized bytes describing a sockaddr.
     cvt(unsafe { libc::bind(fd, addr.as_ptr(), addr.len()) }).map(|_| ())
 }
 
 fn listen_sync(fd: RawFd, backlog: i32) -> io::Result<()> {
+    // SAFETY: `fd` is a valid socket descriptor for the duration of the call;
+    // listen takes no user pointers.
     cvt(unsafe { libc::listen(fd, backlog) }).map(|_| ())
 }
 
 fn accept_sync(fd: RawFd) -> io::Result<AcceptedSocket> {
     let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `fd` is a valid listener descriptor; `storage` and `len` point to
+    // writable storage sized for the peer sockaddr result.
     let accepted_fd = cvt(unsafe {
         libc::accept4(
             fd,
@@ -1097,6 +1156,8 @@ fn accept_sync(fd: RawFd) -> io::Result<AcceptedSocket> {
             libc::SOCK_CLOEXEC,
         )
     })?;
+    // SAFETY: successful accept4 initialized `len` bytes of the zeroed
+    // sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
     let peer_addr = socket_addr_from_storage(&storage, len)?;
     Ok(AcceptedSocket {
@@ -1106,12 +1167,16 @@ fn accept_sync(fd: RawFd) -> io::Result<AcceptedSocket> {
 }
 
 fn send_sync(fd: RawFd, data: Vec<u8>, flags: i32) -> io::Result<usize> {
+    // SAFETY: `fd` is valid for the duration of the call, and `data` is an
+    // immutable buffer valid for `data.len()` bytes.
     let written = unsafe { libc::send(fd, data.as_ptr().cast::<c_void>(), data.len(), flags) };
     cvt_long(written).map(|written| written as usize)
 }
 
 fn recv_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<Vec<u8>> {
     let mut buffer = vec![0; len];
+    // SAFETY: `fd` is valid for the duration of the call, and `buffer` is
+    // exclusively owned and writable for `buffer.len()` bytes.
     let read = unsafe {
         libc::recv(
             fd,
@@ -1129,6 +1194,9 @@ fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatag
     let mut buffer = vec![0; len];
     let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `fd` is valid for the duration of the call; `buffer` is writable
+    // for `buffer.len()` bytes and `storage`/`addr_len` describe writable
+    // sockaddr_storage for the sender address.
     let read = unsafe {
         libc::recvfrom(
             fd,
@@ -1141,6 +1209,8 @@ fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatag
     };
     let read = cvt_long(read)? as usize;
     buffer.truncate(read);
+    // SAFETY: successful recvfrom initialized `addr_len` bytes of the zeroed
+    // sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
     let peer_addr = socket_addr_from_storage(&storage, addr_len)?;
     Ok(ReceivedDatagram {
@@ -1150,10 +1220,14 @@ fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatag
 }
 
 fn shutdown_sync(fd: RawFd, how: Shutdown) -> io::Result<()> {
+    // SAFETY: `fd` is a valid socket descriptor for the duration of the call;
+    // shutdown takes no user pointers.
     cvt(unsafe { libc::shutdown(fd, shutdown_how(how)) }).map(|_| ())
 }
 
 fn close_sync(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is an owned raw descriptor being closed exactly once by the
+    // networking backend.
     cvt(unsafe { libc::close(fd) }).map(|_| ())
 }
 
@@ -1162,6 +1236,8 @@ fn close_sync(fd: RawFd) -> io::Result<()> {
 /// Safety: `iov_base` points into a `Vec<u8>` that is owned by the same
 /// closure, so the pointer is valid until the CQE fires and the closure drops.
 struct SendIovec(#[allow(dead_code)] Box<libc::iovec>);
+// SAFETY: the iovec pointer targets storage owned by the same completion
+// closure, which keeps that storage alive until the kernel is done with it.
 unsafe impl Send for SendIovec {}
 
 /// Wrapper making `Box<libc::msghdr>` sendable across the async CQE boundary.
@@ -1170,6 +1246,8 @@ unsafe impl Send for SendIovec {}
 /// into heap storage owned by the same closure, so they are valid until the
 /// CQE fires and the closure drops.
 struct SendMsghdr(Box<libc::msghdr>);
+// SAFETY: all pointers inside the msghdr target storage owned by the same
+// completion closure, which keeps that storage alive until the CQE is handled.
 unsafe impl Send for SendMsghdr {}
 
 fn cvt_long(value: libc::ssize_t) -> io::Result<libc::ssize_t> {
