@@ -5,4 +5,4 @@
 # Rust >= 1.85.
 [toolchain]
 channel = "1.96.0"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "llvm-tools"]
