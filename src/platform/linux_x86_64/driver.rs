@@ -396,13 +396,20 @@ impl Driver {
                 }
             }
             Some(CompletionKind::OperationCancel) => {
-                if let Some(original) = self
-                    .pending_cancel_tokens
+                // A cancel completion only signals that the ASYNC_CANCEL
+                // request itself finished; it does NOT prove the original
+                // request has released the guarded user buffers. In particular
+                // `IORING_OP_ASYNC_CANCEL` can report `-EALREADY` (the target op
+                // was already executing, could not be stopped, and will still
+                // complete later — potentially writing into those buffers). The
+                // buffer guards are therefore released exclusively by the
+                // original operation's own completion (the
+                // `CompletionKind::Operation` arm above), which the kernel
+                // always posts exactly once. Here we only discard the
+                // cancel-token bookkeeping.
+                self.pending_cancel_tokens
                     .borrow_mut()
-                    .remove(&cqe.user_data)
-                {
-                    let _guards = self.pending_cancel_buffers.borrow_mut().remove(&original);
-                }
+                    .remove(&cqe.user_data);
             }
             Some(CompletionKind::TimerRemove)
             | Some(CompletionKind::NotifySend)
@@ -479,11 +486,15 @@ impl DriverBackend for Driver {
 /// Returns the current monotonic time used by the runtime timer system.
 pub fn monotonic_now() -> io::Result<Duration> {
     let mut now = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `now.as_mut_ptr()` points to writable, properly aligned
+    // `timespec` storage for the duration of the syscall.
     let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, now.as_mut_ptr()) };
     if result == -1 {
         return Err(io::Error::last_os_error());
     }
 
+    // SAFETY: `clock_gettime` returned success, which initializes the
+    // `timespec` value in `now`.
     let now = unsafe { now.assume_init() };
     Ok(Duration::new(now.tv_sec as u64, now.tv_nsec as u32))
 }

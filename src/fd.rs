@@ -18,6 +18,8 @@ mod tests {
     #[test]
     fn wait_readable_resolves_for_pipe() {
         let mut fds = [0; 2];
+        // SAFETY: `fds.as_mut_ptr()` points to two writable `c_int` slots that
+        // `pipe` initializes on success.
         let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(result, 0, "pipe should succeed");
         let read_fd = fds[0];
@@ -34,6 +36,8 @@ mod tests {
                     observed.store(true, Ordering::SeqCst);
 
                     let mut byte = 0u8;
+                    // SAFETY: `read_fd` is the open read end of the pipe, and
+                    // `byte` is valid writable storage for one byte.
                     let read = unsafe {
                         libc::read(
                             read_fd,
@@ -42,6 +46,8 @@ mod tests {
                         )
                     };
                     assert_eq!(read, 1);
+                    // SAFETY: `read_fd` is owned by this test path and is
+                    // closed exactly once after the pending read completes.
                     unsafe {
                         libc::close(read_fd);
                     }
@@ -49,6 +55,8 @@ mod tests {
 
                 std::thread::spawn(move || {
                     let byte = 1u8;
+                    // SAFETY: `write_fd` is the open write end of the pipe, and
+                    // `byte` is initialized storage for the one byte written.
                     let written = unsafe {
                         libc::write(
                             write_fd,
@@ -57,6 +65,8 @@ mod tests {
                         )
                     };
                     assert_eq!(written, 1);
+                    // SAFETY: `write_fd` is owned by this spawned writer and is
+                    // closed exactly once after the byte is written.
                     unsafe {
                         libc::close(write_fd);
                     }
