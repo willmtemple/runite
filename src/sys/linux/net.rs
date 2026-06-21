@@ -93,8 +93,11 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
     )
     .await
     {
+        // `socket(2)` never blocks, so when io_uring lacks IORING_OP_SOCKET we run
+        // it inline on the event-loop thread rather than paying for a blocking-pool
+        // thread hop.
         Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || socket_sync(domain, socket_type, protocol, flags)).await
+            socket_sync(domain, socket_type, protocol, flags)
         }
         result => result,
     }
@@ -153,9 +156,8 @@ pub async fn bind(op: NetOp) -> io::Result<()> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || bind_sync(fd, fallback_addr)).await
-        }
+        // `bind(2)` never blocks; run inline instead of bouncing to the blocking pool.
+        Err(error) if should_fallback_to_offload(&error) => bind_sync(fd, fallback_addr),
         result => result,
     }
 }
@@ -175,9 +177,8 @@ pub async fn listen(op: NetOp) -> io::Result<()> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || listen_sync(fd, backlog)).await
-        }
+        // `listen(2)` never blocks; run inline instead of bouncing to the blocking pool.
+        Err(error) if should_fallback_to_offload(&error) => listen_sync(fd, backlog),
         result => result,
     }
 }
@@ -420,9 +421,8 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || shutdown_sync(fd, fallback_how)).await
-        }
+        // `shutdown(2)` never blocks; run inline instead of bouncing to the blocking pool.
+        Err(error) if should_fallback_to_offload(&error) => shutdown_sync(fd, fallback_how),
         result => result,
     }
 }
@@ -441,7 +441,8 @@ pub async fn close(op: NetOp) -> io::Result<()> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => offload(move || close_sync(fd)).await,
+        // `close(2)` never blocks; run inline instead of bouncing to the blocking pool.
+        Err(error) if should_fallback_to_offload(&error) => close_sync(fd),
         result => result,
     }
 }
@@ -508,11 +509,10 @@ pub async fn bind_datagram(addr: SocketAddr) -> io::Result<OwnedFd> {
 }
 
 pub async fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
-    offload(move || {
-        let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
-        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    })
-    .await
+    // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so run it inline rather than on the
+    // blocking pool.
+    let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
 pub async fn recv_timeout(
