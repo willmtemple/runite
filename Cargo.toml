@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["./", "./proc_macros"]
+
+[package]
+name = "runite"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+hyper = ["dep:hyper"]
+futures-compat = ["dep:futures-io"]
+
+[dependencies]
+futures-io = { version = "0.3", optional = true }
+hyper = { version = "1.8", default-features = false, features = [
+  "client",
+  "http1",
+], optional = true }
+libc = "0.2"
+runite-proc-macros = { package = "runite-proc-macros", path = "./proc_macros" }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+bytes = "1"
+http-body-util = "0.1"
+
+[[example]]
+name = "hyper_http_client"
+required-features = ["hyper"]

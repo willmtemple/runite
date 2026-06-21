@@ -1,0 +1,136 @@
+//! Task spawning primitives.
+//!
+//! Currently exposes a single entry point: [`spawn_blocking`], which moves a
+//! blocking closure onto the shared OS-thread pool and returns a future that
+//! resolves to the closure's return value.
+//!
+//! In-runtime async work should use [`crate::queue_future`] instead; this
+//! module exists for code that must call blocking syscalls or run CPU-heavy
+//! computations without stalling the event loop.
+
+use core::fmt;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
+
+use std::io;
+
+use crate::channel::oneshot;
+use crate::sys::blocking;
+
+/// Future returned by [`spawn_blocking`].
+///
+/// Awaiting it yields the closure's return value. If the worker pool dropped
+/// the task without completing it (for example because the process is shutting
+/// down), the future resolves to [`JoinError::Cancelled`].
+pub struct BlockingJoinHandle<R: Send + 'static> {
+    inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>>,
+}
+
+/// Error returned by awaiting a [`BlockingJoinHandle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinError {
+    /// The worker exited without producing a value (shutdown, panic, etc.).
+    Cancelled,
+}
+
+impl fmt::Display for JoinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JoinError::Cancelled => f.write_str("blocking task was cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for JoinError {}
+
+impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
+    type Output = Result<R, JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(JoinError::Cancelled)),
+        }
+    }
+}
+
+/// Runs `f` on the shared blocking worker pool.
+///
+/// The returned future resolves with the closure's return value. If the pool's
+/// bounded queue is full, returns [`io::ErrorKind::WouldBlock`] synchronously.
+///
+/// `f` runs on a real OS thread; it may call blocking syscalls freely. Avoid
+/// touching any per-runtime-thread state from inside `f` — this is a pool
+/// thread, not a runtime thread.
+pub fn spawn_blocking<F, R>(f: F) -> io::Result<BlockingJoinHandle<R>>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let (sender, mut receiver) = oneshot::channel::<R>();
+    blocking::spawn_blocking(move || {
+        let value = f();
+        let _ = sender.send(value);
+    })?;
+    let inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>> =
+        Box::pin(async move { receiver.recv().await });
+    Ok(BlockingJoinHandle { inner })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{queue_future, run_until_stalled};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn spawn_blocking_returns_value() {
+        let result = Arc::new(AtomicUsize::new(0));
+        let result_clone = Arc::clone(&result);
+
+        queue_future(async move {
+            let handle = spawn_blocking(|| 7usize + 35).expect("spawn_blocking");
+            let value = handle.await.expect("join");
+            result_clone.store(value, Ordering::SeqCst);
+        });
+
+        // Drive until stalled, repeatedly, because the oneshot send happens on
+        // a worker thread and we need the cross-thread wake to land.
+        for _ in 0..200 {
+            run_until_stalled();
+            if result.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(result.load(Ordering::SeqCst), 42);
+    }
+
+    #[test]
+    fn spawn_blocking_returns_complex_value() {
+        let result = Arc::new(std::sync::Mutex::new(String::new()));
+        let result_clone = Arc::clone(&result);
+
+        queue_future(async move {
+            let handle =
+                spawn_blocking(|| "hello blocking world".to_string()).expect("spawn_blocking");
+            let value = handle.await.expect("join");
+            *result_clone.lock().unwrap() = value;
+        });
+
+        for _ in 0..200 {
+            run_until_stalled();
+            if !result.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(*result.lock().unwrap(), "hello blocking world");
+    }
+}
