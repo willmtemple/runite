@@ -15,7 +15,7 @@ documentation = "https://docs.rs/runite"
 readme = "README.md"
 keywords = ["async", "runtime", "io_uring", "executor", "event-loop"]
 categories = ["asynchronous", "concurrency", "network-programming"]
-exclude = ["/.github", "/target", "/cop-checks", "mise.toml", "rust-toolchain.toml"]
+exclude = ["/.github", "/target", "/cop-checks", "mise.toml", "rust-toolchain.toml", "AGENTS.md", "deny.toml"]
 
 [package.metadata.docs.rs]
 all-features = true

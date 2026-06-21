@@ -3,7 +3,8 @@
 //! All scheduler, timer-heap, future-task, and worker bookkeeping lives in
 //! [`crate::platform::runtime_shared`]. This file just:
 //!
-//!   * implements [`runtime_shared::Runtime`] for a marker type so the
+//!   * implements [`Runtime`](crate::platform::runtime_shared::Runtime) for a
+//!     marker type so the
 //!     shared code can mint fresh driver/notifier pairs and read the
 //!     monotonic clock, and
 //!   * re-exports the generic public scheduler entry points with the marker
