@@ -77,6 +77,39 @@ jobs:
         with:
           command: check
 
+  coverage:
+    name: Code coverage (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
+  benches:
+    name: Benchmarks (compile + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build benches
+        run: cargo build --benches --all-features
+      - name: Smoke-run benches
+        run: cargo bench --bench runtime -- --warm-up-time 0.1 --measurement-time 0.3 --sample-size 10
+
   publish-dry-run:
     name: Publish dry-run
     runs-on: ubuntu-latest
