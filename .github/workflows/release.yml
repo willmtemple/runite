@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Verify tag matches crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='runite'))")
+          if [ "$tag" != "$crate" ]; then
+            echo "Tag $tag does not match crate version $crate" >&2
+            exit 1
+          fi
+      # The proc-macro crate must be published first because runite depends on it.
+      # --no-verify on the umbrella crate avoids a chicken-and-egg failure while the
+      # just-published proc-macro crate propagates through the registry index.
+      - name: Publish runite-proc-macros
+        run: cargo publish -p runite-proc-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Wait for index propagation
+        run: sleep 30
+      - name: Publish runite
+        run: cargo publish -p runite
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
