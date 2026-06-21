@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release of `runite`, an event-loop-per-thread async runtime built on
   io_uring (Linux `x86_64`) and kqueue (macOS `aarch64`).
-- `#[runite::main]` / `#[runite::async_main]` entry-point macros.
+- `#[runite::main]` entry-point macro (supports both `fn main` and `async fn main`).
 - Async `fs`, `net` (TCP/UDP/Unix-domain sockets), `time`, and `channel` services.
 - Cross-thread worker spawning and task queueing.
 - Optional `hyper` client integration and `futures-io` compatibility adapters.

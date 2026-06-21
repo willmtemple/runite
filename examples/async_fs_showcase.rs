@@ -5,7 +5,7 @@ fn preview(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace('\n', "\\n")
 }
 
-#[runite::async_main]
+#[runite::main]
 async fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cargo_toml = manifest_dir.join("Cargo.toml");

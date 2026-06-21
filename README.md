@@ -18,8 +18,12 @@ ergonomics, and maximum I/O throughput.
 | --------------- | ------------------ | --------- |
 | Linux `x86_64`  | `io_uring`         | Primary   |
 | macOS `aarch64` | `kqueue` + offload | Supported |
+| Windows `x86_64`| IOCP + offload     | In progress (not yet available) |
 
-Other targets fail to compile with a clear error.
+A Windows backend built on IOCP (with thread offload where IOCP does not apply)
+is in progress. It is **not** part of the 0.1 release; on Windows `runite` does
+not yet compile. The other unsupported targets fail to compile with a clear
+error.
 
 ## Installation
 
@@ -31,7 +35,7 @@ runite = "0.1"
 ## Quick start
 
 ```rust
-#[runite::async_main]
+#[runite::main]
 async fn main() {
     let entries = runite::fs::read_dir(".").await.unwrap();
     // ... drive async work on the current runtime thread
@@ -51,7 +55,7 @@ fn main() {
 
 ## What you get
 
-- **Entry points:** `#[runite::main]`, `#[runite::async_main]`.
+- **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`).
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_task`,
   `queue_microtask`, `queue_future`, `yield_now`.
 - **Workers:** `spawn_worker` plus the `Send`-only cross-thread `ThreadHandle::queue_task`.

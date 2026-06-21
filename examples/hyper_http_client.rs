@@ -36,7 +36,7 @@ fn spawn_demo_server() -> std::io::Result<(std::net::SocketAddr, thread::JoinHan
     Ok((address, handle))
 }
 
-#[runite::async_main]
+#[runite::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (address, server) = spawn_demo_server()?;
 

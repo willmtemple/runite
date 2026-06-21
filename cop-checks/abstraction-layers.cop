@@ -1,0 +1,32 @@
+# Keep each layer at a single level of abstraction: the core async layer must
+# not reach for raw OS primitives.
+#
+# runite is built in layers. The lowest layer (`src/sys/**`, `src/platform/**`)
+# and the thin OS-binding modules that wrap it (`fd`, `stdio`, `signal`, `net`,
+# `fs`) own all direct `libc`/syscall access. The *core async layer* — task
+# scheduling, channels, synchronization primitives, timers, the I/O traits, and
+# the op/completion plumbing — is expressed purely in terms of that lower layer
+# and must never call `libc` directly.
+#
+# Enforcing this keeps a module from mixing levels of abstraction: a channel or
+# mutex that suddenly issues a raw syscall is reaching across two layers at once.
+# The boundary holds today (these modules contain zero `libc::` references), so
+# this check is a forward guardrail rather than a cleanup task.
+#
+# `libc` usage has no dedicated node in the language-agnostic model (it appears
+# as path-qualified calls like `libc::read(...)`), so we match the `libc::` path
+# prefix on source lines — the documented last-resort for facts the semantic
+# model does not expose.
+
+predicate isCoreAsyncLayer(Line) =>
+    Line.File.Path:startsWith('src/channel/')
+    || Line.File.Path:startsWith('src/sync/')
+    || Line.File.Path:startsWith('src/io/')
+    || Line.File.Path:startsWith('src/op/')
+    || Line.File.Path:equals('src/task.rs')
+    || Line.File.Path:equals('src/time.rs')
+
+predicate usesRawOsPrimitive(Line) => Line.Text:contains('libc::')
+
+let abstraction-layer-violations = codebase.Lines:isCoreAsyncLayer:usesRawOsPrimitive
+    :toError('{item.File.Path}:{item.Number} the core async layer must not call libc directly; route OS access through the sys/ and platform/ layers to keep this module at one level of abstraction')
