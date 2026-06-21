@@ -14,6 +14,8 @@ import rust
 let codebase = rust.parse()
 
 let all-violations =
-    oversized-types-violations
+    oversized-types-violations +
+    module-size-violations +
+    single-module-crate-violations
 
 command MAIN = CHECK(all-violations)

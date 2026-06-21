@@ -1,3 +1,32 @@
+# runite — Agent & Contributor Guide
+
+> **Single source of truth.** This file (`AGENTS.md`) is the canonical agent guide.
+> `.github/copilot-instructions.md` is a thin pointer to it — do not duplicate
+> content there.
+
+## Toolchain: everything runs through `mise`
+
+The build/lint/test/analysis toolchain (Rust + the `cop` static analyzer) is
+provisioned by [`mise`](https://mise.jdx.dev/) from `mise.toml`. Install it once
+with `mise install`, then use the tasks instead of invoking tools directly:
+
+| Task | Command |
+|------|---------|
+| Run cop checks | `mise run cop` |
+| Verify cop rule files | `mise run cop-verify` |
+| Full local gate (fmt, lint, test, cop) | `mise run check` |
+| Build / test / lint / bench / coverage | `mise run build` / `test` / `lint` / `bench` / `coverage` |
+
+**`cop` is provided by `mise`, not your system PATH.** Always invoke it through
+mise — either a task (`mise run cop`) or, for ad-hoc commands, prefix the raw
+invocation with `mise exec --`:
+
+```bash
+mise run cop                                  # preferred: runs cop-checks/main.cop
+mise exec -- cop cop-checks/main.cop -t .     # ad-hoc run
+mise exec -- cop verify cop-checks/           # ad-hoc verify
+```
+
 <!-- BEGIN COP INSTRUCTIONS -->
 # Cop — Writing and Running Checks
 
@@ -5,11 +34,16 @@ This project uses **Cop** for static analysis checks. All checks live in `cop-ch
 
 ## How to Run Checks
 
+`cop` is installed by `mise` (see the toolchain table above), so run it via a
+mise task or prefix ad-hoc commands with `mise exec --`:
+
 ```bash
-cop cop-checks/main.cop -t .          # Run all checks against the repo root
-cop cop-checks/main.cop -t . -c ai    # Run a specific named command (e.g. an AI command)
-cop verify cop-checks/                # Verify check files are correct (no execution)
-cop test tests/                       # Run `test` assertions
+mise run cop                                  # Run all checks against the repo root
+mise run cop-verify                           # Verify check files are correct (no execution)
+mise exec -- cop cop-checks/main.cop -t .     # Ad-hoc: run all checks
+mise exec -- cop cop-checks/main.cop -t . -c ai  # Ad-hoc: run a specific named command
+mise exec -- cop verify cop-checks/           # Ad-hoc: verify check files
+mise exec -- cop test tests/                  # Run `test` assertions
 ```
 
 **There is NO `-p` flag in this model.** `main.cop` builds the codebase itself by calling
