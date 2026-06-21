@@ -74,6 +74,8 @@ pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
         },
         move |cqe| {
             let _path = path;
+            // SAFETY: `fd` is the non-negative descriptor returned by a
+            // successful openat CQE and ownership is transferred exactly once.
             cqe_to_result(cqe).map(|fd| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
         },
     )
@@ -168,6 +170,8 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
         move |cqe| {
             let _path = path;
             cqe_to_result(cqe)?;
+            // SAFETY: a successful statx CQE means the kernel initialized the
+            // `statx` buffer supplied in the SQE before completion.
             let statx = unsafe { statx.assume_init() };
             Ok(raw_metadata_from_statx(&statx))
         },
@@ -214,7 +218,11 @@ pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
 
     // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so run it inline rather than on the
     // blocking pool.
+    // SAFETY: `fd` is a valid descriptor for the duration of the fcntl call;
+    // F_DUPFD_CLOEXEC does not access user pointers.
     let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: `duplicated` is a fresh descriptor returned by successful fcntl
+    // and ownership is transferred to `OwnedFd` exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
