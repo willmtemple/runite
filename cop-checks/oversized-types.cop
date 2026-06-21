@@ -1,0 +1,9 @@
+# A type (or module-level function group) that accumulates too many members is
+# usually doing too much and is hard to review. Flag the worst offenders so they
+# get split. The budget is intentionally generous to keep false positives low;
+# tighten it as the codebase is refactored.
+
+predicate hasTooManyMembers(Type) => Type.Methods.count() > 90
+
+let oversized-types-violations = codebase.Types:hasTooManyMembers
+    :toWarning('{item.Name} exposes {item.Methods.count()} members; consider splitting it')
