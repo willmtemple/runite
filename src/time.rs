@@ -32,7 +32,7 @@ pub struct Elapsed;
 ///
 /// ```
 /// # let _ = || async {
-/// ruin_runtime::time::sleep(std::time::Duration::from_millis(10)).await;
+/// runite::time::sleep(std::time::Duration::from_millis(10)).await;
 /// # };
 /// ```
 pub fn sleep(duration: Duration) -> Sleep {
@@ -54,7 +54,7 @@ pub fn sleep(duration: Duration) -> Sleep {
 ///
 /// ```
 /// # let _ = || async {
-/// let result = ruin_runtime::time::timeout(
+/// let result = runite::time::timeout(
 ///     std::time::Duration::from_millis(5),
 ///     async { 42usize },
 /// )

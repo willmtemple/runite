@@ -7,7 +7,7 @@
 //!     shared code can mint fresh driver/notifier pairs and read the
 //!     monotonic clock,
 //!   * re-exports the generic public scheduler entry points with the marker
-//!     fixed, so callers continue to write `ruin_runtime::queue_task(..)`
+//!     fixed, so callers continue to write `runite::queue_task(..)`
 //!     without turbofish, and
 //!   * exposes the macOS-only `cancel_fd_readiness` helper used by
 //!     `sys/macos/fd.rs` to drop kqueue readiness registrations.

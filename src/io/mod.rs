@@ -36,7 +36,7 @@ mod tests {
             .join("target")
             .join("runtime-io-tests");
         std::fs::create_dir_all(&root).expect("test artifact directory should be created");
-        root.join(format!("ruin-runtime-{label}-{}-{nanos}", process::id()))
+        root.join(format!("runite-{label}-{}-{nanos}", process::id()))
     }
 
     #[test]

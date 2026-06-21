@@ -10,7 +10,7 @@
 //!     knows how to access the per-thread `ThreadState` and how to create new
 //!     driver/notifier pairs, and
 //!   * re-exports the generic public functions with concrete type parameters,
-//!     so users continue to write `ruin_runtime::queue_task(..)` without
+//!     so users continue to write `runite::queue_task(..)` without
 //!     turbofish.
 //!
 //! ## Type erasure

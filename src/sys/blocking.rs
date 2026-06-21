@@ -44,11 +44,11 @@ impl BlockingPool {
         self.sender.try_send(task).map_err(|error| match error {
             mpsc::TrySendError::Full(_) => io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "ruin-runtime blocking worker queue is full",
+                "runite blocking worker queue is full",
             ),
             mpsc::TrySendError::Disconnected(_) => io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "ruin-runtime blocking worker pool has stopped",
+                "runite blocking worker pool has stopped",
             ),
         })
     }
@@ -74,12 +74,11 @@ fn pool() -> io::Result<&'static BlockingPool> {
 }
 
 fn worker_count() -> usize {
-    if let Ok(value) = std::env::var("RUIN_BLOCKING_THREADS") {
-        if let Ok(parsed) = value.parse::<usize>() {
-            if parsed >= 1 {
-                return parsed.min(MAX_WORKERS);
-            }
-        }
+    if let Ok(value) = std::env::var("RUNITE_BLOCKING_THREADS")
+        && let Ok(parsed) = value.parse::<usize>()
+        && parsed >= 1
+    {
+        return parsed.min(MAX_WORKERS);
     }
 
     std::thread::available_parallelism()
@@ -98,7 +97,7 @@ fn create_pool() -> io::Result<BlockingPool> {
     for index in 0..workers {
         let receiver = Arc::clone(&receiver);
         match thread::Builder::new()
-            .name(format!("ruin-runtime-blocking-{index}"))
+            .name(format!("runite-blocking-{index}"))
             .spawn(move || worker_loop(receiver))
         {
             Ok(_) => spawned += 1,
@@ -120,7 +119,7 @@ fn worker_loop(receiver: Arc<Mutex<mpsc::Receiver<BlockingTask>>>) {
         let task = {
             let guard = receiver
                 .lock()
-                .expect("ruin-runtime blocking queue mutex poisoned");
+                .expect("runite blocking queue mutex poisoned");
             guard.recv()
         };
         match task {

@@ -1,7 +1,8 @@
-//! Runtime, driver, async I/O, and channel primitives for RUIN.
+//! Runtime, driver, async I/O, and channel primitives for runite.
 //!
-//! The crate is centered around a single-threaded event loop with explicit worker threads,
-//! JavaScript-style microtask/macrotask scheduling and platform-specific async I/O backends.
+//! `runite` is a platform runtime substrate built around a single-threaded event loop with
+//! explicit worker threads, JavaScript-style microtask/macrotask scheduling, and
+//! platform-specific async I/O backends (io_uring on Linux, kqueue on macOS).
 //!
 //! Most users will start with:
 //!
@@ -11,32 +12,27 @@
 //!
 //! # Platform support
 //!
-//! `ruin-runtime` currently targets:
+//! `runite` currently targets:
 //! - Linux `x86_64`
 //! - macOS `aarch64`
-//!
-//! RUIN runtime foundations.
-//!
-//! This crate provides a platform runtime substrate with a single-threaded runtime loop and
-//! worker-thread task forwarding.
 
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 )))]
-compile_error!("ruin-runtime currently supports Linux x86_64 and macOS aarch64.");
+compile_error!("runite currently supports Linux x86_64 and macOS aarch64.");
 
 extern crate alloc;
 
 pub(crate) mod trace_targets {
-    pub const DRIVER: &str = "ruin_runtime::driver";
-    pub const RUNTIME: &str = "ruin_runtime::runtime";
-    pub const SCHEDULER: &str = "ruin_runtime::scheduler";
+    pub const DRIVER: &str = "runite::driver";
+    pub const RUNTIME: &str = "runite::runtime";
+    pub const SCHEDULER: &str = "runite::scheduler";
 
     #[cfg(debug_assertions)]
-    pub const TIMER: &str = "ruin_runtime::timer";
+    pub const TIMER: &str = "runite::timer";
     #[cfg(debug_assertions)]
-    pub const ASYNC: &str = "ruin_runtime::async";
+    pub const ASYNC: &str = "runite::async";
 }
 
 pub mod channel;

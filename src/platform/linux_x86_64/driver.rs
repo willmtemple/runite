@@ -1,4 +1,4 @@
-//! RUIN Runtime Driver for Linux x86_64.
+//! runite driver for Linux x86_64.
 //!
 //!
 

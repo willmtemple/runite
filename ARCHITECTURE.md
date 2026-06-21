@@ -2,7 +2,7 @@
 
 # Overview
 
-`ruin-runtime` is a single-threaded async runtime with explicit worker-thread support,
+`runite` is a single-threaded async runtime with explicit worker-thread support,
 JavaScript-style microtask/macrotask scheduling, and platform-specific I/O drivers. It is meant for
 UI front-ends, embedded event loops, and fine-grained reactive systems that need deterministic flush
 points between input and rendering. It is deliberately not a general-purpose high-throughput server
@@ -13,27 +13,23 @@ work-stealing, `Send`-future ergonomics, and maximum I/O throughput.
 
 - A runtime thread owns one `ThreadState`, one scheduler, one timer heap, and one driver.
 - `spawn_worker` creates a new OS thread, installs a separate runtime state on it, queues the
-  initial macrotask, and runs that worker loop (`lib/runtime/src/platform/linux_x86_64/runtime.rs:334`,
-  `lib/runtime/src/platform/linux_x86_64/runtime.rs:364`).
+  initial macrotask, and runs that worker loop (`src/platform/linux_x86_64/runtime.rs`).
 - Linux `x86_64`: each runtime thread owns its own `io_uring` ring and `ThreadNotifier`; the
   notifier wakes the ring with `IORING_OP_MSG_RING`
-  (`lib/runtime/src/platform/linux_x86_64/driver.rs:91`,
-  `lib/runtime/src/platform/linux_x86_64/driver.rs:58`).
+  (`src/platform/linux_x86_64/driver.rs`).
 - macOS `aarch64`: each runtime thread owns a `kqueue` plus a nonblocking wake pipe
-  (`lib/runtime/src/platform/macos_aarch64/driver.rs:92`,
-  `lib/runtime/src/platform/macos_aarch64/driver.rs:111`).
+  (`src/platform/macos_aarch64/driver.rs`).
 - `ThreadHandle::queue_task` is the cross-thread boundary. It accepts only `Send` closures, pushes
   into the target thread's remote macrotask queue, and wakes the target driver
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:593`,
-  `lib/runtime/src/platform/linux_x86_64/runtime.rs:764`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 
 What `!Send` means here:
 
 - Most reactive values are intended to stay on their originating runtime thread.
 - Timer and interval handles carry `Rc<()>` plus a raw owner pointer, so they are `!Send`
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:45`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - `JoinHandle<T>` stores `Rc<JoinState<T>>`, so it is `!Send`
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:73`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - `current_thread()` returns thread-local runtime state; callers must not move that state or values
   tied to it across threads.
 - Cross-thread work must be expressed as `FnOnce() + Send + 'static` and submitted through
@@ -42,11 +38,11 @@ What `!Send` means here:
 Lazy initialization contract:
 
 - Today, `current_thread()` lazily creates a driver, notifier, shared state, and `ThreadState` when
-  called on a thread with no installed runtime (`lib/runtime/src/platform/linux_x86_64/runtime.rs:1060`).
+  called on a thread with no installed runtime (`src/platform/linux_x86_64/runtime.rs`).
 - Any helper that calls `current_thread()` from a non-runtime thread can therefore instantiate a
   full runtime state and, on Linux, an `io_uring` ring on that thread.
 - `current_thread_handle()` also initializes state because it calls `current_thread().handle()`
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:91`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - **[future]** Runtime state will be held as `Rc<ThreadState>` and accessed through scoped accessors
   such as `with_current_thread(|state| ...)`. The runtime will not auto-initialize from arbitrary
   helper calls, and `current_thread_handle` will return `Option<ThreadHandle>` when no runtime is
@@ -57,11 +53,10 @@ Lazy initialization contract:
 Microtasks:
 
 - Are strictly thread-local; remote threads cannot enqueue them
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:742`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Run to completion between macrotasks.
 - Drive future continuations: `FutureTask::schedule` calls `queue_microtask`, and the waker vtable
-  reschedules the same local task (`lib/runtime/src/platform/linux_x86_64/runtime.rs:950`,
-  `lib/runtime/src/platform/linux_x86_64/runtime.rs:1038`).
+  reschedules the same local task (`src/platform/linux_x86_64/runtime.rs`).
 - Match JavaScript Promise microtasks.
 
 Macrotasks:
@@ -69,18 +64,18 @@ Macrotasks:
 - May be local (`queue_task`) or remote (`ThreadHandle::queue_task`).
 - Carry I/O completion callbacks, timer expirations, worker-exit callbacks, and host/event callbacks.
 - Remote macrotasks are swapped into the local macrotask queue during `drain_remote_tasks`
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:1145`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Expired timers dispatch by pushing timer callbacks into the macrotask queue
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:1105`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Worker exits enqueue their `on_exit` callback as a macrotask
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:1164`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 
 ## Backpressure
 
 Local microtask and macrotask queues are intentionally unbounded: they are owned by one runtime
 thread, and runaway local production is a scheduler bug rather than a cross-thread backpressure
 problem. The cross-thread remote macrotask queue is bounded to 65,536 entries by default, tunable
-with `RUIN_REMOTE_QUEUE_CAPACITY` (parsed as `usize`, minimum 1, capped at a sane maximum). When it
+with `RUNITE_REMOTE_QUEUE_CAPACITY` (parsed as `usize`, minimum 1, capped at a sane maximum). When it
 is full, `ThreadHandle::queue_task` returns `Err(QueueError::Full)` immediately. The runtime does
 not block the producer and does not silently drop the task; the caller must choose whether to retry,
 drop, or fail. The first overflow per runtime thread emits a scheduler warning for observability
@@ -97,9 +92,8 @@ Per-turn ordering in `run()`:
 7. Repeat.
 
 This is implemented by `drain_all()`, the microtask loop, and the single `pop_macrotask()` in
-`run()` (`lib/runtime/src/platform/linux_x86_64/runtime.rs:397`,
-`lib/runtime/src/platform/linux_x86_64/runtime.rs:582`). The same starvation threshold is shared in
-`runtime_shared` (`lib/runtime/src/platform/runtime_shared.rs:16`).
+`run()` (`src/platform/linux_x86_64/runtime.rs`). The same starvation threshold is shared in
+`runtime_shared` (`src/platform/runtime_shared/mod.rs`).
 
 Why this shape exists:
 
@@ -131,23 +125,23 @@ thread_handle.queue_task(|| handle_remote_or_io_event());
 
 - Is the canonical runtime loop.
 - Runs until no ready tasks, timers, live child workers, or pending async operations remain
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:376`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Blocks in `driver.wait()` when timers, children, or async operations still exist but no work is
-  ready (`lib/runtime/src/platform/linux_x86_64/runtime.rs:438`).
+  ready (`src/platform/linux_x86_64/runtime.rs`).
 
 `run_until_stalled()`:
 
 - Drains all currently ready work.
 - Does not block for future driver events.
 - Returns when no immediately runnable work remains, and clears `closing`
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:489`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Intended for tests and host-loop integrations that own the outer wait.
 
 `run_ready_tasks()`:
 
 - Drains remote tasks, completed workers, microtasks, and local macrotasks.
 - Does not poll the driver and therefore does not re-enter timers or I/O readiness
-  (`lib/runtime/src/platform/linux_x86_64/runtime.rs:534`).
+  (`src/platform/linux_x86_64/runtime.rs`).
 - Intended for host callbacks that need to flush application work without re-entering timer or I/O
   callbacks.
 
@@ -159,24 +153,23 @@ loop exits:
 1. Drain everything currently observable.
 2. If ready work exists, keep running.
 3. Set `closing = true` with a CAS via `try_begin_shutdown`
-   (`lib/runtime/src/platform/linux_x86_64/runtime.rs:426`,
-   `lib/runtime/src/platform/linux_x86_64/runtime.rs:734`).
+   (`src/platform/linux_x86_64/runtime.rs`).
 4. Drain again.
 5. If any ready work appeared, clear `closing` and continue
-   (`lib/runtime/src/platform/linux_x86_64/runtime.rs:431`).
+   (`src/platform/linux_x86_64/runtime.rs`).
 6. If timers, child workers, or async operations remain, clear `closing`, wait on the driver, and
-   continue (`lib/runtime/src/platform/linux_x86_64/runtime.rs:438`).
+   continue (`src/platform/linux_x86_64/runtime.rs`).
 7. Otherwise take the remote-queue lock.
 8. While holding that lock, if the remote queue is still empty, set `closed = true`
-   (`lib/runtime/src/platform/linux_x86_64/runtime.rs:453`).
+   (`src/platform/linux_x86_64/runtime.rs`).
 9. `ThreadShared::enqueue_macro` checks `closed` under the same lock before accepting a task, so the
    exit path and the remote enqueue path are mutually ordered
-   (`lib/runtime/src/platform/linux_x86_64/runtime.rs:764`).
+   (`src/platform/linux_x86_64/runtime.rs`).
 10. If the queue was not empty, clear `closing` and process the newly arrived work.
 11. If the thread is a worker, mark its completion finished and notify the parent
-    (`lib/runtime/src/platform/linux_x86_64/runtime.rs:473`).
+    (`src/platform/linux_x86_64/runtime.rs`).
 12. Notify the local driver, tear down TLS state, and return
-    (`lib/runtime/src/platform/linux_x86_64/runtime.rs:478`).
+    (`src/platform/linux_x86_64/runtime.rs`).
 
 # Cancellation semantics
 
@@ -185,14 +178,14 @@ Drop is the only cancellation primitive today.
 Dropping a `CompletionFuture`:
 
 - Sets `interested = false` so later completions do not store a result or queue a wake
-  (`lib/runtime/src/op/completion.rs:135`, `lib/runtime/src/op/completion.rs:97`).
+  (`src/op/completion.rs`).
 - Clears any stored result and waker.
 - If the operation is unfinished and has a cancel callback, runs that callback.
 - Linux cancel callbacks submit `IORING_OP_ASYNC_CANCEL` through the driver
-  (`lib/runtime/src/platform/linux_x86_64/driver.rs:285`,
-  `lib/runtime/src/sys/linux/fs.rs:483`, `lib/runtime/src/sys/linux/net.rs:783`).
+  (`src/platform/linux_x86_64/driver.rs`,
+  `src/sys/linux/fs.rs`, `src/sys/linux/net.rs`).
 - If no cancel callback exists because submission failed before registration, the future decrements
-  the pending operation count directly (`lib/runtime/src/op/completion.rs:154`).
+  the pending operation count directly (`src/op/completion.rs`).
 
 What Drop does not mean:
 
@@ -244,10 +237,10 @@ Current:
 
 - Linux and macOS have parallel `Driver` types with similar surfaces but different internals.
 - Linux uses `io_uring` for timers, wake notifications, fs ops, network ops, fd readiness, and close
-  where supported (`lib/runtime/src/platform/linux_x86_64/driver.rs:156`).
+  where supported (`src/platform/linux_x86_64/driver.rs`).
 - macOS uses `kqueue` for the runtime wait/wake path, timers, and fd readiness; filesystem work is
-  offloaded to a blocking pool (`lib/runtime/src/platform/macos_aarch64/driver.rs:179`,
-  `lib/runtime/src/sys/macos/fs.rs:26`).
+  offloaded to a blocking pool (`src/platform/macos_aarch64/driver.rs`,
+  `src/sys/macos/fs.rs`).
 - Both platform `runtime.rs` files duplicate scheduler, timer, JoinHandle, FutureTask, ThreadShared,
   and waker-vtable logic.
 
@@ -274,7 +267,7 @@ Per-platform `runtime.rs` files will become thin re-exports that pick the backen
 ## Feature probing
 
 On Linux x86_64, `Driver::create_driver` initializes an `io_uring` ring and records the
-process-wide `IORING_REGISTER_PROBE` result from `lib/runtime/src/platform/linux_x86_64/uring.rs`.
+process-wide `IORING_REGISTER_PROBE` result from `src/platform/linux_x86_64/uring.rs`.
 The supported-op bitmap is cached behind a `OnceLock` because kernel opcode support cannot change
 under a running process, and probing once per runtime thread would waste syscalls.
 
@@ -307,41 +300,40 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 Notes:
 
 - Linux fs `read_dir` and `try_clone` are explicitly offloaded instead of submitted to io_uring
-  (`lib/runtime/src/sys/linux/fs.rs:37`).
+  (`src/sys/linux/fs.rs`).
 - Linux network operations use io_uring first but fall back to offload for unsupported opcodes such
   as socket, connect, bind, listen, accept, send, recv, datagram, shutdown, and close
-  (`lib/runtime/src/sys/linux/net.rs:40`).
+  (`src/sys/linux/net.rs`).
 - macOS has no io_uring equivalent. Its filesystem backend is entirely blocking-pool-based
-  (`lib/runtime/src/sys/macos/fs.rs:31`).
+  (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics
-  differ substantially from Linux io_uring (`lib/runtime/src/sys/macos/net.rs:29`).
+  differ substantially from Linux io_uring (`src/sys/macos/net.rs`).
 
 # Cross-thread completion path
 
 Current path:
 
 1. A backend creates a `CompletionFuture`/`CompletionHandle` pair for the current thread
-   (`lib/runtime/src/op/completion.rs:60`).
+   (`src/op/completion.rs`).
 2. The owner is captured as a `ThreadHandle`.
 3. On completion, `CompletionHandle::finish` stores the result if `interested` is still true and
-   calls `CompletionState::queue_wake` (`lib/runtime/src/op/completion.rs:92`).
+   calls `CompletionState::queue_wake` (`src/op/completion.rs`).
 4. `queue_wake` queues a macrotask on the owner with `ThreadHandle::queue_task`
-   (`lib/runtime/src/op/completion.rs:23`).
+   (`src/op/completion.rs`).
 5. `ThreadHandle::queue_task` locks the target remote queue, pushes the task, and calls
-   `ThreadShared::notify` (`lib/runtime/src/platform/linux_x86_64/runtime.rs:593`,
-   `lib/runtime/src/platform/linux_x86_64/runtime.rs:764`).
+   `ThreadShared::notify` (`src/platform/linux_x86_64/runtime.rs`).
 6. On Linux, the notifier submits `IORING_OP_MSG_RING` to the target ring
-   (`lib/runtime/src/platform/linux_x86_64/driver.rs:58`,
-   `lib/runtime/src/platform/linux_x86_64/uring.rs:304`).
+   (`src/platform/linux_x86_64/driver.rs`,
+   `src/platform/linux_x86_64/uring.rs`).
 7. The target driver receives the wake CQE, records a pending wake, and the scheduler drains remote
-   tasks (`lib/runtime/src/platform/linux_x86_64/driver.rs:327`,
-   `lib/runtime/src/platform/linux_x86_64/runtime.rs:1145`).
+   tasks (`src/platform/linux_x86_64/driver.rs`,
+   `src/platform/linux_x86_64/runtime.rs`).
 
 This adds a syscall per wake on Linux. That is acceptable for cross-thread completions, where there
 is no cheaper way to wake the owner reliably.
 
 Same-thread completions short-circuit this path: `CompletionState::queue_wake` calls
-`ThreadHandle::is_current` (`lib/runtime/src/platform/runtime_shared/handles.rs`) — which
+`ThreadHandle::is_current` (`src/platform/runtime_shared/handles.rs`) — which
 `Arc::ptr_eq`s the handle's `ThreadShared` against the current thread's installed state — and on a
 match enqueues a microtask via `queue_microtask` directly. `is_current` returns `false` when the
 caller has no runtime state installed (e.g. a blocking-pool worker), so non-runtime threads safely
@@ -353,26 +345,23 @@ fall through to the macrotask path. Only true cross-thread completions use `queu
 Current, precarious invariants:
 
 - Runtime TLS uses `thread_local!(static CURRENT_THREAD: ...)` via the scoped
-  accessor `with_current_thread` (`lib/runtime/src/platform/runtime_shared/state.rs`).
+  accessor `with_current_thread` (`src/platform/runtime_shared/state.rs`).
 - Accessors are scoped: `with_current_thread(|state| ...)` and
   `try_with_installed_thread`. No `'static` references to `ThreadState` escape
   the runtime crate; downstream code never holds a borrow across an `await`.
-- The runtime crate itself is **stable-Rust clean** — no `#![feature(...)]`.
-  The mesh allocator was extracted into the standalone `ruin-mesh-alloc` crate
-  (`lib/mesh_alloc/`), which still needs `feature(thread_local)` for its
-  per-thread heap. That is the only nightly surface left in the workspace's
-  runtime-adjacent code.
+- The runtime crate itself is **stable-Rust clean** — no `#![feature(...)]`. `runite` does
+  not depend on any nightly-only crate; it builds on stable Rust.
 - `TimeoutHandle`/`IntervalHandle` carry a process-wide generation token
   (`NEXT_GENERATION: AtomicU64`) so stale handles from a destroyed
   `ThreadState` can never false-match a freshly-installed one
-  (`lib/runtime/src/platform/runtime_shared/handles.rs`).
+  (`src/platform/runtime_shared/handles.rs`).
 - `IoUring` has `unsafe impl Send` with a precise safety comment
-  (`lib/runtime/src/platform/linux_x86_64/uring.rs`): the ring is moved
+  (`src/platform/linux_x86_64/uring.rs`): the ring is moved
   into `Driver` during construction and remains pinned to that runtime thread;
   the submitter TLS pointer is per-thread.
 - io_uring SQ tail and CQ head publication use real `atomic::fence(Release)`
   and `atomic::fence(Acquire)` around the kernel-visible boundaries
-  (`lib/runtime/src/platform/linux_x86_64/uring.rs`).
+  (`src/platform/linux_x86_64/uring.rs`).
 
 # What this runtime is NOT (and the reasons)
 
@@ -389,10 +378,8 @@ Current, precarious invariants:
 - Not `Send`-future friendly.
   - Futures queued with `queue_future` only need `Future + 'static`, not `Send`.
   - Handles such as `JoinHandle`, `TimeoutHandle`, and `IntervalHandle` are `!Send` by design.
-- Nightly-toolchain-free in `ruin-runtime` itself.
+- Nightly-toolchain-free in `runite` itself.
   - The runtime crate compiles on stable Rust with no `#![feature(...)]`.
-  - The sibling `ruin-mesh-alloc` crate still needs `feature(thread_local)`
-    for its per-thread heap; the runtime does not re-export it.
 
 # Glossary
 

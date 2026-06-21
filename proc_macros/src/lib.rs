@@ -23,7 +23,7 @@ fn expand_entry(attr: TokenStream, item: TokenStream, kind: EntryKind) -> TokenS
     if !proc_macro2::TokenStream::from(attr).is_empty() {
         return Error::new(
             Span::call_site(),
-            "ruin runtime entry attributes take no arguments",
+            "runite entry attributes take no arguments",
         )
         .to_compile_error()
         .into();
@@ -42,49 +42,49 @@ fn validate_entry(function: &ItemFn, kind: EntryKind) -> syn::Result<()> {
     if signature.ident != "main" {
         return Err(Error::new_spanned(
             &signature.ident,
-            "ruin runtime entry attribute must be attached to a function named `main`",
+            "runite entry attribute must be attached to a function named `main`",
         ));
     }
 
     if !signature.inputs.is_empty() {
         return Err(Error::new_spanned(
             &signature.inputs,
-            "ruin runtime entry functions cannot take parameters",
+            "runite entry functions cannot take parameters",
         ));
     }
 
     if !signature.generics.params.is_empty() || signature.generics.where_clause.is_some() {
         return Err(Error::new_spanned(
             &signature.generics,
-            "ruin runtime entry functions cannot be generic",
+            "runite entry functions cannot be generic",
         ));
     }
 
     if signature.constness.is_some() {
         return Err(Error::new_spanned(
             signature.fn_token,
-            "ruin runtime entry functions cannot be const",
+            "runite entry functions cannot be const",
         ));
     }
 
     if signature.unsafety.is_some() {
         return Err(Error::new_spanned(
             signature.fn_token,
-            "ruin runtime entry functions cannot be unsafe",
+            "runite entry functions cannot be unsafe",
         ));
     }
 
     if signature.abi.is_some() {
         return Err(Error::new_spanned(
             &signature.abi,
-            "ruin runtime entry functions cannot declare an ABI",
+            "runite entry functions cannot declare an ABI",
         ));
     }
 
     if signature.variadic.is_some() {
         return Err(Error::new_spanned(
             &signature.variadic,
-            "ruin runtime entry functions cannot be variadic",
+            "runite entry functions cannot be variadic",
         ));
     }
 

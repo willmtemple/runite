@@ -26,7 +26,7 @@ fn spawn_demo_server() -> std::io::Result<(std::net::SocketAddr, thread::JoinHan
                 "content-length: 24\r\n",
                 "connection: close\r\n",
                 "\r\n",
-                "hello from ruin runtime!"
+                "hello from runite!"
             );
             stream
                 .write_all(response.as_bytes())

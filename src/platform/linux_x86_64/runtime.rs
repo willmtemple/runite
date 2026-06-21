@@ -7,7 +7,7 @@
 //!     shared code can mint fresh driver/notifier pairs and read the
 //!     monotonic clock, and
 //!   * re-exports the generic public scheduler entry points with the marker
-//!     fixed, so callers continue to write `ruin_runtime::queue_task(..)`
+//!     fixed, so callers continue to write `runite::queue_task(..)`
 //!     without turbofish.
 
 use std::future::Future;
