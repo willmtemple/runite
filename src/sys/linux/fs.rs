@@ -31,11 +31,16 @@ const FILE_CURSOR: u64 = u64::MAX;
 pub enum ExecutionPath {
     IoUring,
     Offload,
+    Inline,
 }
 
 pub fn execution_path(op: &FsOp) -> ExecutionPath {
     match op {
-        FsOp::ReadDir { .. } | FsOp::Duplicate { .. } => ExecutionPath::Offload,
+        // `getdents`/`std::fs::read_dir` can block on disk and has no io_uring
+        // opcode, so it streams on the blocking pool.
+        FsOp::ReadDir { .. } => ExecutionPath::Offload,
+        // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so it runs inline.
+        FsOp::Duplicate { .. } => ExecutionPath::Inline,
         FsOp::Open { .. }
         | FsOp::Read { .. }
         | FsOp::Write { .. }
@@ -207,11 +212,10 @@ pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
         unreachable!("try_clone backend called with non-duplicate op");
     };
 
-    offload(move || {
-        let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
-        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    })
-    .await
+    // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so run it inline rather than on the
+    // blocking pool.
+    let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
 pub async fn create_dir(op: FsOp) -> io::Result<()> {
@@ -510,19 +514,6 @@ where
             with_current_driver(|driver| driver.cancel_operation_with_guard(token, Some(guard)));
     });
 
-    future.await
-}
-
-async fn offload<T: Send + 'static>(
-    task: impl FnOnce() -> io::Result<T> + Send + 'static,
-) -> io::Result<T> {
-    let (future, handle) = completion_for_current_thread::<io::Result<T>>();
-    let handle_for_task = handle.clone();
-    if let Err(error) =
-        crate::sys::blocking::spawn_blocking(move || handle_for_task.complete(task()))
-    {
-        handle.complete(Err(error));
-    }
     future.await
 }
 

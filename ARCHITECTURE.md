@@ -289,21 +289,26 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 | metadata | `IORING_OP_STATX` | blocking pool (`metadata`/`fstat`) |
 | sync | `IORING_OP_FSYNC` | blocking pool (`fsync`/`F_FULLFSYNC`) |
 | set_len | `IORING_OP_FTRUNCATE` | blocking pool (`ftruncate`) |
-| try_clone | offloaded with per-call thread today | blocking pool |
-| read_dir | offloaded with per-call thread today | blocking pool producer |
-| close | `IORING_OP_CLOSE` | blocking pool / synchronous close helper |
-| network ops | `io_uring` first; some ops fall back to offload on unsupported kernels | `kqueue` readiness plus synchronous nonblocking socket calls |
+| try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool |
+| read_dir | offloaded streaming producer (`getdents` can block, no io_uring opcode) | blocking pool producer |
+| close | `IORING_OP_CLOSE`, inline `close(2)` fallback | blocking pool / synchronous close helper |
+| network ops | `io_uring` first; non-blocking ops fall back inline, data-path ops fall back to offload on unsupported kernels | `kqueue` readiness plus synchronous nonblocking socket calls |
 | Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path |
 | stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path |
 | wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot |
 
 Notes:
 
-- Linux fs `read_dir` and `try_clone` are explicitly offloaded instead of submitted to io_uring
-  (`src/sys/linux/fs.rs`).
-- Linux network operations use io_uring first but fall back to offload for unsupported opcodes such
-  as socket, connect, bind, listen, accept, send, recv, datagram, shutdown, and close
-  (`src/sys/linux/net.rs`).
+- Linux fs `read_dir` streams from the blocking pool (`getdents` can block on disk and has no
+  io_uring opcode); `try_clone` runs the non-blocking `fcntl(F_DUPFD_CLOEXEC)` inline on the
+  event-loop thread rather than offloading (`src/sys/linux/fs.rs`).
+- Linux network operations use io_uring first. When an opcode is unsupported on the running
+  kernel, the *non-blocking* control operations (socket, bind, listen, shutdown, close, dup) run
+  inline on the event loop instead of bouncing to the blocking pool, since they never block. The
+  *data-path* operations that can block (connect, accept, send, recv, datagram send/recv) still
+  fall back to the blocking pool; converting these to a Linux epoll/readiness path (mirroring the
+  macOS and Unix-domain-socket model) is tracked as a follow-up and requires CI on an
+  io_uring-limited kernel to validate (`src/sys/linux/net.rs`).
 - macOS has no io_uring equivalent. Its filesystem backend is entirely blocking-pool-based
   (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics
