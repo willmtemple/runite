@@ -40,8 +40,12 @@ pub struct Stdin {
 
 /// Opens an async stdin reader.
 pub fn stdin() -> io::Result<Stdin> {
+    // SAFETY: `STDIN_FILENO` is passed by value; on success `fcntl` returns a
+    // new close-on-exec descriptor owned by the caller.
     let raw = cvt(unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 0) })?;
     Ok(Stdin {
+        // SAFETY: `raw` was just returned by `F_DUPFD_CLOEXEC`, so it is a
+        // valid, uniquely owned file descriptor to transfer into `OwnedFd`.
         fd: unsafe { OwnedFd::from_raw_fd(raw) },
         buffer: Vec::new(),
         pending_read: None,
@@ -246,6 +250,9 @@ where
 
 fn blocking_read(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
     loop {
+        // SAFETY: `fd` is expected to remain open for the duration of the call,
+        // and `buffer` points to `buffer.len()` bytes of writable memory owned
+        // exclusively through `&mut [u8]`.
         let read =
             unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), buffer.len()) };
         if read >= 0 {

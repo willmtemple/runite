@@ -398,6 +398,10 @@ impl IoUring {
         CURRENT_SUBMITTER.with(|submitter| {
             let ptr = submitter.get();
             if !ptr.is_null() {
+                // SAFETY: `bind_current_thread` stores a pointer to an
+                // `IoUring` owned by the installed driver for this thread, and
+                // `unbind_current_thread` clears it before the driver drops.
+                // The reference is used only for the duration of this call.
                 let ring = unsafe { &*ptr };
                 return f(ring);
             }
@@ -548,6 +552,10 @@ impl IoUring {
 
         while head != tail {
             let index = (head & mask) as usize;
+            // SAFETY: `cqes` points into the kernel-created CQE array mapping.
+            // The ring mask comes from the same mapping and confines `index` to
+            // the CQ ring entry range; `head != tail` means this slot has been
+            // published by the kernel and can be copied out with a volatile read.
             let cqe = unsafe { ptr::read_volatile(self.cqes.add(index)) };
             f(cqe);
             head = head.wrapping_add(1);
@@ -586,9 +594,16 @@ impl IoUring {
         let tail = load_u32(self.sq_tail);
         let mask = load_u32(self.sq_ring_mask);
         let index = (tail & mask) as usize;
+        // SAFETY: `sqes_ptr` points to the SQE array mapping sized for
+        // `sq_entries`; the kernel-provided ring mask confines `index` to that
+        // array, and the queue-full check above guarantees this tail slot is not
+        // concurrently owned by the kernel.
         let sqe = unsafe { &mut *self.sqes_ptr.add(index) };
         *sqe = IoUringSqe::default();
         fill(sqe);
+        // SAFETY: `sq_array` points to the submission array mapping and `index`
+        // is in bounds for the same ring-mask reason as the SQE pointer above.
+        // A volatile write is required because the kernel observes this memory.
         unsafe {
             ptr::write_volatile(self.sq_array.add(index), index as u32);
         }
@@ -610,6 +625,9 @@ impl IoUring {
     }
 
     fn enter(&self, to_submit: u32, min_complete: u32, flags: u32) -> io::Result<u32> {
+        // SAFETY: `ring_fd` is an open io_uring descriptor owned by `self`.
+        // The final sigset pointer is null with size 0, so the kernel reads no
+        // user memory beyond the by-value syscall arguments.
         cvt_long(unsafe {
             libc::syscall(
                 libc::SYS_io_uring_enter,
@@ -627,6 +645,11 @@ impl IoUring {
 
 impl Drop for IoUring {
     fn drop(&mut self) {
+        // SAFETY: each pointer/length pair was returned by `mmap_ring` during
+        // construction and is unmapped exactly once here. In single-mmap mode
+        // SQ and CQ ring pointers alias the same mapping, so only the maximum
+        // shared size is unmapped. `ring_fd` is the owned descriptor for these
+        // mappings and is closed after unmapping.
         unsafe {
             libc::munmap(self.sqes_ptr.cast(), self.sqes_size);
             if self.single_mmap {
@@ -659,10 +682,16 @@ impl Drop for IoUring {
 unsafe impl Send for IoUring {}
 
 fn offset_ptr<T>(base: *mut u8, offset: u32) -> *mut T {
+    // SAFETY: callers pass offsets provided by `io_uring_setup` for fields
+    // inside the mmap region referenced by `base`; the target kernel ABI gives
+    // these fields the alignment of `T`.
     unsafe { base.add(offset as usize).cast::<T>() }
 }
 
 fn mmap_ring(length: usize, fd: RawFd, offset: libc::off_t) -> io::Result<*mut u8> {
+    // SAFETY: `fd` is an open io_uring descriptor and `offset` is one of the
+    // io_uring mmap offsets. A null address lets the kernel choose an aligned
+    // mapping, and `length` is computed from the kernel-reported ring sizes.
     let ptr = unsafe {
         libc::mmap(
             ptr::null_mut(),
@@ -681,6 +710,9 @@ fn mmap_ring(length: usize, fd: RawFd, offset: libc::off_t) -> io::Result<*mut u
 }
 
 fn load_u32(ptr: *const u32) -> u32 {
+    // SAFETY: `ptr` points at a 32-bit ring control field within a live
+    // io_uring mmap. The kernel may update it asynchronously, so it must be
+    // read with volatile semantics.
     let value = unsafe { ptr::read_volatile(ptr) };
     // Pair with the kernel's release store of the same head/tail/mask cell.
     // `compiler_fence` would only restrain reordering by the compiler; we need
@@ -694,6 +726,9 @@ fn store_u32(ptr: *mut u32, value: u32) {
     // Publish prior shared-memory writes to the kernel before advancing the
     // head/tail value it observes.  See note in `load_u32`.
     fence(Ordering::Release);
+    // SAFETY: `ptr` points at a writable 32-bit ring control field within a
+    // live io_uring mmap owned by this `IoUring`. The kernel observes this
+    // shared memory, so the store must be volatile.
     unsafe {
         ptr::write_volatile(ptr, value);
     }

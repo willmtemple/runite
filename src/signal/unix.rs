@@ -327,6 +327,9 @@ extern "C" fn handle_signal(signum: libc::c_int) {
         let fd = WAKE_FD.load(Ordering::Relaxed);
         if fd >= 0 {
             #[cfg(target_os = "linux")]
+            // SAFETY: `fd` is the process-wide nonblocking eventfd installed in
+            // `WAKE_FD`; `value` is initialized storage for the 8 bytes eventfd
+            // requires. `write` is async-signal-safe and the result is ignored.
             unsafe {
                 let value: u64 = 1;
                 let _ = libc::write(
@@ -337,6 +340,9 @@ extern "C" fn handle_signal(signum: libc::c_int) {
             }
 
             #[cfg(target_os = "macos")]
+            // SAFETY: `fd` is the process-wide nonblocking pipe write end
+            // installed in `WAKE_FD`; `byte` is initialized storage for the
+            // single byte written. `write` is async-signal-safe.
             unsafe {
                 let byte: u8 = 1;
                 let _ = libc::write(fd, (&byte as *const u8).cast::<libc::c_void>(), 1);
@@ -358,6 +364,9 @@ fn signal_index(signum: libc::c_int) -> Option<usize> {
 }
 
 fn install_sigaction(signum: libc::c_int) -> io::Result<()> {
+    // SAFETY: `oldact` and `action` are valid `sigaction` objects for the
+    // kernel/libc calls. `signum` comes from `SignalKind::signum`, and the
+    // installed handler has the C ABI and does only async-signal-safe work.
     unsafe {
         let mut oldact = MaybeUninit::<libc::sigaction>::uninit();
         if libc::sigaction(signum, ptr::null(), oldact.as_mut_ptr()) == -1 {
@@ -383,6 +392,8 @@ fn install_sigaction(signum: libc::c_int) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn create_wake_fd() -> io::Result<RawFd> {
+    // SAFETY: `eventfd` takes only by-value arguments and returns a new owned
+    // descriptor on success.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if fd == -1 {
         return Err(io::Error::last_os_error());
@@ -394,6 +405,8 @@ fn create_wake_fd() -> io::Result<RawFd> {
 #[cfg(target_os = "macos")]
 fn create_wake_fd() -> io::Result<RawFd> {
     let mut fds = [-1; 2];
+    // SAFETY: `fds.as_mut_ptr()` points to two writable `c_int` slots that
+    // `pipe` initializes with owned descriptors on success.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -414,10 +427,14 @@ fn create_wake_fd() -> io::Result<RawFd> {
 
 #[cfg(target_os = "macos")]
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is an open descriptor owned by the wake pipe setup path;
+    // `F_GETFD` reads descriptor flags and uses no pointer arguments.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags == -1 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: `fd` remains open and `flags | FD_CLOEXEC` is passed by value to
+    // update its descriptor flags.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -426,10 +443,14 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is an open descriptor owned by the wake pipe setup path;
+    // `F_GETFL` reads status flags and uses no pointer arguments.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags == -1 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: `fd` remains open and `flags | O_NONBLOCK` is passed by value to
+    // update its file status flags.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -438,6 +459,8 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 
 fn close_fd(fd: RawFd) {
     if fd >= 0 {
+        // SAFETY: callers pass descriptors owned by the signal wake setup path;
+        // the `fd >= 0` guard filters out sentinel values before closing.
         unsafe {
             libc::close(fd);
         }
@@ -452,6 +475,8 @@ fn reader_loop(fd: RawFd) {
     };
 
     loop {
+        // SAFETY: `pollfd` points to one initialized `pollfd` entry that remains
+        // valid for the duration of the blocking `poll` call.
         let ready = unsafe { libc::poll(&mut pollfd, 1, -1) };
         if ready == -1 {
             let error = io::Error::last_os_error();
@@ -469,6 +494,8 @@ fn reader_loop(fd: RawFd) {
 fn drain_wake_fd(fd: RawFd) {
     loop {
         let mut value = 0u64;
+        // SAFETY: `fd` is the open eventfd read end, and `value` is valid
+        // writable storage for the 8-byte eventfd counter read.
         let read = unsafe {
             libc::read(
                 fd,
@@ -494,6 +521,8 @@ fn drain_wake_fd(fd: RawFd) {
 fn drain_wake_fd(fd: RawFd) {
     let mut buffer = [0u8; 128];
     loop {
+        // SAFETY: `fd` is the open nonblocking pipe read end, and `buffer`
+        // points to initialized writable storage for `buffer.len()` bytes.
         let read =
             unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), buffer.len()) };
         if read > 0 {
@@ -565,6 +594,8 @@ mod tests {
             *received_task.lock().expect("received mutex poisoned") = true;
         });
 
+        // SAFETY: `getpid` takes no arguments and returns this process id;
+        // `SIGUSR1` is a valid signal number for `kill`.
         let rc = unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) };
         assert_eq!(rc, 0, "kill(SIGUSR1) should succeed");
 

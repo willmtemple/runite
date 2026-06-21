@@ -67,6 +67,9 @@ static FUTURE_TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn future_task_clone(data: *const ()) -> RawWaker {
+    // SAFETY: the raw waker data is created only by `FutureTask::waker` from
+    // `Rc::into_raw(Rc<FutureTask>)`, so it is non-null, correctly aligned, and
+    // still owns one strong count while the vtable callback runs.
     let task = unsafe { Rc::<FutureTask>::from_raw(data.cast::<FutureTask>()) };
     let clone = Rc::clone(&task);
     let _ = Rc::into_raw(task);
@@ -74,17 +77,25 @@ unsafe fn future_task_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn future_task_wake(data: *const ()) {
+    // SAFETY: the `wake` callback consumes exactly the strong count encoded in
+    // this raw waker data, which was produced by `Rc::into_raw` for
+    // `Rc<FutureTask>`.
     let task = unsafe { Rc::<FutureTask>::from_raw(data.cast::<FutureTask>()) };
     task.schedule();
 }
 
 unsafe fn future_task_wake_by_ref(data: *const ()) {
+    // SAFETY: `wake_by_ref` borrows the raw waker's strong count temporarily by
+    // reconstructing the `Rc`, then converts it back with `Rc::into_raw` before
+    // returning so ownership remains with the waker.
     let task = unsafe { Rc::<FutureTask>::from_raw(data.cast::<FutureTask>()) };
     task.schedule();
     let _ = Rc::into_raw(task);
 }
 
 unsafe fn future_task_drop(data: *const ()) {
+    // SAFETY: dropping the raw waker must release exactly the strong count that
+    // `FutureTask::waker` or `future_task_clone` stored with `Rc::into_raw`.
     drop(unsafe { Rc::<FutureTask>::from_raw(data.cast::<FutureTask>()) });
 }
 
