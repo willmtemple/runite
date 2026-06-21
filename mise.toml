@@ -13,8 +13,11 @@ lockfile = true
 
 [tools]
 # Track stable Rust 1.x; `mise.lock` pins the exact patch release. runite is
-# stable-Rust clean; edition 2024 requires >= 1.85.
-rust = "1"
+# stable-Rust clean; edition 2024 requires >= 1.85. Components are declared
+# explicitly so a fresh `mise install` (e.g. CI) gets rustfmt + clippy and the
+# llvm-tools that cargo-llvm-cov needs — mise's rust backend installs a minimal
+# profile otherwise.
+rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 
 # Agent Cop static-analysis tool, installed from GitHub release binaries; the
 # exact release is pinned in `mise.lock`. https://github.com/KrzysztofCwalina/cop
