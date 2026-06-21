@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Lets mise's github backend fetch the cop release and verify attestations
+  # without hitting unauthenticated GitHub API rate limits.
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  lint:
+    name: Lint & docs (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Cop verify
+        run: cop verify cop-checks/
+      - name: Cop checks
+        run: cop cop-checks/main.cop -t .
+
+  test-linux:
+    name: Test (Linux x86_64, io_uring)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test
+        run: cargo test --workspace --all-features
+
+  test-macos:
+    name: Test (macOS aarch64, kqueue)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test
+        run: cargo test --workspace --all-features
+
+  deny:
+    name: Licenses & advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  publish-dry-run:
+    name: Publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      # Only the proc-macro crate can be dry-run before the first release: it has
+      # no path dependencies. The umbrella `runite` crate depends on
+      # runite-proc-macros by path+version and cannot be packaged until that crate
+      # exists on crates.io, so it is verified during the release workflow instead.
+      - name: Dry-run runite-proc-macros
+        run: cargo publish --dry-run -p runite-proc-macros

@@ -6,6 +6,20 @@ members = ["./", "./proc_macros"]
 name = "runite"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "An event-loop-per-thread async runtime built on io_uring (Linux) and kqueue (macOS)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/willmtemple/runite"
+homepage = "https://github.com/willmtemple/runite"
+documentation = "https://docs.rs/runite"
+readme = "README.md"
+keywords = ["async", "runtime", "io_uring", "executor", "event-loop"]
+categories = ["asynchronous", "concurrency", "network-programming"]
+exclude = ["/.github", "/target", "/cop-checks", "mise.toml", "rust-toolchain.toml"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
 
 [features]
 default = []
@@ -19,7 +33,7 @@ hyper = { version = "1.8", default-features = false, features = [
   "http1",
 ], optional = true }
 libc = "0.2"
-runite-proc-macros = { package = "runite-proc-macros", path = "./proc_macros" }
+runite-proc-macros = { package = "runite-proc-macros", version = "0.1.0", path = "./proc_macros" }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]

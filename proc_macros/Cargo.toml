@@ -2,6 +2,13 @@
 name = "runite-proc-macros"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Procedural macros (#[runite::main], #[runite::async_main]) for the runite async runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/willmtemple/runite"
+documentation = "https://docs.rs/runite-proc-macros"
+keywords = ["async", "runtime", "macro", "proc-macro", "runite"]
+categories = ["asynchronous"]
 
 [lib]
 proc-macro = true
