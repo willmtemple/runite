@@ -1,0 +1,42 @@
+# Reproducible toolchain for runite.
+# Install everything with `mise install`, then use `mise run <task>`.
+
+[tools]
+# Pinned Rust stable. runite is stable-Rust clean; edition 2024 requires >= 1.85.
+rust = "1.96.0"
+
+# Agent Cop static-analysis tool, installed from GitHub release binaries.
+# https://github.com/KrzysztofCwalina/cop
+"github:KrzysztofCwalina/cop" = { version = "2026.6.19.7", exe = "cop" }
+
+[tasks.build]
+description = "Build the workspace"
+run = "cargo build --workspace --all-targets"
+
+[tasks.test]
+description = "Run all tests including doctests"
+run = "cargo test --workspace --all-features"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+description = "Run clippy with warnings denied"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.doc]
+description = "Build documentation"
+run = "cargo doc --workspace --all-features --no-deps"
+
+[tasks.cop]
+description = "Run Agent Cop static-analysis checks"
+run = "cop cop-checks/main.cop -t ."
+
+[tasks.cop-verify]
+description = "Verify cop rule files compile"
+run = "cop verify cop-checks/"
+
+[tasks.check]
+description = "Run the full local gate (fmt, lint, test, cop)"
+depends = ["fmt", "lint", "test", "cop"]

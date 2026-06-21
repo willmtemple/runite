@@ -1,0 +1,6 @@
+# Mirrors the Rust version pinned in mise.toml for contributors who use rustup
+# directly instead of mise. runite is stable-Rust clean (no nightly features);
+# edition 2024 requires Rust >= 1.85.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

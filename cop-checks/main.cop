@@ -1,0 +1,19 @@
+# Agent Cop entry point for runite.
+# Run all checks:  cop cop-checks/main.cop -t .
+# Verify rules:    cop verify cop-checks/
+#
+# main.cop is the ONLY file with a `command`. It builds the codebase once and
+# composes the violation lists declared in the sibling check files. Add a new
+# rule by creating `cop-checks/<rule>.cop` with a `let <rule>-violations = ...`
+# and adding it to the `all-violations` list below.
+
+import code
+import code-analysis
+import rust
+
+let codebase = rust.parse()
+
+let all-violations =
+    oversized-types-violations
+
+command MAIN = CHECK(all-violations)
