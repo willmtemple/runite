@@ -6,7 +6,7 @@
 //!
 //! Most users will start with:
 //!
-//! - [`main`] or [`async_main`] for executable entry points
+//! - [`main`] for executable entry points (sync or `async fn main`)
 //! - [`run`], [`queue_task`], [`queue_microtask`], and [`queue_future`] for event-loop work
 //! - [`fs`], [`net`], [`time`], and [`channel`] for async runtime services
 //!
@@ -55,17 +55,13 @@ pub mod time;
 #[doc(hidden)]
 pub mod macros;
 
-/// Marks a synchronous `fn main()` as the runtime entry point.
+/// Marks `fn main` as the runtime entry point.
 ///
-/// The macro generates a real Rust `main` that queues the function body onto the main runtime
-/// thread before calling [`run`].
+/// Works for both a synchronous `fn main()` and an `async fn main()`: the macro
+/// inspects the signature and dispatches accordingly. It generates a real Rust
+/// `main` that queues the function body (or its returned future) onto the main
+/// runtime thread before calling [`run`].
 pub use runite_proc_macros::main;
-
-/// Marks an `async fn main()` as the runtime entry point.
-///
-/// The macro generates a real Rust `main` that queues the returned future onto the main runtime
-/// thread before calling [`run`].
-pub use runite_proc_macros::async_main;
 
 /// Driver primitives re-exported from the active backend.
 #[cfg(any(

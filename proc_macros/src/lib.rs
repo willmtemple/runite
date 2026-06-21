@@ -3,23 +3,19 @@ use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{Error, ItemFn, parse_macro_input};
 
+/// Marks `fn main` as the runite entry point.
+///
+/// Works for both synchronous and `async` entry points: the macro inspects the
+/// function signature and dispatches accordingly. A synchronous `fn main` is
+/// queued as a task; an `async fn main` has its returned future queued onto the
+/// main runtime thread. In both cases the generated real `main` then drives the
+/// event loop by calling `runite::run`.
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_entry(attr, item, EntryKind::Sync)
+    expand_entry(attr, item)
 }
 
-#[proc_macro_attribute]
-pub fn async_main(attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_entry(attr, item, EntryKind::Async)
-}
-
-#[derive(Clone, Copy)]
-enum EntryKind {
-    Sync,
-    Async,
-}
-
-fn expand_entry(attr: TokenStream, item: TokenStream, kind: EntryKind) -> TokenStream {
+fn expand_entry(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !proc_macro2::TokenStream::from(attr).is_empty() {
         return Error::new(
             Span::call_site(),
@@ -30,13 +26,13 @@ fn expand_entry(attr: TokenStream, item: TokenStream, kind: EntryKind) -> TokenS
     }
 
     let function = parse_macro_input!(item as ItemFn);
-    match validate_entry(&function, kind) {
-        Ok(()) => generate_entry(function, kind).into(),
+    match validate_entry(&function) {
+        Ok(()) => generate_entry(function).into(),
         Err(error) => error.to_compile_error().into(),
     }
 }
 
-fn validate_entry(function: &ItemFn, kind: EntryKind) -> syn::Result<()> {
+fn validate_entry(function: &ItemFn) -> syn::Result<()> {
     let signature = &function.sig;
 
     if signature.ident != "main" {
@@ -88,33 +84,25 @@ fn validate_entry(function: &ItemFn, kind: EntryKind) -> syn::Result<()> {
         ));
     }
 
-    match kind {
-        EntryKind::Sync if signature.asyncness.is_some() => Err(Error::new_spanned(
-            signature.asyncness,
-            "#[runite::main] expects a non-async `fn main`",
-        )),
-        EntryKind::Async if signature.asyncness.is_none() => Err(Error::new_spanned(
-            signature.fn_token,
-            "#[runite::async_main] expects an `async fn main`",
-        )),
-        _ => Ok(()),
-    }
+    Ok(())
 }
 
-fn generate_entry(mut function: ItemFn, kind: EntryKind) -> proc_macro2::TokenStream {
+fn generate_entry(mut function: ItemFn) -> proc_macro2::TokenStream {
+    let is_async = function.sig.asyncness.is_some();
     let original_name = function.sig.ident.clone();
     let implementation_name = format_ident!("__runite_runtime_internal_{}", original_name);
     function.sig.ident = implementation_name.clone();
 
-    let entry_call = match kind {
-        EntryKind::Sync => quote! {
+    let entry_call = if is_async {
+        quote! {
+            let _ = ::runite::queue_future(#implementation_name());
+        }
+    } else {
+        quote! {
             ::runite::queue_task(|| {
                 let _ = #implementation_name();
             });
-        },
-        EntryKind::Async => quote! {
-            let _ = ::runite::queue_future(#implementation_name());
-        },
+        }
     };
 
     quote! {

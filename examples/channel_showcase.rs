@@ -42,7 +42,7 @@ enum WorkerEvent {
     },
 }
 
-#[runite::async_main]
+#[runite::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     START.get_or_init(Instant::now);
 
