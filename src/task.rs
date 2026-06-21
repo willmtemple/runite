@@ -83,7 +83,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{queue_future, run_until_stalled};
+    use crate::{queue_future, run, run_until_stalled};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -92,21 +92,20 @@ mod tests {
         let result = Arc::new(AtomicUsize::new(0));
         let result_clone = Arc::clone(&result);
 
-        queue_future(async move {
-            let handle = spawn_blocking(|| 7usize + 35).expect("spawn_blocking");
-            let value = handle.await.expect("join");
-            result_clone.store(value, Ordering::SeqCst);
-        });
-
-        // Drive until stalled, repeatedly, because the oneshot send happens on
-        // a worker thread and we need the cross-thread wake to land.
-        for _ in 0..200 {
-            run_until_stalled();
-            if result.load(Ordering::SeqCst) != 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // Run on a dedicated runtime thread and drive with a blocking `run()`,
+        // which parks until the blocking-pool worker's cross-thread completion
+        // wake lands. This is deterministic, unlike polling `run_until_stalled`
+        // with a timed retry loop (which was flaky under parallel test load).
+        std::thread::spawn(move || {
+            queue_future(async move {
+                let handle = spawn_blocking(|| 7usize + 35).expect("spawn_blocking");
+                let value = handle.await.expect("join");
+                result_clone.store(value, Ordering::SeqCst);
+            });
+            run();
+        })
+        .join()
+        .expect("runtime thread should join");
 
         assert_eq!(result.load(Ordering::SeqCst), 42);
     }
