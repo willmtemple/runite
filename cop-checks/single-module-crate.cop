@@ -1,0 +1,23 @@
+# Single-module crates must be modularized once they grow past 600 lines.
+#
+# A well-factored crate keeps its root module (`src/lib.rs` or `src/main.rs`)
+# thin: mostly `mod` declarations, `use`s, and re-exports, with the real logic
+# living in submodules. When the crate root itself grows past 600 lines, the
+# crate is effectively a single oversized module and its logic should be moved
+# into submodules. A thin, properly modularized root never trips this rule
+# (runite's `src/lib.rs` is ~90 lines), so a large root is a reliable,
+# false-positive-free signal of an unmodularized crate.
+#
+# Like `module-size.cop`, we anchor one violation on the first line past the
+# budget (line 601) of the offending crate-root file.
+
+predicate isProductionRootLine(Line) => !Line.File.Path:startsWith('target/')
+
+predicate isCrateRoot(Line) =>
+    Line.File.Path:endsWith('src/lib.rs') || Line.File.Path:endsWith('src/main.rs')
+
+predicate isOversizedCrateRoot(Line) =>
+    isProductionRootLine && isCrateRoot && Line.Number == 601
+
+let single-module-crate-violations = codebase.Lines:isOversizedCrateRoot
+    :toError('{item.File.Path} crate root is longer than 600 lines; this crate is effectively single-module — move logic into submodules')

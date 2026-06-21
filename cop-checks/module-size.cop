@@ -1,0 +1,18 @@
+# Hard cap on module size.
+#
+# A Rust *module* maps to a source file. Any module longer than 2000 lines is
+# too large to review or reason about and MUST be split into submodules,
+# regardless of how the surrounding crate is organized.
+#
+# Implementation note: the cop line model exposes one `Line` per physical line
+# (with a back-reference to its `File` and a 1-based `Number`). A file longer
+# than 2000 lines is exactly a file that *has* a line numbered 2001, so we flag
+# that single overflow line. This yields one violation per offending file,
+# anchored at the first line past the budget, instead of one per excess line.
+
+predicate isProductionLine(Line) => !Line.File.Path:startsWith('target/')
+
+predicate isModuleOverflow(Line) => isProductionLine && Line.Number == 2001
+
+let module-size-violations = codebase.Lines:isModuleOverflow
+    :toError('{item.File.Path} is longer than 2000 lines; split this module into submodules')

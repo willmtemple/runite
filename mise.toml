@@ -1,13 +1,24 @@
 # Reproducible toolchain for runite.
 # Install everything with `mise install`, then use `mise run <task>`.
+#
+# Reproducibility model: the version specs below are intentionally loose
+# (track stable). Exact resolved versions + checksums are pinned in `mise.lock`
+# (committed), so `mise install` is fully reproducible. To intentionally update
+# the toolchain, run `mise upgrade` (bumps within the spec) followed by
+# `mise lock`, then commit the refreshed `mise.lock`.
+
+[settings]
+# Pin exact versions + checksums in mise.lock instead of hard-coding them here.
+lockfile = true
 
 [tools]
-# Pinned Rust stable. runite is stable-Rust clean; edition 2024 requires >= 1.85.
-rust = "1.96.0"
+# Track stable Rust 1.x; `mise.lock` pins the exact patch release. runite is
+# stable-Rust clean; edition 2024 requires >= 1.85.
+rust = "1"
 
-# Agent Cop static-analysis tool, installed from GitHub release binaries.
-# https://github.com/KrzysztofCwalina/cop
-"github:KrzysztofCwalina/cop" = { version = "2026.6.19.7", exe = "cop" }
+# Agent Cop static-analysis tool, installed from GitHub release binaries; the
+# exact release is pinned in `mise.lock`. https://github.com/KrzysztofCwalina/cop
+"github:KrzysztofCwalina/cop" = { version = "latest", exe = "cop" }
 
 [tasks.build]
 description = "Build the workspace"
