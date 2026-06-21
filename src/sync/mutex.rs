@@ -16,7 +16,7 @@ struct Waiter {
 /// A single-threaded async mutex.
 ///
 /// This mutex is intentionally `!Send` and `!Sync`: it is only for tasks that
-/// remain on one RUIN runtime thread.
+/// remain on one runite runtime thread.
 pub struct Mutex<T: ?Sized> {
     locked: Cell<bool>,
     next_waiter_id: Cell<usize>,

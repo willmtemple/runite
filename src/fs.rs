@@ -406,7 +406,7 @@ impl OpenOptions {
     ///
     /// ```
     /// # let _ = || async {
-    /// let file = ruin_runtime::fs::OpenOptions::new()
+    /// let file = runite::fs::OpenOptions::new()
     ///     .read(true)
     ///     .write(true)
     ///     .open("example.txt")
@@ -604,7 +604,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 ///
 /// ```
 /// # let _ = || async {
-/// let mut entries = ruin_runtime::fs::read_dir(".").await.unwrap();
+/// let mut entries = runite::fs::read_dir(".").await.unwrap();
 /// let _ = entries.next_entry().await;
 /// # };
 /// ```
@@ -646,7 +646,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("ruin-runtime-{label}-{}-{nanos}", process::id()))
+        std::env::temp_dir().join(format!("runite-{label}-{}-{nanos}", process::id()))
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Async synchronization primitives for the single-threaded RUIN runtime.
+//! Async synchronization primitives for the single-threaded runite runtime.
 
 mod mutex;
 mod notify;

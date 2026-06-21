@@ -2,7 +2,7 @@
 //!
 //! Each platform's `runtime.rs` defines a marker type that implements
 //! [`Runtime`] and re-exports these functions with the platform type fixed,
-//! so callers continue to write `ruin_runtime::queue_task(..)` without any
+//! so callers continue to write `runite::queue_task(..)` without any
 //! turbofish.
 
 use std::any::Any;
@@ -325,7 +325,7 @@ where
 
     let worker_completion = Arc::clone(&completion);
     std::thread::Builder::new()
-        .name("ruin-runtime-worker".into())
+        .name("runite-worker".into())
         .spawn(move || {
             install_thread(shared, driver, Some(worker_completion));
             queue_task::<R, _>(initial_task);

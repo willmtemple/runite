@@ -618,7 +618,7 @@ mod tests {
         let dir = std::env::current_dir()
             .expect("current directory should be available")
             .join("target")
-            .join("ruin-uds-tests");
+            .join("runite-uds-tests");
         std::fs::create_dir_all(&dir).expect("test socket directory should be created");
         dir.join(format!(
             "{}-{}-{:?}.sock",

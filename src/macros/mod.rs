@@ -1,7 +1,7 @@
 //! Async control-flow macros.
 //!
 //! These macros are intentionally declarative so they can live in
-//! `ruin-runtime` without introducing a dependency cycle with the proc-macro
+//! `runite` without introducing a dependency cycle with the proc-macro
 //! crate. They poll all child futures on the current task and do not require
 //! `Send`, matching the runtime's single-threaded future model.
 //!
@@ -24,22 +24,22 @@ macro_rules! join {
             @collect
             []
             [
-                (__ruin_join_f0 __ruin_join_done0 __ruin_join_out0)
-                (__ruin_join_f1 __ruin_join_done1 __ruin_join_out1)
-                (__ruin_join_f2 __ruin_join_done2 __ruin_join_out2)
-                (__ruin_join_f3 __ruin_join_done3 __ruin_join_out3)
-                (__ruin_join_f4 __ruin_join_done4 __ruin_join_out4)
-                (__ruin_join_f5 __ruin_join_done5 __ruin_join_out5)
-                (__ruin_join_f6 __ruin_join_done6 __ruin_join_out6)
-                (__ruin_join_f7 __ruin_join_done7 __ruin_join_out7)
-                (__ruin_join_f8 __ruin_join_done8 __ruin_join_out8)
-                (__ruin_join_f9 __ruin_join_done9 __ruin_join_out9)
-                (__ruin_join_f10 __ruin_join_done10 __ruin_join_out10)
-                (__ruin_join_f11 __ruin_join_done11 __ruin_join_out11)
-                (__ruin_join_f12 __ruin_join_done12 __ruin_join_out12)
-                (__ruin_join_f13 __ruin_join_done13 __ruin_join_out13)
-                (__ruin_join_f14 __ruin_join_done14 __ruin_join_out14)
-                (__ruin_join_f15 __ruin_join_done15 __ruin_join_out15)
+                (__runite_join_f0 __runite_join_done0 __runite_join_out0)
+                (__runite_join_f1 __runite_join_done1 __runite_join_out1)
+                (__runite_join_f2 __runite_join_done2 __runite_join_out2)
+                (__runite_join_f3 __runite_join_done3 __runite_join_out3)
+                (__runite_join_f4 __runite_join_done4 __runite_join_out4)
+                (__runite_join_f5 __runite_join_done5 __runite_join_out5)
+                (__runite_join_f6 __runite_join_done6 __runite_join_out6)
+                (__runite_join_f7 __runite_join_done7 __runite_join_out7)
+                (__runite_join_f8 __runite_join_done8 __runite_join_out8)
+                (__runite_join_f9 __runite_join_done9 __runite_join_out9)
+                (__runite_join_f10 __runite_join_done10 __runite_join_out10)
+                (__runite_join_f11 __runite_join_done11 __runite_join_out11)
+                (__runite_join_f12 __runite_join_done12 __runite_join_out12)
+                (__runite_join_f13 __runite_join_done13 __runite_join_out13)
+                (__runite_join_f14 __runite_join_done14 __runite_join_out14)
+                (__runite_join_f15 __runite_join_done15 __runite_join_out15)
             ]
             [$($future),+]
         )
@@ -68,12 +68,12 @@ macro_rules! join {
                 let mut $out_var = ::core::option::Option::None;
             )+
 
-            ::core::future::poll_fn(move |__ruin_cx| {
+            ::core::future::poll_fn(move |__runite_cx| {
                 $(
                     if !$done_var {
-                        match ::core::future::Future::poll($future_var.as_mut(), __ruin_cx) {
-                            ::core::task::Poll::Ready(__ruin_value) => {
-                                $out_var = ::core::option::Option::Some(__ruin_value);
+                        match ::core::future::Future::poll($future_var.as_mut(), __runite_cx) {
+                            ::core::task::Poll::Ready(__runite_value) => {
+                                $out_var = ::core::option::Option::Some(__runite_value);
                                 $done_var = true;
                             }
                             ::core::task::Poll::Pending => {}
@@ -111,22 +111,22 @@ macro_rules! try_join {
             @collect
             []
             [
-                (__ruin_try_join_f0 __ruin_try_join_done0 __ruin_try_join_out0)
-                (__ruin_try_join_f1 __ruin_try_join_done1 __ruin_try_join_out1)
-                (__ruin_try_join_f2 __ruin_try_join_done2 __ruin_try_join_out2)
-                (__ruin_try_join_f3 __ruin_try_join_done3 __ruin_try_join_out3)
-                (__ruin_try_join_f4 __ruin_try_join_done4 __ruin_try_join_out4)
-                (__ruin_try_join_f5 __ruin_try_join_done5 __ruin_try_join_out5)
-                (__ruin_try_join_f6 __ruin_try_join_done6 __ruin_try_join_out6)
-                (__ruin_try_join_f7 __ruin_try_join_done7 __ruin_try_join_out7)
-                (__ruin_try_join_f8 __ruin_try_join_done8 __ruin_try_join_out8)
-                (__ruin_try_join_f9 __ruin_try_join_done9 __ruin_try_join_out9)
-                (__ruin_try_join_f10 __ruin_try_join_done10 __ruin_try_join_out10)
-                (__ruin_try_join_f11 __ruin_try_join_done11 __ruin_try_join_out11)
-                (__ruin_try_join_f12 __ruin_try_join_done12 __ruin_try_join_out12)
-                (__ruin_try_join_f13 __ruin_try_join_done13 __ruin_try_join_out13)
-                (__ruin_try_join_f14 __ruin_try_join_done14 __ruin_try_join_out14)
-                (__ruin_try_join_f15 __ruin_try_join_done15 __ruin_try_join_out15)
+                (__runite_try_join_f0 __runite_try_join_done0 __runite_try_join_out0)
+                (__runite_try_join_f1 __runite_try_join_done1 __runite_try_join_out1)
+                (__runite_try_join_f2 __runite_try_join_done2 __runite_try_join_out2)
+                (__runite_try_join_f3 __runite_try_join_done3 __runite_try_join_out3)
+                (__runite_try_join_f4 __runite_try_join_done4 __runite_try_join_out4)
+                (__runite_try_join_f5 __runite_try_join_done5 __runite_try_join_out5)
+                (__runite_try_join_f6 __runite_try_join_done6 __runite_try_join_out6)
+                (__runite_try_join_f7 __runite_try_join_done7 __runite_try_join_out7)
+                (__runite_try_join_f8 __runite_try_join_done8 __runite_try_join_out8)
+                (__runite_try_join_f9 __runite_try_join_done9 __runite_try_join_out9)
+                (__runite_try_join_f10 __runite_try_join_done10 __runite_try_join_out10)
+                (__runite_try_join_f11 __runite_try_join_done11 __runite_try_join_out11)
+                (__runite_try_join_f12 __runite_try_join_done12 __runite_try_join_out12)
+                (__runite_try_join_f13 __runite_try_join_done13 __runite_try_join_out13)
+                (__runite_try_join_f14 __runite_try_join_done14 __runite_try_join_out14)
+                (__runite_try_join_f15 __runite_try_join_done15 __runite_try_join_out15)
             ]
             [$($future),+]
         )
@@ -155,17 +155,17 @@ macro_rules! try_join {
                 let mut $out_var = ::core::option::Option::None;
             )+
 
-            ::core::future::poll_fn(move |__ruin_cx| {
+            ::core::future::poll_fn(move |__runite_cx| {
                 $(
                     if !$done_var {
-                        match ::core::future::Future::poll($future_var.as_mut(), __ruin_cx) {
-                            ::core::task::Poll::Ready(::core::result::Result::Ok(__ruin_value)) => {
-                                $out_var = ::core::option::Option::Some(__ruin_value);
+                        match ::core::future::Future::poll($future_var.as_mut(), __runite_cx) {
+                            ::core::task::Poll::Ready(::core::result::Result::Ok(__runite_value)) => {
+                                $out_var = ::core::option::Option::Some(__runite_value);
                                 $done_var = true;
                             }
-                            ::core::task::Poll::Ready(::core::result::Result::Err(__ruin_error)) => {
+                            ::core::task::Poll::Ready(::core::result::Result::Err(__runite_error)) => {
                                 return ::core::task::Poll::Ready(
-                                    ::core::result::Result::Err(__ruin_error),
+                                    ::core::result::Result::Err(__runite_error),
                                 );
                             }
                             ::core::task::Poll::Pending => {}
@@ -200,22 +200,22 @@ macro_rules! select {
             @collect
             []
             [
-                __ruin_select_f0
-                __ruin_select_f1
-                __ruin_select_f2
-                __ruin_select_f3
-                __ruin_select_f4
-                __ruin_select_f5
-                __ruin_select_f6
-                __ruin_select_f7
-                __ruin_select_f8
-                __ruin_select_f9
-                __ruin_select_f10
-                __ruin_select_f11
-                __ruin_select_f12
-                __ruin_select_f13
-                __ruin_select_f14
-                __ruin_select_f15
+                __runite_select_f0
+                __runite_select_f1
+                __runite_select_f2
+                __runite_select_f3
+                __runite_select_f4
+                __runite_select_f5
+                __runite_select_f6
+                __runite_select_f7
+                __runite_select_f8
+                __runite_select_f9
+                __runite_select_f10
+                __runite_select_f11
+                __runite_select_f12
+                __runite_select_f13
+                __runite_select_f14
+                __runite_select_f15
             ]
             [$($binding = $future => $handler),+]
         )
@@ -242,11 +242,11 @@ macro_rules! select {
                 let mut $future_var = ::core::pin::pin!($future);
             )+
 
-            ::core::future::poll_fn(move |__ruin_cx| {
+            ::core::future::poll_fn(move |__runite_cx| {
                 $(
-                    match ::core::future::Future::poll($future_var.as_mut(), __ruin_cx) {
-                        ::core::task::Poll::Ready(__ruin_value) => {
-                            let $binding = __ruin_value;
+                    match ::core::future::Future::poll($future_var.as_mut(), __runite_cx) {
+                        ::core::task::Poll::Ready(__runite_value) => {
+                            let $binding = __runite_value;
                             return ::core::task::Poll::Ready($handler);
                         }
                         ::core::task::Poll::Pending => {}

@@ -232,7 +232,7 @@ pub(crate) fn lock_queue(queue: &RemoteQueue) -> MutexGuard<'_, VecDeque<SendTas
 
 fn remote_queue_capacity() -> usize {
     *REMOTE_QUEUE_CAPACITY.get_or_init(|| {
-        std::env::var("RUIN_REMOTE_QUEUE_CAPACITY")
+        std::env::var("RUNITE_REMOTE_QUEUE_CAPACITY")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|capacity| *capacity >= 1)

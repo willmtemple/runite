@@ -13,7 +13,7 @@ use crate::sys::current::channel::runtime_waiter;
 /// # Examples
 ///
 /// ```
-/// let (sender, mut receiver) = ruin_runtime::channel::oneshot::channel::<usize>();
+/// let (sender, mut receiver) = runite::channel::oneshot::channel::<usize>();
 /// sender.send(7).unwrap();
 /// assert_eq!(receiver.try_recv(), Ok(7));
 /// ```
