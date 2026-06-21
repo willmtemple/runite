@@ -35,10 +35,15 @@ jobs:
         run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: Cop verify
-        run: cop verify cop-checks/
+      # Run the checks first: `cop <file> -t .` auto-restores the imported
+      # packages (code, code-analysis, rust) from the default feed into a fresh
+      # runner's package cache. `cop verify` does NOT auto-restore, so it must
+      # run after the cache is warmed, otherwise it fails with
+      # "Package not found in any feed" on a clean CI machine.
       - name: Cop checks
         run: cop cop-checks/main.cop -t .
+      - name: Cop verify
+        run: cop verify cop-checks/
 
   test-linux:
     name: Test (Linux x86_64, io_uring)
