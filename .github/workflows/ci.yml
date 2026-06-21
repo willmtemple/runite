@@ -25,6 +25,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain via mise
         uses: jdx/mise-action@v2
+      # mise's rust backend delegates to rustup, whose toolchain lives outside the
+      # cached mise dir. On a mise cache hit the component install is skipped and
+      # rustup auto-installs a minimal toolchain (no rustfmt/clippy), so install the
+      # required components explicitly and idempotently against the pinned toolchain.
+      - name: Ensure rust components
+        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy -c llvm-tools --no-self-update'
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Formatting
@@ -89,6 +95,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain via mise
         uses: jdx/mise-action@v2
+      # cargo-llvm-cov needs the llvm-tools component; install it explicitly because
+      # a mise cache hit skips mise's own component install (see the lint job).
+      - name: Ensure rust components
+        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c llvm-tools --no-self-update'
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
