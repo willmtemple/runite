@@ -1,0 +1,36 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Initial public release of `runite`, an event-loop-per-thread async runtime built on
+  io_uring (Linux `x86_64`) and kqueue (macOS `aarch64`).
+- `#[runite::main]` / `#[runite::async_main]` entry-point macros.
+- Async `fs`, `net` (TCP/UDP/Unix-domain sockets), `time`, and `channel` services.
+- Cross-thread worker spawning and task queueing.
+- Optional `hyper` client integration and `futures-io` compatibility adapters.
+- Reproducible toolchain via `mise`, Agent Cop static-analysis checks, GitHub CI
+  (Linux + macOS), code-coverage and benchmark jobs, and a tag-triggered crates.io
+  release workflow.
+- Integration test suites and criterion benchmarks for the runtime and I/O paths.
+
+### Changed
+
+- Non-blocking control syscalls (socket/bind/listen/shutdown/close, fd duplication) now run
+  inline on the event loop instead of being offloaded to the blocking thread pool when their
+  io_uring opcode is unsupported.
+
+### Security
+
+- Fixed a latent use-after-free window in the Drop-cancellation path where a detached I/O
+  buffer guard could be released on the `IORING_OP_ASYNC_CANCEL` completion before the
+  original operation had finished with the buffer. Buffers are now released solely on the
+  original operation's completion.
+
+[Unreleased]: https://github.com/willmtemple/runite/commits/main

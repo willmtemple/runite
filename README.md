@@ -92,6 +92,58 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the threading model, micro/macro ta
 scheduling, run lifecycle, cancellation and buffer-ownership rules, the driver abstraction,
 the platform parity matrix, and the documented safety invariants.
 
+## Development
+
+The toolchain is pinned with [mise](https://mise.jdx.dev/). Install it, then:
+
+```sh
+mise install            # fetch the pinned Rust toolchain and Agent Cop
+mise run check          # fmt + clippy + tests + cop (the full local gate)
+```
+
+Individual tasks:
+
+| Task                | Command                  | Purpose                                        |
+| ------------------- | ------------------------ | ---------------------------------------------- |
+| `mise run build`    | `cargo build`            | Build the workspace.                            |
+| `mise run test`     | `cargo test`             | Unit, integration, and doctests.               |
+| `mise run lint`     | `cargo clippy -D warnings` | Lint with warnings denied.                    |
+| `mise run bench`    | `cargo bench`            | Criterion benchmarks (`benches/`).             |
+| `mise run coverage` | `cargo llvm-cov`         | HTML + lcov coverage report.                   |
+| `mise run cop`      | `cop cop-checks/main.cop`| Agent Cop static-analysis checks.              |
+
+### Testing
+
+Integration tests live in `tests/` and drive the public API end to end (TCP/UDP echo,
+filesystem round trips, cross-thread workers and channels) via a `block_on` helper that
+runs each future on a dedicated event-loop thread.
+
+### Benchmarks
+
+`benches/runtime.rs` measures executor mechanics (task spawn, yield, channels, timers) and
+`benches/io.rs` measures loopback TCP and filesystem throughput, using
+[criterion](https://github.com/bheisler/criterion.rs). Run a single benchmark with:
+
+```sh
+cargo bench --bench runtime -- spawn_join
+```
+
+### Profiling and observability
+
+`runite` emits [`tracing`](https://docs.rs/tracing) spans/events on these targets, usable for
+latency investigation with any `tracing` subscriber:
+
+| Target              | Covers                                       |
+| ------------------- | -------------------------------------------- |
+| `runite::driver`    | io_uring / kqueue submission and completions |
+| `runite::runtime`   | runtime and worker lifecycle                 |
+| `runite::scheduler` | task scheduling and cross-thread queueing    |
+| `runite::timer`     | timer arming/firing (debug builds)           |
+| `runite::async`     | future polling and cancellation (debug builds) |
+
+For CPU profiling, build with `--release` and use `perf` / `cargo flamegraph` against an
+example or benchmark binary.
+
 ## License
 
 Licensed under either of
