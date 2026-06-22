@@ -20,6 +20,8 @@
 //! - Linux `x86_64`
 //! - macOS `aarch64`
 
+#![deny(missing_docs)]
+
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
