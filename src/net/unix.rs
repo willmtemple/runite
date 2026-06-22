@@ -154,7 +154,8 @@ impl UnixListener {
     /// Returns a [`Stream`] that yields inbound connections as they arrive.
     ///
     /// The stream is infinite: it never yields `None`. Borrows the listener for
-    /// the lifetime of the stream.
+    /// the lifetime of the stream, so use [`accept`](Self::accept) directly when
+    /// a borrowed stream adapter is not convenient.
     pub fn incoming(&self) -> Incoming<'_> {
         Incoming {
             listener: self,
@@ -177,8 +178,11 @@ impl UnixListener {
     }
 }
 
-/// A [`Stream`] of inbound Unix domain connections, created by
-/// [`UnixListener::incoming`].
+/// Stream of inbound Unix domain connections.
+///
+/// Created by [`UnixListener::incoming`], this borrowed stream repeatedly
+/// accepts new connections from its listener. It yields `Some(Err(_))` for
+/// accept errors and does not terminate on its own.
 pub struct Incoming<'a> {
     listener: &'a UnixListener,
     pending: Option<Pin<Box<dyn Future<Output = io::Result<UnixStream>> + 'a>>>,

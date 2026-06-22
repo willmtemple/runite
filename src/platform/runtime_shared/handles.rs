@@ -87,8 +87,9 @@ impl IntervalHandle {
 
 /// Handle returned by `queue_future`.
 ///
-/// Awaiting a join handle yields `Ok(output)` with the queued future's output,
-/// or [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was
+/// Awaiting a join handle yields `Result<T, JoinError>` rather than the queued
+/// future's output directly: `Ok(output)` contains the future's output, while
+/// [`Err(JoinError::Aborted)`](crate::task::JoinError) means the task was
 /// aborted via [`abort`](Self::abort) before it completed.
 ///
 /// Dropping a `JoinHandle` does **not** cancel the task — it continues to run
@@ -133,7 +134,7 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// A cloneable handle that can abort a queued task without joining it.
+/// Cloneable handle that can abort a queued task without joining it.
 ///
 /// Obtained from [`JoinHandle::abort_handle`]. Like the runtime's futures, this
 /// handle is `!Send` and only valid on the runtime thread that created the

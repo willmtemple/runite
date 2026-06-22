@@ -188,6 +188,26 @@ impl TcpStream {
     /// can be moved into separate tasks to read and write concurrently. Use
     /// [`OwnedReadHalf`]/[`OwnedWriteHalf`] and recombine them later with
     /// [`TcpStream::reunite`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use runite::io::{AsyncReadExt, AsyncWriteExt};
+    /// use runite::net::TcpStream;
+    ///
+    /// # async fn example(stream: TcpStream) -> std::io::Result<()> {
+    /// let (mut reader, mut writer) = stream.into_split();
+    ///
+    /// runite::queue_future(async move {
+    ///     let mut buf = [0; 1024];
+    ///     let _ = reader.read(&mut buf).await;
+    /// });
+    ///
+    /// writer.write_all(b"ping").await?;
+    /// writer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
         let read = Self {
             inner: Arc::clone(&self.inner),
@@ -425,14 +445,22 @@ impl AsyncWrite for TcpStream {
     }
 }
 
-/// The owned read half of a [`TcpStream`], produced by
-/// [`TcpStream::into_split`]. Implements [`AsyncRead`].
+/// Owned read half of a [`TcpStream`].
+///
+/// Created by [`TcpStream::into_split`], this half keeps the socket alive and
+/// implements [`AsyncRead`] so it can be moved to a task dedicated to receiving
+/// bytes. Recombine it with the matching [`OwnedWriteHalf`] through
+/// [`TcpStream::reunite`] when exclusive stream ownership is needed again.
 pub struct OwnedReadHalf {
     stream: TcpStream,
 }
 
-/// The owned write half of a [`TcpStream`], produced by
-/// [`TcpStream::into_split`]. Implements [`AsyncWrite`].
+/// Owned write half of a [`TcpStream`].
+///
+/// Created by [`TcpStream::into_split`], this half keeps the socket alive and
+/// implements [`AsyncWrite`] so it can be moved to a task dedicated to sending
+/// bytes. Use [`shutdown`](Self::shutdown) to half-close the write direction
+/// without dropping the matching [`OwnedReadHalf`].
 pub struct OwnedWriteHalf {
     stream: TcpStream,
 }
@@ -448,7 +476,10 @@ impl OwnedReadHalf {
         self.stream.peer_addr()
     }
 
-    /// Reassembles the original [`TcpStream`]; see [`TcpStream::reunite`].
+    /// Reassembles the original [`TcpStream`] with the matching write half.
+    ///
+    /// Returns [`ReuniteError`] and both halves if `write` originated from a
+    /// different stream.
     pub fn reunite(self, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(self, write)
     }
@@ -471,7 +502,10 @@ impl OwnedWriteHalf {
         self.stream.shutdown(Shutdown::Write).await
     }
 
-    /// Reassembles the original [`TcpStream`]; see [`TcpStream::reunite`].
+    /// Reassembles the original [`TcpStream`] with the matching read half.
+    ///
+    /// Returns [`ReuniteError`] and both halves if `read` originated from a
+    /// different stream.
     pub fn reunite(self, read: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(read, self)
     }
@@ -595,8 +629,11 @@ impl TcpListener {
     }
 }
 
-/// A [`Stream`] of inbound TCP connections, created by
-/// [`TcpListener::incoming`].
+/// Stream of inbound TCP connections.
+///
+/// Created by [`TcpListener::incoming`], this stream repeatedly accepts new
+/// connections from its listener. It yields `Some(Err(_))` for accept errors and
+/// does not terminate on its own.
 pub struct Incoming {
     listener: TcpListener,
     pending: Option<Pin<Box<dyn Future<Output = io::Result<TcpStream>>>>>,

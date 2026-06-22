@@ -73,11 +73,19 @@ pub struct Stdin {
 }
 
 /// Async writer for standard output.
+///
+/// Created by [`stdout`], this handle duplicates file descriptor 1 and
+/// implements [`AsyncWrite`] for runtime-driven writes. Dropping it does not
+/// close the process-wide stdout stream.
 pub struct Stdout {
     writer: StandardWriter,
 }
 
 /// Async writer for standard error.
+///
+/// Created by [`stderr`], this handle duplicates file descriptor 2 and
+/// implements [`AsyncWrite`] for runtime-driven writes. Dropping it does not
+/// close the process-wide stderr stream.
 pub struct Stderr {
     writer: StandardWriter,
 }
@@ -97,6 +105,8 @@ pub fn stdin() -> io::Result<Stdin> {
 }
 
 /// Opens an async stdout writer.
+///
+/// The returned [`Stdout`] owns a duplicate of the process stdout descriptor.
 pub fn stdout() -> io::Result<Stdout> {
     Ok(Stdout {
         writer: StandardWriter::new(duplicate_fd(libc::STDOUT_FILENO)?),
@@ -104,6 +114,8 @@ pub fn stdout() -> io::Result<Stdout> {
 }
 
 /// Opens an async stderr writer.
+///
+/// The returned [`Stderr`] owns a duplicate of the process stderr descriptor.
 pub fn stderr() -> io::Result<Stderr> {
     Ok(Stderr {
         writer: StandardWriter::new(duplicate_fd(libc::STDERR_FILENO)?),
@@ -178,6 +190,9 @@ impl Stdin {
 
 impl Stdout {
     /// Writes bytes to standard output.
+    ///
+    /// For extension methods such as `write_all` and `flush`, use the
+    /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.writer.write(buf).await
     }
@@ -185,6 +200,9 @@ impl Stdout {
 
 impl Stderr {
     /// Writes bytes to standard error.
+    ///
+    /// For extension methods such as `write_all` and `flush`, use the
+    /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.writer.write(buf).await
     }
