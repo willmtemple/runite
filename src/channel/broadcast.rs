@@ -1,4 +1,46 @@
 //! Multi-producer, multi-consumer broadcast channels.
+//!
+//! # Examples
+//!
+//! Each receiver observes every message sent after it subscribes.
+//!
+//! ```
+//! let (sender, mut first) = runite::channel::broadcast::channel(8);
+//! let mut second = sender.subscribe();
+//!
+//! runite::queue_future(async move {
+//!     assert_eq!(sender.send("one"), Ok(2));
+//!     assert_eq!(sender.send("two"), Ok(2));
+//!
+//!     assert_eq!(first.recv().await.unwrap(), "one");
+//!     assert_eq!(first.recv().await.unwrap(), "two");
+//!     assert_eq!(second.recv().await.unwrap(), "one");
+//!     assert_eq!(second.recv().await.unwrap(), "two");
+//! });
+//!
+//! runite::run();
+//! ```
+//!
+//! Slow receivers report [`RecvError::Lagged`] when messages are overwritten by
+//! the bounded ring buffer.
+//!
+//! ```
+//! use runite::channel::broadcast::{self, RecvError};
+//!
+//! let (sender, mut receiver) = broadcast::channel(2);
+//!
+//! runite::queue_future(async move {
+//!     sender.send(1).unwrap();
+//!     sender.send(2).unwrap();
+//!     sender.send(3).unwrap();
+//!
+//!     assert_eq!(receiver.recv().await, Err(RecvError::Lagged(1)));
+//!     assert_eq!(receiver.recv().await, Ok(2));
+//!     assert_eq!(receiver.recv().await, Ok(3));
+//! });
+//!
+//! runite::run();
+//! ```
 
 use std::collections::VecDeque;
 use std::fmt;

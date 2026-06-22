@@ -1,4 +1,24 @@
 //! Multi-producer, single-consumer channels.
+//!
+//! # Examples
+//!
+//! Send from one task and receive from another. Once every sender is dropped,
+//! [`Receiver::recv`] returns `None`.
+//!
+//! ```
+//! let (sender, mut receiver) = runite::channel::mpsc::channel(2);
+//!
+//! runite::queue_future(async move {
+//!     sender.send("hello").await.unwrap();
+//! });
+//!
+//! runite::queue_future(async move {
+//!     assert_eq!(receiver.recv().await, Some("hello"));
+//!     assert_eq!(receiver.recv().await, None);
+//! });
+//!
+//! runite::run();
+//! ```
 
 use std::collections::VecDeque;
 use std::future::poll_fn;
