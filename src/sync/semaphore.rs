@@ -13,6 +13,49 @@ struct Waiter {
 }
 
 /// A single-threaded counting semaphore.
+///
+/// A semaphore holds a number of permits. Each successful acquire removes one
+/// permit, and dropping the returned [`Permit`] releases it.
+///
+/// # Examples
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::rc::Rc;
+///
+/// use runite::sync::Semaphore;
+///
+/// let semaphore = Rc::new(Semaphore::new(1));
+/// let active = Rc::new(Cell::new(0));
+/// let max_active = Rc::new(Cell::new(0));
+/// let completed = Rc::new(Cell::new(0));
+///
+/// for _ in 0..2 {
+///     runite::queue_future({
+///         let semaphore = Rc::clone(&semaphore);
+///         let active = Rc::clone(&active);
+///         let max_active = Rc::clone(&max_active);
+///         let completed = Rc::clone(&completed);
+///         async move {
+///             let permit = semaphore.acquire().await;
+///             active.set(active.get() + 1);
+///             max_active.set(max_active.get().max(active.get()));
+///
+///             runite::yield_now().await;
+///
+///             active.set(active.get() - 1);
+///             completed.set(completed.get() + 1);
+///             drop(permit);
+///         }
+///     });
+/// }
+///
+/// runite::run();
+///
+/// assert_eq!(completed.get(), 2);
+/// assert_eq!(max_active.get(), 1);
+/// assert!(semaphore.try_acquire().is_some());
+/// ```
 pub struct Semaphore {
     permits: Cell<usize>,
     next_waiter_id: Cell<usize>,
@@ -21,12 +64,16 @@ pub struct Semaphore {
 }
 
 /// A permit returned by [`Semaphore::acquire`] and [`Semaphore::try_acquire`].
+///
+/// Dropping a permit releases it back to the semaphore or hands it directly to
+/// the next queued waiter.
 pub struct Permit<'a> {
     semaphore: &'a Semaphore,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl Semaphore {
+    /// Creates a semaphore with `permits` initially available.
     pub fn new(permits: usize) -> Self {
         Self {
             permits: Cell::new(permits),
@@ -36,10 +83,18 @@ impl Semaphore {
         }
     }
 
+    /// Waits until a permit is available and returns it.
+    ///
+    /// Waiters are woken in FIFO order. Dropping the returned [`Permit`]
+    /// releases it.
     pub async fn acquire(&self) -> Permit<'_> {
         AcquireFuture::new(self).await
     }
 
+    /// Attempts to acquire a permit without waiting.
+    ///
+    /// Returns [`None`] if no permit is available or if queued waiters should
+    /// receive future permits first.
     pub fn try_acquire(&self) -> Option<Permit<'_>> {
         if !self.waiters.borrow().is_empty() {
             return None;

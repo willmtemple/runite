@@ -17,6 +17,39 @@ struct Waiter {
 /// `notify_one` stores one permit when no task is waiting; the next
 /// [`Notify::notified`] call consumes it immediately. `notify_waiters` wakes all
 /// current waiters and does not create a stored permit.
+///
+/// # Examples
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::rc::Rc;
+///
+/// use runite::sync::Notify;
+///
+/// let notify = Rc::new(Notify::new());
+/// let woke = Rc::new(Cell::new(false));
+///
+/// runite::queue_future({
+///     let notify = Rc::clone(&notify);
+///     let woke = Rc::clone(&woke);
+///     async move {
+///         notify.notified().await;
+///         woke.set(true);
+///     }
+/// });
+///
+/// runite::queue_future({
+///     let notify = Rc::clone(&notify);
+///     async move {
+///         runite::yield_now().await;
+///         notify.notify_one();
+///     }
+/// });
+///
+/// runite::run();
+///
+/// assert!(woke.get());
+/// ```
 pub struct Notify {
     permit: Cell<bool>,
     next_waiter_id: Cell<usize>,
@@ -25,6 +58,7 @@ pub struct Notify {
 }
 
 impl Notify {
+    /// Creates a notification primitive with no stored permit.
     pub fn new() -> Self {
         Self {
             permit: Cell::new(false),
@@ -34,10 +68,19 @@ impl Notify {
         }
     }
 
+    /// Waits for a notification.
+    ///
+    /// If [`notify_one`](Self::notify_one) has already stored a permit, this
+    /// returns immediately and consumes that permit.
     pub async fn notified(&self) {
         Notified::new(self).await
     }
 
+    /// Wakes one waiting task or stores one permit for the next waiter.
+    ///
+    /// At most one permit is stored; repeated calls before a waiter arrives
+    /// still allow only one future [`notified`](Self::notified) call to complete
+    /// immediately.
     pub fn notify_one(&self) {
         if let Some(waiter) = self.waiters.borrow_mut().pop_front() {
             waiter.selected.set(true);
@@ -47,6 +90,9 @@ impl Notify {
         }
     }
 
+    /// Wakes all tasks that are currently waiting.
+    ///
+    /// This does not store a permit for future waiters.
     pub fn notify_waiters(&self) {
         for waiter in self.waiters.borrow_mut().drain(..) {
             waiter.selected.set(true);

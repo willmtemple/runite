@@ -13,6 +13,50 @@ enum State {
 }
 
 /// A single-threaded async cell initialized at most once.
+///
+/// The first caller to [`get_or_init`](Self::get_or_init) runs the initializer.
+/// Concurrent callers wait for that initializer and then receive the same
+/// reference.
+///
+/// # Examples
+///
+/// ```
+/// use std::cell::{Cell, RefCell};
+/// use std::rc::Rc;
+///
+/// use runite::sync::OnceCell;
+///
+/// let cell = Rc::new(OnceCell::new());
+/// let init_count = Rc::new(Cell::new(0));
+/// let observed = Rc::new(RefCell::new(Vec::new()));
+///
+/// for _ in 0..2 {
+///     runite::queue_future({
+///         let cell = Rc::clone(&cell);
+///         let init_count = Rc::clone(&init_count);
+///         let observed = Rc::clone(&observed);
+///         async move {
+///             let value = cell
+///                 .get_or_init(|| {
+///                     let init_count = Rc::clone(&init_count);
+///                     async move {
+///                         init_count.set(init_count.get() + 1);
+///                         runite::yield_now().await;
+///                         42
+///                     }
+///                 })
+///                 .await;
+///             observed.borrow_mut().push(*value);
+///         }
+///     });
+/// }
+///
+/// runite::run();
+///
+/// assert_eq!(init_count.get(), 1);
+/// assert_eq!(&*observed.borrow(), &[42, 42]);
+/// assert_eq!(cell.get(), Some(&42));
+/// ```
 pub struct OnceCell<T> {
     state: Cell<State>,
     notify: Notify,
@@ -21,6 +65,7 @@ pub struct OnceCell<T> {
 }
 
 impl<T> OnceCell<T> {
+    /// Creates an empty cell.
     pub fn new() -> Self {
         Self {
             state: Cell::new(State::Empty),
@@ -30,6 +75,10 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Returns the initialized value, if any.
+    ///
+    /// Returns [`None`] while the cell is empty or while an asynchronous
+    /// initializer is still running.
     pub fn get(&self) -> Option<&T> {
         if self.state.get() != State::Ready {
             return None;
@@ -41,6 +90,10 @@ impl<T> OnceCell<T> {
         unsafe { (&*self.value.get()).as_ref() }
     }
 
+    /// Returns the cell value, initializing it with `f` if needed.
+    ///
+    /// Only the first caller runs `f`. Other callers that arrive while
+    /// initialization is in progress wait until the value is ready.
     pub async fn get_or_init<F, Fut>(&self, f: F) -> &T
     where
         F: FnOnce() -> Fut,
