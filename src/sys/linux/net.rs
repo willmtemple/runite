@@ -28,6 +28,7 @@ use crate::platform::linux_x86_64::uring::{
     IORING_OP_RECV, IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN,
     IORING_OP_SOCKET, IoUringCqe, IoUringSqe,
 };
+use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
@@ -128,9 +129,7 @@ pub async fn connect(op: NetOp) -> io::Result<()> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || connect_sync(fd, fallback_addr)).await
-        }
+        Err(error) if should_fallback_to_offload(&error) => connect_ready(fd, fallback_addr).await,
         result => result,
     }
 }
@@ -216,7 +215,7 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => offload(move || accept_sync(fd)).await,
+        Err(error) if should_fallback_to_offload(&error) => accept_ready(fd).await,
         result => result,
     }
 }
@@ -226,9 +225,10 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
         unreachable!("send backend called with non-send op");
     };
 
-    // Capability known: io_uring SEND is not supported — skip to offload directly.
+    // Capability known: io_uring SEND is not supported — use the readiness
+    // fallback directly instead of probing the ring again.
     if SEND_URING_SUPPORTED.with(|c| c.get()) == Some(false) {
-        return offload(move || send_sync(fd, data, flags)).await;
+        return send_ready(fd, data, flags).await;
     }
 
     // Capability known: io_uring SEND works — submit without a fallback clone.
@@ -276,7 +276,7 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
     {
         Err(error) if should_fallback_to_offload(&error) => {
             SEND_URING_SUPPORTED.with(|c| c.set(Some(false)));
-            offload(move || send_sync(fd, fallback_data, flags)).await
+            send_ready(fd, fallback_data, flags).await
         }
         result => {
             if result.is_ok() {
@@ -357,9 +357,7 @@ pub async fn recv(op: NetOp) -> io::Result<Vec<u8>> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || recv_sync(fd, len, flags)).await
-        }
+        Err(error) if should_fallback_to_offload(&error) => recv_ready(fd, len, flags).await,
         result => result,
     }
 }
@@ -408,9 +406,7 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
     )
     .await
     {
-        Err(error) if should_fallback_to_offload(&error) => {
-            offload(move || recv_from_sync(fd, len, flags)).await
-        }
+        Err(error) if should_fallback_to_offload(&error) => recv_from_ready(fd, len, flags).await,
         result => result,
     }
 }
@@ -1125,12 +1121,6 @@ fn socket_sync(domain: i32, socket_type: i32, protocol: i32, flags: u32) -> io::
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn connect_sync(fd: RawFd, addr: RawSocketAddr) -> io::Result<()> {
-    // SAFETY: `fd` is valid for the duration of the call, and `addr` points to
-    // `addr.len()` initialized bytes describing a sockaddr.
-    cvt(unsafe { libc::connect(fd, addr.as_ptr(), addr.len()) }).map(|_| ())
-}
-
 fn bind_sync(fd: RawFd, addr: RawSocketAddr) -> io::Result<()> {
     // SAFETY: `fd` is valid for the duration of the call, and `addr` points to
     // `addr.len()` initialized bytes describing a sockaddr.
@@ -1166,7 +1156,7 @@ fn accept_sync(fd: RawFd) -> io::Result<AcceptedSocket> {
     })
 }
 
-fn send_sync(fd: RawFd, data: Vec<u8>, flags: i32) -> io::Result<usize> {
+fn send_slice_sync(fd: RawFd, data: &[u8], flags: i32) -> io::Result<usize> {
     // SAFETY: `fd` is valid for the duration of the call, and `data` is an
     // immutable buffer valid for `data.len()` bytes.
     let written = unsafe { libc::send(fd, data.as_ptr().cast::<c_void>(), data.len(), flags) };
@@ -1225,6 +1215,123 @@ fn shutdown_sync(fd: RawFd, how: Shutdown) -> io::Result<()> {
     cvt(unsafe { libc::shutdown(fd, shutdown_how(how)) }).map(|_| ())
 }
 
+/// Marks `fd` non-blocking so the readiness-based fallback helpers can poll it
+/// without ever stalling the event loop. Idempotent.
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `F_GETFL`/`F_SETFL` take a valid fd and an integer flag set; no
+    // user pointers are involved.
+    let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
+    cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) })?;
+    Ok(())
+}
+
+/// Reads and clears the pending socket error via `SO_ERROR`, used to surface the
+/// result of a non-blocking `connect` once the socket reports writable.
+fn socket_error(fd: RawFd) -> io::Result<()> {
+    let mut err: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `getsockopt` writes a single `c_int` into `err`; `len` is
+    // initialized to that value's size and updated in place.
+    cvt(unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            (&mut err as *mut libc::c_int).cast::<c_void>(),
+            &mut len,
+        )
+    })?;
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(err))
+    }
+}
+
+// Readiness-based fallbacks used when an io_uring socket opcode is unsupported
+// by the running kernel. They mirror the macOS backend: mark the fd
+// non-blocking, attempt the syscall inline, and park on `IORING_OP_POLL_ADD`
+// readiness (never the blocking thread pool) when it would block.
+
+async fn connect_ready(fd: RawFd, addr: RawSocketAddr) -> io::Result<()> {
+    set_nonblocking(fd)?;
+    loop {
+        // SAFETY: `fd` is valid for the duration of the call, and `addr` points
+        // to `addr.len()` initialized bytes describing a sockaddr.
+        let result = unsafe { libc::connect(fd, addr.as_ptr(), addr.len()) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EINPROGRESS) | Some(libc::EALREADY) => {
+                wait_writable(fd).await?;
+                return socket_error(fd);
+            }
+            Some(libc::EISCONN) => return Ok(()),
+            _ => return Err(error),
+        }
+    }
+}
+
+async fn accept_ready(fd: RawFd) -> io::Result<AcceptedSocket> {
+    set_nonblocking(fd)?;
+    loop {
+        match accept_sync(fd) {
+            Ok(socket) => return Ok(socket),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_readable(fd).await?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn send_ready(fd: RawFd, data: Vec<u8>, flags: i32) -> io::Result<usize> {
+    set_nonblocking(fd)?;
+    loop {
+        match send_slice_sync(fd, &data, flags) {
+            Ok(written) => return Ok(written),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_writable(fd).await?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn recv_ready(fd: RawFd, len: usize, flags: i32) -> io::Result<Vec<u8>> {
+    set_nonblocking(fd)?;
+    loop {
+        match recv_sync(fd, len, flags) {
+            Ok(data) => return Ok(data),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_readable(fd).await?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn recv_from_ready(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatagram> {
+    set_nonblocking(fd)?;
+    loop {
+        match recv_from_sync(fd, len, flags) {
+            Ok(datagram) => return Ok(datagram),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_readable(fd).await?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn close_sync(fd: RawFd) -> io::Result<()> {
     // SAFETY: `fd` is an owned raw descriptor being closed exactly once by the
     // networking backend.
@@ -1255,5 +1362,75 @@ fn cvt_long(value: libc::ssize_t) -> io::Result<libc::ssize_t> {
         Err(io::Error::last_os_error())
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use crate::platform::current::runtime::{queue_future, run};
+
+    /// Exercises the readiness-based fallback helpers (`connect_ready`,
+    /// `accept_ready`, `send_ready`, `recv_ready`) directly, bypassing io_uring.
+    /// On a modern kernel the production code always takes the io_uring path, so
+    /// this test drives the fallback explicitly to prove it performs a correct,
+    /// non-offloaded TCP echo using only `IORING_OP_POLL_ADD` readiness waits.
+    #[test]
+    fn readiness_fallback_round_trips_tcp_without_offload() {
+        let done = Arc::new(Mutex::new(None));
+        let done_for_task = Arc::clone(&done);
+
+        queue_future(async move {
+            let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("listener socket should be created");
+            let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            bind_sync(
+                listener.as_raw_fd(),
+                RawSocketAddr::from_socket_addr(loopback),
+            )
+            .expect("bind should succeed");
+            listen_sync(listener.as_raw_fd(), DEFAULT_LISTENER_BACKLOG)
+                .expect("listen should succeed");
+            let bound = local_addr(listener.as_raw_fd()).expect("local_addr should resolve");
+
+            let client = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("client socket should be created");
+
+            // Connect + accept entirely through the readiness fallback.
+            connect_ready(client.as_raw_fd(), RawSocketAddr::from_socket_addr(bound))
+                .await
+                .expect("readiness connect should succeed");
+            let server = accept_ready(listener.as_raw_fd())
+                .await
+                .expect("readiness accept should succeed");
+
+            let sent = send_ready(client.as_raw_fd(), b"ping".to_vec(), 0)
+                .await
+                .expect("readiness send should succeed");
+            assert_eq!(sent, 4);
+
+            let received = recv_ready(server.fd, 16, 0)
+                .await
+                .expect("readiness recv should succeed");
+            assert_eq!(&received, b"ping");
+
+            send_ready(server.fd, b"pong".to_vec(), 0)
+                .await
+                .expect("readiness send back should succeed");
+            let echoed = recv_ready(client.as_raw_fd(), 16, 0)
+                .await
+                .expect("readiness recv back should succeed");
+            assert_eq!(&echoed, b"pong");
+
+            let _ = close_sync(server.fd);
+            *done_for_task.lock().expect("result mutex poisoned") = Some(echoed);
+        });
+
+        run();
+
+        let echoed = done.lock().expect("result mutex poisoned").take();
+        assert_eq!(echoed.as_deref(), Some(&b"pong"[..]));
     }
 }

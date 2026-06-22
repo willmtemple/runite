@@ -292,7 +292,7 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 | try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool |
 | read_dir | offloaded streaming producer (`getdents` can block, no io_uring opcode) | blocking pool producer |
 | close | `IORING_OP_CLOSE`, inline `close(2)` fallback | blocking pool / synchronous close helper |
-| network ops | `io_uring` first; non-blocking ops fall back inline, data-path ops fall back to offload on unsupported kernels | `kqueue` readiness plus synchronous nonblocking socket calls |
+| network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls |
 | Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path |
 | stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path |
 | wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot |
@@ -304,11 +304,13 @@ Notes:
   event-loop thread rather than offloading (`src/sys/linux/fs.rs`).
 - Linux network operations use io_uring first. When an opcode is unsupported on the running
   kernel, the *non-blocking* control operations (socket, bind, listen, shutdown, close, dup) run
-  inline on the event loop instead of bouncing to the blocking pool, since they never block. The
-  *data-path* operations that can block (connect, accept, send, recv, datagram send/recv) still
-  fall back to the blocking pool; converting these to a Linux epoll/readiness path (mirroring the
-  macOS and Unix-domain-socket model) is tracked as a follow-up and requires CI on an
-  io_uring-limited kernel to validate (`src/sys/linux/net.rs`).
+  inline on the event loop, and the *data-path* operations that can block (connect, accept, send,
+  recv, datagram recv) fall back to a **readiness path** — they mark the fd non-blocking and park
+  on `IORING_OP_POLL_ADD` readiness (`wait_readable`/`wait_writable`) rather than offloading to
+  the blocking pool, mirroring the macOS and Unix-domain-socket model (`src/sys/linux/net.rs`).
+  The blocking pool is reserved for genuinely synchronous-only work (DNS resolution via
+  `getaddrinfo`, `read_dir`/`getdents`). On a modern kernel the io_uring completion path always
+  wins; the readiness fallback is validated by a direct unit test that exercises it explicitly.
 - macOS has no io_uring equivalent. Its filesystem backend is entirely blocking-pool-based
   (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics
