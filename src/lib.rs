@@ -46,16 +46,13 @@ pub mod fd;
 pub mod fs;
 pub mod io;
 pub mod net;
-#[doc(hidden)]
-pub mod op;
-#[doc(hidden)]
-pub mod platform;
+pub(crate) mod op;
+pub(crate) mod platform;
 pub mod process;
 pub mod signal;
 pub mod stdio;
 pub mod sync;
-#[doc(hidden)]
-pub mod sys;
+pub(crate) mod sys;
 pub mod task;
 pub mod time;
 
@@ -94,9 +91,6 @@ mod runtime_api {
 
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
-    pub use crate::platform::current::driver::{
-        Driver, ReadyEvents, ThreadNotifier, create_driver, monotonic_now,
-    };
     pub use crate::platform::current::runtime::{
         AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
         WorkerHandle, YieldNow, yield_now,
