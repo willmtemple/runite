@@ -84,6 +84,9 @@ pub use platform::current::runtime::{
     yield_now,
 };
 
+/// Standard stream primitives.
+pub use stdio::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
+
 /// Spawns blocking work on the shared OS-thread pool and returns a future that
 /// resolves to the closure's result. See [`task::spawn_blocking`].
 pub use task::{BlockingJoinHandle, JoinError, spawn_blocking};
