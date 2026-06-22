@@ -19,9 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Linux + macOS), code-coverage and benchmark jobs, and a tag-triggered crates.io
   release workflow.
 - Integration test suites and criterion benchmarks for the runtime and I/O paths.
+- Task cancellation: `JoinHandle::abort`, `JoinHandle::is_finished`, and a cloneable
+  `AbortHandle` (via `JoinHandle::abort_handle`). Aborting drops the task's future, which
+  cancels any in-flight driver operation it is parked on.
 
 ### Changed
 
+- Awaiting a `JoinHandle<T>` now yields `Result<T, JoinError>` instead of `T`, resolving to
+  `Err(JoinError::Aborted)` when the task is aborted. `JoinError` gained an `Aborted` variant
+  alongside `Cancelled`.
 - Non-blocking control syscalls (socket/bind/listen/shutdown/close, fd duplication) now run
   inline on the event loop instead of being offloaded to the blocking thread pool when their
   io_uring opcode is unsupported.

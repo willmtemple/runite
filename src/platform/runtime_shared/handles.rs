@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
-use super::future_task::JoinState;
+use super::future_task::{JoinState, TaskShared};
 use super::state::{ThreadShared, WorkerCompletion};
 use crate::trace_targets;
 
@@ -87,16 +87,71 @@ impl IntervalHandle {
 
 /// Handle returned by `queue_future`.
 ///
-/// Awaiting a join handle yields the output of the queued future.
+/// Awaiting a join handle yields `Ok(output)` with the queued future's output,
+/// or [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was
+/// aborted via [`abort`](Self::abort) before it completed.
+///
+/// Dropping a `JoinHandle` does **not** cancel the task — it continues to run
+/// to completion detached. Use [`abort`](Self::abort) (or an
+/// [`AbortHandle`]) to cancel.
 pub struct JoinHandle<T> {
     pub(crate) state: Rc<JoinState<T>>,
 }
 
+impl<T> JoinHandle<T> {
+    /// Aborts the task.
+    ///
+    /// The task's future is dropped at its next suspension point (it is not
+    /// polled again), which cancels any in-flight driver operation it is parked
+    /// on. A subsequent await of this handle resolves to
+    /// [`Err(JoinError::Aborted)`](crate::task::JoinError). Aborting a task that
+    /// has already completed is a no-op.
+    pub fn abort(&self) {
+        self.state.shared.abort();
+    }
+
+    /// Returns `true` once the task has completed or been aborted.
+    pub fn is_finished(&self) -> bool {
+        self.state.shared.is_finished()
+    }
+
+    /// Returns a cheap, cloneable handle that can abort this task from elsewhere
+    /// without holding the `JoinHandle` (and thus without the ability to await
+    /// the output).
+    pub fn abort_handle(&self) -> AbortHandle {
+        AbortHandle {
+            shared: Rc::clone(&self.state.shared),
+        }
+    }
+}
+
 impl<T> Future for JoinHandle<T> {
-    type Output = T;
+    type Output = Result<T, crate::task::JoinError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.state.poll(cx)
+    }
+}
+
+/// A cloneable handle that can abort a queued task without joining it.
+///
+/// Obtained from [`JoinHandle::abort_handle`]. Like the runtime's futures, this
+/// handle is `!Send` and only valid on the runtime thread that created the
+/// task.
+#[derive(Clone)]
+pub struct AbortHandle {
+    shared: Rc<TaskShared>,
+}
+
+impl AbortHandle {
+    /// Aborts the associated task. See [`JoinHandle::abort`].
+    pub fn abort(&self) {
+        self.shared.abort();
+    }
+
+    /// Returns `true` once the associated task has completed or been aborted.
+    pub fn is_finished(&self) -> bool {
+        self.shared.is_finished()
     }
 }
 

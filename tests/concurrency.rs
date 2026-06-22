@@ -69,7 +69,7 @@ fn bounded_channel_preserves_order_under_backpressure() {
             collected.push(value);
         }
 
-        producer.await;
+        producer.await.expect("producer task should not be aborted");
         collected
     });
 

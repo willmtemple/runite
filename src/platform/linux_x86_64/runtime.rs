@@ -19,8 +19,8 @@ use super::driver::{self, Driver};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
-    clear_interval, clear_timeout, yield_now,
+    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
+    YieldNow, clear_interval, clear_timeout, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.

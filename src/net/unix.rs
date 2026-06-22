@@ -610,7 +610,8 @@ mod tests {
                     .expect("client read should succeed");
                 assert_eq!(&response[..read], b"pong");
 
-                *received_for_task.lock().unwrap() = Some(server.await);
+                *received_for_task.lock().unwrap() =
+                    Some(server.await.expect("server task should not be aborted"));
             });
         });
         run();

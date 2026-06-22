@@ -830,7 +830,7 @@ mod tests {
                     .expect("client read should succeed");
                 assert_eq!(&response, b"pong");
 
-                let server_bytes = server.await;
+                let server_bytes = server.await.expect("server task should not be aborted");
                 *received_for_task
                     .lock()
                     .expect("received buffer should not be poisoned") = Some(server_bytes);
@@ -875,7 +875,7 @@ mod tests {
                 let _client = TcpStream::connect(format!("localhost:{port}"))
                     .await
                     .expect("localhost DNS connect should succeed");
-                let peer_addr = server.await;
+                let peer_addr = server.await.expect("server task should not be aborted");
                 *peer_for_task
                     .lock()
                     .expect("peer buffer should not be poisoned") =
@@ -952,7 +952,9 @@ mod tests {
                 assert_eq!(peer, server_addr);
                 assert_eq!(&response[..read], b"pong");
 
-                let received = server_task.await;
+                let received = server_task
+                    .await
+                    .expect("server task should not be aborted");
                 *server_received_for_task.lock().unwrap() = Some(received);
             });
         });

@@ -27,17 +27,38 @@ pub struct BlockingJoinHandle<R: Send + 'static> {
     inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>>,
 }
 
-/// Error returned by awaiting a [`BlockingJoinHandle`].
+/// Error returned by awaiting a join handle.
+///
+/// Produced both by [`BlockingJoinHandle`] (when a blocking-pool worker exits
+/// without delivering a value) and by [`crate::JoinHandle`] (when a queued
+/// future is aborted before it completes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
     /// The worker exited without producing a value (shutdown, panic, etc.).
     Cancelled,
+    /// The task was aborted via [`JoinHandle::abort`](crate::JoinHandle::abort)
+    /// or an [`AbortHandle`](crate::AbortHandle) before it completed.
+    Aborted,
+}
+
+impl JoinError {
+    /// Returns `true` if the task was aborted before completion.
+    pub fn is_aborted(&self) -> bool {
+        matches!(self, JoinError::Aborted)
+    }
+
+    /// Returns `true` if a blocking-pool worker was cancelled (e.g. during
+    /// runtime shutdown) without producing a value.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, JoinError::Cancelled)
+    }
 }
 
 impl fmt::Display for JoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JoinError::Cancelled => f.write_str("blocking task was cancelled"),
+            JoinError::Aborted => f.write_str("task was aborted"),
         }
     }
 }

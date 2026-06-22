@@ -52,7 +52,8 @@ pub use driver_backend::{DriverBackend, Notifier, ReadyEvents};
 #[allow(unused_imports)]
 pub(crate) use future_task::{FutureTask, JoinState};
 pub use handles::{
-    IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
+    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
+    YieldNow,
 };
 pub use scheduler::{
     Runtime, clear_interval, clear_timeout, current_thread_handle, queue_future, queue_microtask,
