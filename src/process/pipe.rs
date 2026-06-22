@@ -1,3 +1,38 @@
+//! Async pipe endpoints for child standard streams.
+//!
+//! These handle types are created when a [`Command`](super::Command) configures
+//! a standard stream with [`Stdio::piped`](super::Stdio::piped). They implement
+//! the runtime's async I/O traits so subprocess input and output can be composed
+//! with other tasks without blocking the event loop.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! # async fn example() -> std::io::Result<()> {
+//! use runite::io::{AsyncReadExt, AsyncWriteExt};
+//! use runite::process::{Command, Stdio};
+//!
+//! let mut child = Command::new("/bin/cat")
+//!     .stdin(Stdio::piped())
+//!     .stdout(Stdio::piped())
+//!     .spawn()?;
+//!
+//! let mut stdin = child.stdin.take().expect("stdin should be piped");
+//! stdin.write_all(b"ping").await?;
+//! stdin.close().await?;
+//!
+//! let mut stdout = Vec::new();
+//! child
+//!     .stdout
+//!     .as_mut()
+//!     .expect("stdout should be piped")
+//!     .read_to_end(&mut stdout)
+//!     .await?;
+//! assert_eq!(stdout, b"ping");
+//! # Ok(())
+//! # }
+//! ```
+//!
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
