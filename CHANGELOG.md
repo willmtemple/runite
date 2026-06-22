@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Task cancellation: `JoinHandle::abort`, `JoinHandle::is_finished`, and a cloneable
   `AbortHandle` (via `JoinHandle::abort_handle`). Aborting drops the task's future, which
   cancels any in-flight driver operation it is parked on.
+- Async subprocess support in `runite::process`: `Command`/`Child` with piped async stdio
+  (`ChildStdin`/`ChildStdout`/`ChildStderr`), `kill`, and `wait`. On Linux child exit is
+  awaited via a `pidfd` registered with io_uring readiness (no `SIGCHLD` handler, no
+  blocking-pool offload); the same `Command`/`Child` interface is provided on macOS.
 
 ### Changed
 
