@@ -59,13 +59,26 @@ fn main() {
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_task`,
   `queue_microtask`, `queue_future`, `yield_now`.
 - **Workers:** `spawn_worker` plus the `Send`-only cross-thread `ThreadHandle::queue_task`.
+- **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;
+  use `abort`, `abort_handle`, `is_finished`, and cloneable `AbortHandle`s for cancellation.
 - **Timers:** `set_timeout`, `clear_timeout`, `set_interval`, `clear_interval`,
   and `time::{sleep, timeout}`.
 - **I/O:** async `fs`, `net` (TCP/UDP/Unix-domain), `stdio`, and crate-local
-  `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters.
-- **Channels & sync:** `channel::{mpsc, oneshot}`, `sync::{Mutex, Semaphore, Notify, OnceCell}`.
+  `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters; TCP split/reunite,
+  listener `incoming()` streams, async stdin/stdout/stderr, and `BufReader`/`BufWriter`.
+- **Processes:** `process::{Command, Child}` with piped async stdio, `kill`, and `wait`.
+- **Channels & sync:** `channel::{mpsc, oneshot, broadcast, watch}`,
+  `sync::{Mutex, Semaphore, Notify, OnceCell}`.
 - **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
-- **Signals:** async Unix signal handling.
+- **Signals:** async Unix signal handling, including SIGWINCH (`SignalKind::WindowChange`).
+
+### Scaling across cores
+
+`runite` is event-loop-per-thread: each runtime thread drives its own local scheduler and
+accepts `!Send` futures. To scale CPU-bound or server workloads across cores, start one
+event loop per core with `spawn_worker`; servers should bind per-core accept loops with
+`SO_REUSEPORT` so the OS distributes inbound connections. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+for the full threading and scaling model.
 
 ## Feature flags
 
@@ -87,6 +100,9 @@ fn main() {
 cargo run --example runtime_loop_showcase
 cargo run --example async_fs_showcase
 cargo run --example channel_showcase
+cargo run --example tcp_echo_server
+cargo run --example subprocess_pipeline
+cargo run --example broadcast_watch
 cargo run --example hyper_http_client --features hyper
 ```
 
@@ -109,12 +125,12 @@ Individual tasks:
 
 | Task                | Command                  | Purpose                                        |
 | ------------------- | ------------------------ | ---------------------------------------------- |
-| `mise run build`    | `cargo build`            | Build the workspace.                            |
-| `mise run test`     | `cargo test`             | Unit, integration, and doctests.               |
-| `mise run lint`     | `cargo clippy -D warnings` | Lint with warnings denied.                    |
-| `mise run bench`    | `cargo bench`            | Criterion benchmarks (`benches/`).             |
-| `mise run coverage` | `cargo llvm-cov`         | HTML + lcov coverage report.                   |
-| `mise run cop`      | `cop cop-checks/main.cop`| Agent Cop static-analysis checks.              |
+| `mise run build`    | `cargo build --workspace --all-targets` | Build the workspace.             |
+| `mise run test`     | `cargo test --workspace --all-features` | Unit, integration, and doctests. |
+| `mise run lint`     | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Lint with warnings denied. |
+| `mise run bench`    | `cargo bench --workspace --all-features` | Criterion benchmarks (`benches/`). |
+| `mise run coverage` | `cargo llvm-cov --workspace --all-features ...` | HTML + lcov coverage report. |
+| `mise run cop`      | `cop cop-checks/main.cop -t .` | Agent Cop static-analysis checks.       |
 
 ### Testing
 
