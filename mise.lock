@@ -42,3 +42,6 @@ url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452
 [[tools.rust]]
 version = "1.96.0"
 backend = "core:rust"
+
+[tools.rust.options]
+components = "clippy,llvm-tools,rustfmt"
