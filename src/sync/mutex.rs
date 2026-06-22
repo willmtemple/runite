@@ -17,6 +17,33 @@ struct Waiter {
 ///
 /// This mutex is intentionally `!Send` and `!Sync`: it is only for tasks that
 /// remain on one runite runtime thread.
+///
+/// # Examples
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::rc::Rc;
+///
+/// use runite::sync::Mutex;
+///
+/// let mutex = Rc::new(Mutex::new(1));
+/// let observed = Rc::new(Cell::new(0));
+///
+/// runite::queue_future({
+///     let mutex = Rc::clone(&mutex);
+///     let observed = Rc::clone(&observed);
+///     async move {
+///         let mut guard = mutex.lock().await;
+///         *guard += 41;
+///         observed.set(*guard);
+///     }
+/// });
+///
+/// runite::run();
+///
+/// assert_eq!(observed.get(), 42);
+/// assert_eq!(*mutex.try_lock().expect("mutex should be unlocked"), 42);
+/// ```
 pub struct Mutex<T: ?Sized> {
     locked: Cell<bool>,
     next_waiter_id: Cell<usize>,
@@ -26,12 +53,16 @@ pub struct Mutex<T: ?Sized> {
 }
 
 /// Guard returned by [`Mutex::lock`] and [`Mutex::try_lock`].
+///
+/// The guard dereferences to the protected value and releases the mutex when it
+/// is dropped.
 pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl<T> Mutex<T> {
+    /// Creates a mutex containing `value`.
     pub fn new(value: T) -> Self {
         Self {
             locked: Cell::new(false),
@@ -44,10 +75,18 @@ impl<T> Mutex<T> {
 }
 
 impl<T: ?Sized> Mutex<T> {
+    /// Waits until the mutex is available and returns a guard.
+    ///
+    /// Waiters are woken in FIFO order. Dropping the returned [`MutexGuard`]
+    /// releases the mutex to the next waiter, if any.
     pub async fn lock(&self) -> MutexGuard<'_, T> {
         LockFuture::new(self).await
     }
 
+    /// Attempts to acquire the mutex without waiting.
+    ///
+    /// Returns [`None`] if the mutex is currently locked or if queued waiters
+    /// should acquire it first.
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         if self.locked.get() || !self.waiters.borrow().is_empty() {
             return None;
