@@ -1,4 +1,25 @@
-//! Async Unix domain socket API.
+//! Async Unix domain socket primitives.
+//!
+//! This module provides stream, listener, and datagram sockets for local
+//! interprocess communication on Unix platforms. Paths are encoded exactly as
+//! Unix socket path names and must not contain interior NUL bytes.
+//!
+//! # Examples
+//!
+//! Connected socket pairs are deterministic and do not require a filesystem
+//! socket path:
+//!
+//! ```
+//! runite::queue_future(async {
+//!     let (mut left, mut right) = runite::net::unix::UnixStream::pair().unwrap();
+//!     left.write_all(b"x").await.unwrap();
+//!
+//!     let mut buf = [0; 1];
+//!     let read = right.read(&mut buf).await.unwrap();
+//!     assert_eq!(&buf[..read], b"x");
+//! });
+//! runite::run();
+//! ```
 
 use core::future::Future;
 use core::pin::Pin;
@@ -15,18 +36,28 @@ use crate::io::Stream;
 use crate::op::net::NetOp;
 
 /// Async Unix domain stream socket.
+///
+/// `UnixStream` is a byte-oriented local socket similar to
+/// [`std::os::unix::net::UnixStream`], but its read, write, and connect
+/// operations integrate with the runite runtime.
 #[derive(Debug)]
 pub struct UnixStream {
     fd: OwnedFd,
 }
 
 /// Async Unix domain listening socket.
+///
+/// A listener accepts inbound [`UnixStream`] connections from a filesystem
+/// socket path on Unix platforms.
 #[derive(Debug)]
 pub struct UnixListener {
     fd: OwnedFd,
 }
 
 /// Async Unix domain datagram socket.
+///
+/// `UnixDatagram` sends and receives message-oriented datagrams between Unix
+/// domain socket paths or between connected datagram socket pairs.
 #[derive(Debug)]
 pub struct UnixDatagram {
     fd: OwnedFd,
@@ -34,6 +65,20 @@ pub struct UnixDatagram {
 
 impl UnixStream {
     /// Connects to a Unix domain stream socket at `path`.
+    ///
+    /// The path must name an existing Unix stream listener.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut stream = runite::net::unix::UnixStream::connect("service.sock")
+    ///         .await
+    ///         .unwrap();
+    ///     stream.write_all(b"ping").await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
         let fd = socket(libc::SOCK_STREAM)?;
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
@@ -42,6 +87,8 @@ impl UnixStream {
     }
 
     /// Creates a pair of connected Unix domain stream sockets.
+    ///
+    /// The pair is already connected and does not create a filesystem entry.
     pub fn pair() -> io::Result<(Self, Self)> {
         let (left, right) = std::os::unix::net::UnixStream::pair()?;
         left.set_nonblocking(true)?;
@@ -61,6 +108,9 @@ impl UnixStream {
     }
 
     /// Reads bytes from the stream.
+    ///
+    /// Returns the number of bytes copied into `buf`. A return value of `0`
+    /// indicates EOF when `buf` is not empty.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let data = crate::sys::current::net::recv(NetOp::Recv {
             fd: self.raw_fd(),
@@ -74,6 +124,10 @@ impl UnixStream {
     }
 
     /// Writes bytes to the stream.
+    ///
+    /// The operation may write fewer bytes than `buf.len()`; use
+    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
+    /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         crate::sys::current::net::send(NetOp::Send {
             fd: self.raw_fd(),
@@ -129,6 +183,16 @@ impl UnixStream {
 
 impl UnixListener {
     /// Binds a Unix domain stream listener to `path`.
+    ///
+    /// The path must not already exist. Remove a stale socket file before
+    /// binding if your application owns that path.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let listener = runite::net::unix::UnixListener::bind("runite.sock").unwrap();
+    /// assert!(listener.local_addr().unwrap().as_pathname().is_some());
+    /// ```
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
         let fd = socket(libc::SOCK_STREAM)?;
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
@@ -138,6 +202,9 @@ impl UnixListener {
     }
 
     /// Accepts an incoming connection.
+    ///
+    /// The returned address is the peer address reported by the operating
+    /// system for the accepted stream.
     pub async fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
         loop {
             match accept_sync(self.raw_fd()) {
@@ -227,6 +294,9 @@ impl Stream for Incoming<'_> {
 
 impl UnixDatagram {
     /// Binds a Unix domain datagram socket to `path`.
+    ///
+    /// The path must not already exist. Remove a stale socket file before
+    /// binding if your application owns that path.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
         let fd = socket(libc::SOCK_DGRAM)?;
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
@@ -235,11 +305,30 @@ impl UnixDatagram {
     }
 
     /// Creates an unbound Unix domain datagram socket.
+    ///
+    /// An unbound socket can be connected to a peer path or used for sending to
+    /// explicit paths.
     pub fn unbound() -> io::Result<Self> {
         socket(libc::SOCK_DGRAM).map(|fd| Self { fd })
     }
 
     /// Creates a pair of connected Unix domain datagram sockets.
+    ///
+    /// The pair is already connected and does not create filesystem entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (left, right) = runite::net::unix::UnixDatagram::pair().unwrap();
+    ///     left.send(b"x").await.unwrap();
+    ///
+    ///     let mut buf = [0; 1];
+    ///     let read = right.recv(&mut buf).await.unwrap();
+    ///     assert_eq!(&buf[..read], b"x");
+    /// });
+    /// runite::run();
+    /// ```
     pub fn pair() -> io::Result<(Self, Self)> {
         let (left, right) = std::os::unix::net::UnixDatagram::pair()?;
         left.set_nonblocking(true)?;
@@ -259,12 +348,18 @@ impl UnixDatagram {
     }
 
     /// Connects the socket to a default peer.
+    ///
+    /// Once connected, [`send`](Self::send) and [`recv`](Self::recv) operate
+    /// relative to that peer.
     pub async fn connect(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
         connect_async(self.raw_fd(), &addr).await
     }
 
     /// Receives a datagram from the connected peer.
+    ///
+    /// The socket must be connected first with [`connect`](Self::connect) or
+    /// created by [`pair`](Self::pair).
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         let data = crate::sys::current::net::recv(NetOp::Recv {
             fd: self.raw_fd(),
@@ -292,6 +387,9 @@ impl UnixDatagram {
     }
 
     /// Sends a datagram to the connected peer.
+    ///
+    /// The socket must be connected first with [`connect`](Self::connect) or
+    /// created by [`pair`](Self::pair).
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         crate::sys::current::net::send(NetOp::Send {
             fd: self.raw_fd(),
@@ -302,6 +400,8 @@ impl UnixDatagram {
     }
 
     /// Sends a datagram to `path`.
+    ///
+    /// This method does not change the socket's default peer.
     pub async fn send_to(&self, buf: &[u8], path: impl AsRef<Path>) -> io::Result<usize> {
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
         loop {

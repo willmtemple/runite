@@ -1,5 +1,10 @@
 //! Unix signal streams.
 //!
+//! Use [`signal`] to create a [`Signal`] stream for a specific [`SignalKind`],
+//! then await [`Signal::recv`] each time that kind is observed. This is useful
+//! for Unix-specific runtime integration such as graceful shutdown hooks,
+//! reconfiguration on `SIGHUP`, or terminal UI redraws after `SIGWINCH`.
+//!
 //! This implementation deliberately uses a dedicated blocking-pool reader task
 //! instead of a per-runtime-thread microtask drain. Signals are process-global,
 //! so one async-signal-safe handler writes to one process-wide wake fd, and the
@@ -56,6 +61,17 @@ thread_local! {
 ///
 /// Each variant maps to one Unix signal number. Register a stream with
 /// [`signal`] and await events with [`Signal::recv`].
+///
+/// These variants are Unix-specific; use [`crate::signal::ctrl_c`] when only a
+/// cross-platform interrupt/shutdown hook is needed.
+///
+/// # Examples
+///
+/// ```
+/// use runite::signal::unix::SignalKind;
+///
+/// let kind = SignalKind::WindowChange;
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub enum SignalKind {
     /// `SIGINT`, commonly sent by Ctrl-C.
@@ -93,6 +109,22 @@ pub struct Signal {
 ///
 /// Returns an error if another non-default, non-ignored handler is already
 /// installed for the requested signal.
+///
+/// # Examples
+///
+/// ```no_run
+/// runite::queue_future(async {
+///     let mut sigterm = runite::signal::unix::signal(
+///         runite::signal::unix::SignalKind::Terminate,
+///     )
+///     .expect("SIGTERM handler should install");
+///
+///     sigterm.recv().await;
+///     eprintln!("termination requested");
+/// });
+///
+/// runite::run();
+/// ```
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     let dispatch = dispatch()?;
     let index = kind.index();
@@ -117,6 +149,18 @@ impl Signal {
     /// Signals are coalesced by kind; if several identical signals arrive before
     /// the stream is polled again, one wake may represent multiple process
     /// signal deliveries.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// use runite::signal::unix::{signal, SignalKind};
+    ///
+    /// let mut resize = signal(SignalKind::WindowChange)?;
+    /// resize.recv().await;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn recv(&mut self) -> Option<()> {
         poll_fn(|cx| {
             let current = self.state.generation.load(Ordering::Acquire);

@@ -1,3 +1,47 @@
+//! Stream trait and combinators for asynchronous sequences.
+//!
+//! This module defines runite's lightweight [`Stream`] abstraction and
+//! [`StreamExt`] combinators. Streams yield values over time on the current
+//! thread and are used by APIs such as channel receivers and line-oriented I/O.
+//!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//!
+//! use runite::io::{Stream, StreamExt};
+//!
+//! struct Counter {
+//!     next: u8,
+//!     end: u8,
+//! }
+//!
+//! impl Stream for Counter {
+//!     type Item = u8;
+//!
+//!     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//!         if self.next == self.end {
+//!             Poll::Ready(None)
+//!         } else {
+//!             let item = self.next;
+//!             self.next += 1;
+//!             Poll::Ready(Some(item))
+//!         }
+//!     }
+//! }
+//!
+//! runite::queue_future(async {
+//!     let values = Counter { next: 0, end: 6 }
+//!         .filter(|item| item % 2 == 0)
+//!         .map(|item| item * 10)
+//!         .collect::<Vec<_>>()
+//!         .await;
+//!     assert_eq!(values, [0, 20, 40]);
+//! });
+//! runite::run();
+//! ```
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};

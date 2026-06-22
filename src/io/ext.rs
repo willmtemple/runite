@@ -1,3 +1,47 @@
+//! Future-returning extension traits for runite I/O.
+//!
+//! This module adapts the low-level poll methods from [`AsyncRead`] and
+//! [`AsyncWrite`] into futures such as [`AsyncReadExt::read_exact`] and
+//! [`AsyncWriteExt::write_all`]. It also provides [`Lines`], a stream adapter for
+//! UTF-8 line-oriented readers.
+//!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//! use std::io;
+//!
+//! use runite::io::{AsyncRead, AsyncReadExt, StreamExt};
+//!
+//! struct Bytes(&'static [u8]);
+//!
+//! impl AsyncRead for Bytes {
+//!     fn poll_read(
+//!         mut self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &mut [u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         let read = buf.len().min(self.0.len());
+//!         buf[..read].copy_from_slice(&self.0[..read]);
+//!         self.0 = &self.0[read..];
+//!         Poll::Ready(Ok(read))
+//!     }
+//! }
+//!
+//! runite::queue_future(async {
+//!     let lines = Bytes(b"alpha\nbeta")
+//!         .lines()
+//!         .collect::<Vec<_>>()
+//!         .await
+//!         .into_iter()
+//!         .collect::<Result<Vec<_>, _>>()
+//!         .unwrap();
+//!     assert_eq!(lines, ["alpha", "beta"]);
+//! });
+//! runite::run();
+//! ```
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};

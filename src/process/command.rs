@@ -1,3 +1,25 @@
+//! Builders and standard-stream configuration for subprocesses.
+//!
+//! [`Command`] accumulates a program, arguments, environment changes, working
+//! directory, and standard-stream choices before spawning a [`Child`](super::Child).
+//! [`Stdio`] describes how each child stream is connected.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! # async fn example() -> std::io::Result<()> {
+//! use runite::process::{Command, Stdio};
+//!
+//! let output = Command::new("/bin/echo")
+//!     .arg("hello")
+//!     .stdout(Stdio::piped())
+//!     .output()
+//!     .await?;
+//! assert_eq!(output, b"hello\n");
+//! # Ok(())
+//! # }
+//! ```
+//!
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,16 +44,43 @@ pub(crate) enum StdioKind {
 
 impl Stdio {
     /// Inherits the parent process handle for this standard stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Stdio;
+    ///
+    /// let inherited = Stdio::inherit();
+    /// ```
     pub fn inherit() -> Self {
         Self(StdioKind::Inherit)
     }
 
     /// Connects this standard stream to the platform null device.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Stdio;
+    ///
+    /// let discarded = Stdio::null();
+    /// ```
     pub fn null() -> Self {
         Self(StdioKind::Null)
     }
 
     /// Creates an async pipe connected to the child handle.
+    ///
+    /// Use this when the parent task needs to asynchronously write child stdin
+    /// or read child stdout/stderr.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Stdio;
+    ///
+    /// let piped = Stdio::piped();
+    /// ```
     pub fn piped() -> Self {
         Self(StdioKind::Piped)
     }
@@ -68,6 +117,14 @@ pub struct Command {
 
 impl Command {
     /// Creates a command that runs `program`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let command = Command::new("echo");
+    /// ```
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
             spec: CommandSpec {
@@ -83,12 +140,30 @@ impl Command {
     }
 
     /// Adds one argument to the command line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("echo");
+    /// command.arg("hello");
+    /// ```
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.spec.args.push(arg.as_ref().to_os_string());
         self
     }
 
     /// Adds multiple arguments to the command line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("echo");
+    /// command.args(["hello", "world"]);
+    /// ```
     pub fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -101,6 +176,15 @@ impl Command {
     }
 
     /// Sets or overrides an environment variable for the child.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("env");
+    /// command.env("APP_MODE", "test");
+    /// ```
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
         self.spec.env.push(EnvChange::Set(
             key.as_ref().to_os_string(),
@@ -110,6 +194,15 @@ impl Command {
     }
 
     /// Sets or overrides multiple environment variables for the child.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("env");
+    /// command.envs([("APP_MODE", "test"), ("APP_COLOR", "never")]);
+    /// ```
     pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -126,6 +219,15 @@ impl Command {
     ///
     /// The removal is applied after inherited environment handling and before
     /// the child starts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("env");
+    /// command.env_remove("APP_MODE");
+    /// ```
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.spec
             .env
@@ -137,30 +239,75 @@ impl Command {
     ///
     /// Variables added later with [`env`](Self::env) or [`envs`](Self::envs)
     /// are still included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("env");
+    /// command.env_clear().env("PATH", "/usr/bin");
+    /// ```
     pub fn env_clear(&mut self) -> &mut Self {
         self.spec.env.push(EnvChange::Clear);
         self
     }
 
     /// Sets the child working directory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::Command;
+    ///
+    /// let mut command = Command::new("pwd");
+    /// command.current_dir(".");
+    /// ```
     pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
         self.spec.current_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
     /// Configures the child's standard input stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::{Command, Stdio};
+    ///
+    /// let mut command = Command::new("cat");
+    /// command.stdin(Stdio::piped());
+    /// ```
     pub fn stdin(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stdin = stdio.0;
         self
     }
 
     /// Configures the child's standard output stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::{Command, Stdio};
+    ///
+    /// let mut command = Command::new("echo");
+    /// command.stdout(Stdio::piped());
+    /// ```
     pub fn stdout(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stdout = stdio.0;
         self
     }
 
     /// Configures the child's standard error stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::process::{Command, Stdio};
+    ///
+    /// let mut command = Command::new("echo");
+    /// command.stderr(Stdio::null());
+    /// ```
     pub fn stderr(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stderr = stdio.0;
         self
@@ -170,11 +317,38 @@ impl Command {
     ///
     /// If any standard stream was configured with [`Stdio::piped`], the
     /// corresponding field on the returned [`Child`] contains an async pipe.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> std::io::Result<()> {
+    /// use runite::process::{Command, Stdio};
+    ///
+    /// let mut child = Command::new("/bin/echo")
+    ///     .arg("hello")
+    ///     .stdout(Stdio::piped())
+    ///     .spawn()?;
+    /// assert!(child.stdout.is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn spawn(&mut self) -> io::Result<Child> {
         crate::sys::current::process::spawn(&self.spec).map(Child::from_inner)
     }
 
     /// Spawns the command and waits asynchronously for it to exit.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// use runite::process::Command;
+    ///
+    /// let status = Command::new("/bin/true").status().await?;
+    /// assert!(status.success());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn status(&mut self) -> io::Result<ExitStatus> {
         self.spawn()?.wait().await
     }
@@ -184,6 +358,18 @@ impl Command {
     /// The command's standard output is forced to [`Stdio::piped`]. The returned
     /// bytes contain stdout only; a non-success exit status is reported as an
     /// [`io::Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// use runite::process::Command;
+    ///
+    /// let output = Command::new("/bin/echo").arg("hello").output().await?;
+    /// assert_eq!(output, b"hello\n");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn output(&mut self) -> io::Result<Vec<u8>> {
         self.stdout(Stdio::piped());
         let mut child = self.spawn()?;

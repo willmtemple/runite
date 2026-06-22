@@ -1,7 +1,30 @@
 //! Runtime time primitives.
 //!
-//! These helpers integrate with the runtime's timer queue and are designed to be used from
-//! futures scheduled with [`crate::queue_future`] or one of the runtime entry macros.
+//! These helpers integrate with the runtime's timer queue. Use [`sleep`] to
+//! delay an async task and [`deadline`] to bound how long another future may
+//! run. Callback-style timers live at the crate root as [`crate::timeout`] and
+//! [`crate::interval`]; both return handles with `cancel()` methods.
+//!
+//! # Examples
+//!
+//! ```
+//! use std::sync::{
+//!     Arc,
+//!     atomic::{AtomicBool, Ordering},
+//! };
+//!
+//! let completed = Arc::new(AtomicBool::new(false));
+//! let completed_task = Arc::clone(&completed);
+//!
+//! runite::queue_future(async move {
+//!     runite::time::sleep(std::time::Duration::from_millis(1)).await;
+//!     completed_task.store(true, Ordering::SeqCst);
+//! });
+//!
+//! runite::run();
+//!
+//! assert!(completed.load(Ordering::SeqCst));
+//! ```
 
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
@@ -14,7 +37,7 @@ use core::time::Duration;
 
 use crate::timeout as schedule_timeout;
 
-/// Future returned by [`sleep`].
+/// Future returned by [`sleep`] that completes after a runtime timer fires.
 ///
 /// Dropping the future before it completes cancels the timer registration.
 pub struct Sleep {
@@ -24,8 +47,11 @@ pub struct Sleep {
     completed: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned by [`deadline`] when the deadline expires first.
+///
+/// This value means the timer completed before the wrapped future returned, and
+/// the wrapped future was dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Elapsed;
 
 /// Returns a future that completes after `duration` has elapsed on the current runtime thread.

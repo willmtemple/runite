@@ -1,5 +1,9 @@
 //! Single-value watch channels.
 //!
+//! A watch channel stores the latest value and notifies receivers when a newer
+//! version is published. It is best for sharing state snapshots, configuration,
+//! or status values where receivers do not need every intermediate update.
+//!
 //! # Examples
 //!
 //! Borrow the latest value immediately, then wait for a later change.
@@ -35,6 +39,14 @@ use crate::sys::current::channel::runtime_waiter;
 /// A watch channel stores a single latest value. Receivers can borrow the
 /// current value at any time and await notification when a newer version is
 /// published.
+///
+/// # Examples
+///
+/// ```
+/// let (sender, receiver) = runite::channel::watch::channel(1);
+/// assert_eq!(*sender.borrow(), 1);
+/// assert_eq!(*receiver.borrow(), 1);
+/// ```
 pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(State {
         value: initial,
@@ -194,6 +206,19 @@ impl<T: Send + 'static> Sender<T> {
     /// Replaces the watched value and notifies receivers.
     ///
     /// Returns [`SendError`] with the value if no receivers remain.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (sender, mut receiver) = runite::channel::watch::channel("old");
+    ///     sender.send("new").unwrap();
+    ///     receiver.changed().await.unwrap();
+    ///     assert_eq!(*receiver.borrow(), "new");
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let waiters = {
             let mut state = self
@@ -216,6 +241,14 @@ impl<T: Send + 'static> Sender<T> {
     /// This notifies even if the closure leaves the value unchanged; use
     /// [`send_if_modified`](Self::send_if_modified) to make notification
     /// conditional.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, receiver) = runite::channel::watch::channel(1);
+    /// sender.send_modify(|value| *value += 1);
+    /// assert_eq!(*receiver.borrow(), 2);
+    /// ```
     pub fn send_modify(&self, f: impl FnOnce(&mut T)) {
         let waiters = {
             let mut state = self
@@ -230,6 +263,18 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Mutates the watched value and notifies receivers if `f` returns `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, receiver) = runite::channel::watch::channel(1);
+    /// assert!(!sender.send_if_modified(|_| false));
+    /// assert!(sender.send_if_modified(|value| {
+    ///     *value = 3;
+    ///     true
+    /// }));
+    /// assert_eq!(*receiver.borrow(), 3);
+    /// ```
     pub fn send_if_modified(&self, f: impl FnOnce(&mut T) -> bool) -> bool {
         let waiters = {
             let mut state = self
@@ -249,6 +294,13 @@ impl<T: Send + 'static> Sender<T> {
     /// Borrows the current value from the sender side.
     ///
     /// The returned [`Ref`] holds the channel lock until dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, _receiver) = runite::channel::watch::channel("visible");
+    /// assert_eq!(*sender.borrow(), "visible");
+    /// ```
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
             guard: self
@@ -262,6 +314,14 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// The receiver considers the current value already observed and waits for
     /// subsequent calls to [`send`](Self::send) or mutation methods.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, _receiver) = runite::channel::watch::channel(1);
+    /// let second = sender.subscribe();
+    /// assert_eq!(*second.borrow(), 1);
+    /// ```
     pub fn subscribe(&self) -> Receiver<T> {
         let version = {
             let mut state = self
@@ -279,6 +339,15 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Returns the number of active receivers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, receiver) = runite::channel::watch::channel(1);
+    /// assert_eq!(sender.receiver_count(), 1);
+    /// drop(receiver);
+    /// assert_eq!(sender.receiver_count(), 0);
+    /// ```
     pub fn receiver_count(&self) -> usize {
         self.shared
             .lock()
@@ -304,6 +373,19 @@ impl<T: Send + 'static> Receiver<T> {
     /// Returns [`RecvError`] if all senders are dropped before a newer version
     /// becomes available.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (sender, mut receiver) = runite::channel::watch::channel(0);
+    ///     sender.send(1).unwrap();
+    ///     receiver.changed().await.unwrap();
+    ///     assert_eq!(*receiver.borrow(), 1);
+    /// });
+    ///
+    /// runite::run();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -315,6 +397,14 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// A later [`changed`](Self::changed) call can still complete immediately if
     /// this value is newer than the receiver's recorded version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, receiver) = runite::channel::watch::channel(1);
+    /// sender.send(2).unwrap();
+    /// assert_eq!(*receiver.borrow(), 2);
+    /// ```
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
             guard: self
@@ -327,6 +417,14 @@ impl<T: Send + 'static> Receiver<T> {
     /// Borrows the current value and marks it observed.
     ///
     /// The returned [`Ref`] holds the channel lock until dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, mut receiver) = runite::channel::watch::channel(1);
+    /// sender.send(2).unwrap();
+    /// assert_eq!(*receiver.borrow_and_update(), 2);
+    /// ```
     pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
         let guard = self
             .shared
