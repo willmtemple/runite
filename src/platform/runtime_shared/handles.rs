@@ -8,8 +8,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use super::future_task::{JoinState, TaskShared};
@@ -39,12 +39,24 @@ impl std::fmt::Display for QueueError {
 impl std::error::Error for QueueError {}
 
 #[derive(Clone)]
-/// Handle for queueing work onto a specific runtime thread.
+/// A cloneable, `Send` handle for queueing macrotasks onto a specific runtime
+/// thread from any thread.
+///
+/// Obtained from [`current_thread_handle`](crate::current_thread_handle) or
+/// [`WorkerHandle::thread`]. Use [`queue_task`](Self::queue_task) to send work
+/// across threads; the closure runs as a macrotask on the target thread's event
+/// loop.
 pub struct ThreadHandle {
     pub(crate) shared: Arc<ThreadShared>,
 }
 
-/// Handle for a worker runtime thread spawned with `spawn_worker`.
+/// A handle to a worker runtime thread spawned with
+/// [`spawn_worker`](crate::spawn_worker).
+///
+/// Lets the parent thread queue work onto the worker
+/// ([`queue_task`](Self::queue_task)), observe its lifecycle
+/// ([`is_finished`](Self::is_finished)), and obtain a plain
+/// [`ThreadHandle`] to it ([`thread`](Self::thread)).
 pub struct WorkerHandle {
     pub(crate) thread: ThreadHandle,
     pub(crate) completion: Arc<WorkerCompletion>,
