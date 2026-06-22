@@ -5,6 +5,8 @@
 //! detail and is not intended to be used directly; depend on `runite` and invoke
 //! the macro as `#[runite::main]` instead.
 
+#![deny(missing_docs)]
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};

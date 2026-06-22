@@ -1,3 +1,12 @@
+//! Compatibility adapters between runite's I/O traits and [`futures-io`].
+//!
+//! Available with the `futures-compat` feature. These adapters wrap a runite
+//! [`AsyncRead`]/[`AsyncWrite`] so it can be used where the `futures-io` traits
+//! are expected, and vice versa, easing interop with the broader `futures`
+//! ecosystem.
+//!
+//! [`futures-io`]: https://docs.rs/futures-io
+
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io;
