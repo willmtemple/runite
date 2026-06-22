@@ -7,6 +7,28 @@
 //! In-runtime async work should use [`crate::queue_future`] instead; this
 //! module exists for code that must call blocking syscalls or run CPU-heavy
 //! computations without stalling the event loop.
+//!
+//! # Examples
+//!
+//! ```
+//! use std::sync::{
+//!     Arc,
+//!     atomic::{AtomicUsize, Ordering},
+//! };
+//!
+//! let observed = Arc::new(AtomicUsize::new(0));
+//! let observed_task = Arc::clone(&observed);
+//!
+//! runite::queue_future(async move {
+//!     let handle = runite::task::spawn_blocking(|| 42usize)
+//!         .expect("blocking task should queue");
+//!     observed_task.store(handle.await.expect("blocking task should finish"), Ordering::SeqCst);
+//! });
+//!
+//! runite::run();
+//!
+//! assert_eq!(observed.load(Ordering::SeqCst), 42);
+//! ```
 
 use core::fmt;
 use core::future::Future;
