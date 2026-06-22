@@ -5,6 +5,40 @@
 //! are expected, and vice versa, easing interop with the broader `futures`
 //! ecosystem.
 //!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//! use std::io;
+//!
+//! use runite::io::compat::FuturesCompat;
+//! use runite::io::AsyncReadExt;
+//!
+//! struct FuturesBytes(&'static [u8]);
+//!
+//! impl futures_io::AsyncRead for FuturesBytes {
+//!     fn poll_read(
+//!         mut self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &mut [u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         let read = buf.len().min(self.0.len());
+//!         buf[..read].copy_from_slice(&self.0[..read]);
+//!         self.0 = &self.0[read..];
+//!         Poll::Ready(Ok(read))
+//!     }
+//! }
+//!
+//! runite::queue_future(async {
+//!     let mut reader = FuturesCompat::new(FuturesBytes(b"compat"));
+//!     let mut out = Vec::new();
+//!     reader.read_to_end(&mut out).await.unwrap();
+//!     assert_eq!(&out, b"compat");
+//! });
+//! runite::run();
+//! ```
+//!
 //! [`futures-io`]: https://docs.rs/futures-io
 
 use core::pin::Pin;

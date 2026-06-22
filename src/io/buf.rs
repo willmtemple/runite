@@ -6,6 +6,50 @@
 //! from the inner reader and serving small reads from memory. [`BufWriter`] does
 //! the same for writes by collecting small writes and forwarding larger chunks to
 //! the inner writer.
+//!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//! use std::cell::RefCell;
+//! use std::io;
+//! use std::rc::Rc;
+//!
+//! use runite::io::{AsyncWrite, AsyncWriteExt, BufWriter};
+//!
+//! #[derive(Clone)]
+//! struct Sink(Rc<RefCell<Vec<u8>>>);
+//!
+//! impl AsyncWrite for Sink {
+//!     fn poll_write(
+//!         self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &[u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         self.0.borrow_mut().extend_from_slice(buf);
+//!         Poll::Ready(Ok(buf.len()))
+//!     }
+//!
+//!     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//!         Poll::Ready(Ok(()))
+//!     }
+//!
+//!     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//!         Poll::Ready(Ok(()))
+//!     }
+//! }
+//!
+//! let written = Rc::new(RefCell::new(Vec::new()));
+//! let observed = Rc::clone(&written);
+//! runite::queue_future(async move {
+//!     let mut writer = BufWriter::with_capacity(8, Sink(written));
+//!     writer.write_all(b"buffered").await.unwrap();
+//!     writer.flush().await.unwrap();
+//! });
+//! runite::run();
+//! assert_eq!(&*observed.borrow(), b"buffered");
+//! ```
 
 use core::future::poll_fn;
 use core::pin::Pin;
