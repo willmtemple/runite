@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ChildStdin`/`ChildStdout`/`ChildStderr`), `kill`, and `wait`. On Linux child exit is
   awaited via a `pidfd` registered with io_uring readiness (no `SIGCHLD` handler, no
   blocking-pool offload); the same `Command`/`Child` interface is provided on macOS.
+- `broadcast` and `watch` channels in `runite::channel`: multi-producer/multi-consumer
+  fan-out (with `RecvError::Lagged`) and a latest-value cell with `changed()` notifications.
+- Async `BufReader`/`BufWriter` adapters in `runite::io` to amortize syscalls over the
+  underlying `AsyncRead`/`AsyncWrite`.
+- Async `stdout()`/`stderr()` writers (alongside `stdin()`), and a `SignalKind::WindowChange`
+  (`SIGWINCH`) signal for terminal-resize-aware TUIs.
+- `TcpStream::into_split` producing owned `OwnedReadHalf`/`OwnedWriteHalf` (recombine with
+  `TcpStream::reunite`; `ReuniteError` on mismatch) so reads and writes can run in separate tasks.
+- `TcpListener::incoming` and `UnixListener::incoming`, returning a `Stream` of inbound
+  connections.
 
 ### Changed
 

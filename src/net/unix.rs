@@ -1,5 +1,8 @@
 //! Async Unix domain socket API.
 
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 use std::ffi::c_void;
 use std::io;
 use std::mem::{ManuallyDrop, MaybeUninit};
@@ -8,6 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::SocketAddr;
 use std::path::Path;
 
+use crate::io::Stream;
 use crate::op::net::NetOp;
 
 /// Async Unix domain stream socket.
@@ -147,6 +151,17 @@ impl UnixListener {
         }
     }
 
+    /// Returns a [`Stream`] that yields inbound connections as they arrive.
+    ///
+    /// The stream is infinite: it never yields `None`. Borrows the listener for
+    /// the lifetime of the stream.
+    pub fn incoming(&self) -> Incoming<'_> {
+        Incoming {
+            listener: self,
+            pending: None,
+        }
+    }
+
     /// Returns the local socket address of this listener.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         // SAFETY: `self.raw_fd()` remains owned by `self`; `ManuallyDrop`
@@ -159,6 +174,47 @@ impl UnixListener {
 
     fn raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+/// A [`Stream`] of inbound Unix domain connections, created by
+/// [`UnixListener::incoming`].
+pub struct Incoming<'a> {
+    listener: &'a UnixListener,
+    pending: Option<Pin<Box<dyn Future<Output = io::Result<UnixStream>> + 'a>>>,
+}
+
+impl Stream for Incoming<'_> {
+    type Item = io::Result<UnixStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.pending.is_none() {
+            let fd = this.listener.raw_fd();
+            this.pending = Some(Box::pin(async move {
+                loop {
+                    match accept_sync(fd) {
+                        Ok((stream_fd, _addr)) => {
+                            return Ok(UnixStream::from_owned_fd(stream_fd));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            crate::sys::current::fd::wait_readable(fd).await?;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }));
+        }
+
+        let future = this.pending.as_mut().expect("pending accept future present");
+        match future.as_mut().poll(cx) {
+            Poll::Ready(result) => {
+                this.pending = None;
+                Poll::Ready(Some(result))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
