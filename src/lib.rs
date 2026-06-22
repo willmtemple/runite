@@ -1,24 +1,89 @@
-//! Runtime, driver, async I/O, and channel primitives for runite.
+//! Async runtime, I/O, and concurrency primitives for `runite`.
 //!
-//! `runite` is a platform runtime substrate built around a single-threaded event loop with
-//! explicit worker threads, JavaScript-style microtask/macrotask scheduling, and
-//! platform-specific async I/O backends (io_uring on Linux, kqueue on macOS).
+//! `runite` is an event-loop-per-thread async runtime. Each runtime thread owns
+//! a single-threaded event loop with JavaScript-style microtask/macrotask
+//! scheduling, backed by a platform-specific async I/O backend (io_uring on
+//! Linux, kqueue on macOS). Tasks on a thread are `!Send` and never migrate, so
+//! most runtime state needs no locking; explicit [worker threads](spawn_worker)
+//! provide parallelism and communicate through [channels](channel) and
+//! [`ThreadHandle`]s.
 //!
-//! Most users will start with:
+//! # Getting started
 //!
-//! - [`main`] for executable entry points (sync or `async fn main`)
-//! - [`run`], [`queue_task`], [`queue_microtask`], and [`queue_future`] for event-loop work
-//! - [`fs`], [`net`], [`process`], [`time`], and [`channel`] for async runtime services
-//! - [`channel::broadcast`] and [`channel::watch`] for fan-out and state-change channels
-//! - [`io::BufReader`]/[`io::BufWriter`] for buffered I/O
-//! - [`net::TcpStream::into_split`] and listener `incoming()` streams for connection tasks
-//! - [`stdout`] and [`stderr`] for async standard output streams
+//! The usual entry point is the [`#[runite::main]`](macro@main) attribute, which
+//! drives the event loop to completion around your `main`:
+//!
+//! ```no_run
+//! #[runite::main]
+//! async fn main() {
+//!     let contents = runite::fs::read_to_string("Cargo.toml").await.unwrap();
+//!     println!("{} bytes", contents.len());
+//! }
+//! ```
+//!
+//! You can also drive the loop yourself. [`queue_future`] schedules async work
+//! and [`run`] runs the current thread until everything queued is complete —
+//! handy for embedding the runtime or writing tests:
+//!
+//! ```
+//! use std::rc::Rc;
+//! use std::cell::Cell;
+//! use std::time::Duration;
+//!
+//! let total = Rc::new(Cell::new(0u32));
+//! let result = Rc::clone(&total);
+//!
+//! runite::queue_future(async move {
+//!     let (tx, mut rx) = runite::channel::mpsc::channel(8);
+//!     runite::queue_future(async move {
+//!         for value in 1..=3 {
+//!             runite::time::sleep(Duration::from_millis(1)).await;
+//!             tx.send(value).await.unwrap();
+//!         }
+//!     });
+//!     let mut sum = 0;
+//!     while let Some(value) = rx.recv().await {
+//!         sum += value;
+//!     }
+//!     result.set(sum);
+//! });
+//!
+//! runite::run();
+//! assert_eq!(total.get(), 6);
+//! ```
+//!
+//! # Where to look next
+//!
+//! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
+//! - [`run`], [`queue_task`], [`queue_microtask`], and [`queue_future`] for
+//!   driving and feeding the event loop
+//! - [`spawn_worker`] and [`ThreadHandle`] for multi-threaded work
+//! - [`fs`], [`net`], [`process`], [`time`], [`signal`], and [`stdio`] for async
+//!   runtime services
+//! - [`channel`] for `mpsc`/`oneshot`/`broadcast`/`watch` channels
+//! - [`sync`] for [`Mutex`](sync::Mutex), [`Semaphore`](sync::Semaphore),
+//!   [`Notify`](sync::Notify), and [`OnceCell`](sync::OnceCell)
+//! - [`io`] for the crate's `AsyncRead`/`AsyncWrite`/`Stream` traits and
+//!   [`BufReader`](io::BufReader)/[`BufWriter`](io::BufWriter)
+//! - [`task::spawn_blocking`] for offloading blocking work to a thread pool
+//!
+//! # Cargo features
+//!
+//! - `hyper` — integrate `runite` sockets with the [`hyper`] HTTP library.
+//! - `futures-compat` — adapters between `runite`'s I/O traits and the
+//!   `futures-io` ecosystem (see the `io::compat` module, enabled by this
+//!   feature).
+//!
+//! [`hyper`]: https://docs.rs/hyper
 //!
 //! # Platform support
 //!
 //! `runite` currently targets:
-//! - Linux `x86_64`
-//! - macOS `aarch64`
+//! - Linux `x86_64` (io_uring)
+//! - macOS `aarch64` (kqueue)
+//!
+//! A Windows port (IOCP) is in progress. Building for any other target raises a
+//! compile error.
 
 #![deny(missing_docs)]
 
