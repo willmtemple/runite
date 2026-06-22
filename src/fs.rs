@@ -1,12 +1,29 @@
-//! Portable async filesystem API.
+//! Portable async filesystem primitives.
+//!
+//! This module provides file, directory, and metadata operations that integrate
+//! with runite's event-loop-per-thread runtime. The public surface intentionally
+//! mirrors [`std::fs`] where that shape makes sense, while using async methods
+//! for operations that may block the caller.
 //!
 //! Cancellation semantics:
 //! - Dropping an I/O future cancels interest in the result.
 //! - The runtime issues best-effort kernel cancellation where supported.
 //! - The underlying OS operation may still complete after the future is dropped.
 //!
-//! The public surface intentionally mirrors `std::fs` where that shape makes sense, while using
-//! async methods for operations that may block the caller.
+//! # Examples
+//!
+//! File examples perform real filesystem I/O, so this example is compile-tested
+//! but not run by doctests:
+//!
+//! ```no_run
+//! runite::queue_future(async {
+//!     runite::fs::write("runite-example.txt", b"hello").await.unwrap();
+//!     let contents = runite::fs::read_to_string("runite-example.txt").await.unwrap();
+//!     assert_eq!(contents, "hello");
+//!     runite::fs::remove_file("runite-example.txt").await.unwrap();
+//! });
+//! runite::run();
+//! ```
 
 use alloc::sync::Arc;
 
@@ -35,7 +52,8 @@ type PendingFileWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static
 /// Async file handle.
 ///
 /// `File` is cheap to clone internally and supports both cursor-based sequential I/O and
-/// offset-based positioned I/O.
+/// offset-based positioned I/O. Use [`File::open`] and [`File::create`] for common
+/// cases or [`OpenOptions`] for detailed access-mode control.
 pub struct File {
     inner: Arc<FileInner>,
     pending_read: Option<PendingFileRead>,
@@ -43,34 +61,62 @@ pub struct File {
 }
 
 /// Builder used to configure how a [`File`] is opened.
+///
+/// Options mirror [`std::fs::OpenOptions`]: callers opt in to read, write,
+/// append, truncation, and creation behavior before calling
+/// [`open`](Self::open).
 pub struct OpenOptions {
     inner: OpOpenOptions,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 /// File metadata returned by [`metadata`] or [`File::metadata`].
+///
+/// Metadata exposes the file type, byte length, and platform mode bits reported
+/// by the active backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
     inner: RawMetadata,
 }
 
 /// Async directory-entry stream returned by [`read_dir`].
+///
+/// Call [`next_entry`](Self::next_entry) to pull entries one at a time, or use
+/// the [`Stream`] implementation with the runtime's stream extension traits.
 pub struct ReadDir {
     inner: sys_fs::ReadDirStream,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 /// Directory entry yielded by [`ReadDir::next_entry`].
+///
+/// Each entry carries its path and file name and can resolve fresh metadata on
+/// demand with [`metadata`](Self::metadata).
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry {
     inner: OpDirEntry,
 }
 
 impl File {
     /// Opens an existing file for reading.
+    ///
+    /// This is a convenience wrapper for `OpenOptions::new().read(true)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut file = runite::fs::File::open("input.txt").await.unwrap();
+    ///     let mut contents = String::new();
+    ///     file.read_to_string(&mut contents).await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
     }
 
     /// Opens a file for writing, creating or truncating it first.
+    ///
+    /// This is a convenience wrapper for write-only create-and-truncate access.
     pub async fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         OpenOptions::new()
             .write(true)
@@ -81,6 +127,9 @@ impl File {
     }
 
     /// Reads bytes from the file's current cursor position.
+    ///
+    /// Returns the number of bytes copied into `buf`. A return value of `0`
+    /// indicates EOF when `buf` is not empty.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.read_impl(None, buf).await
     }
@@ -115,6 +164,9 @@ impl File {
     }
 
     /// Reads all remaining UTF-8 bytes and appends them to `buf`.
+    ///
+    /// Returns [`io::ErrorKind::InvalidData`] if the remaining bytes are not
+    /// valid UTF-8.
     pub async fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
         let mut bytes = Vec::new();
         let read = self.read_to_end(&mut bytes).await?;
@@ -125,6 +177,10 @@ impl File {
     }
 
     /// Writes bytes at the file's current cursor position.
+    ///
+    /// The operation may write fewer bytes than `buf.len()`; use
+    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
+    /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_impl(None, buf).await
     }
@@ -158,11 +214,17 @@ impl File {
     }
 
     /// Synchronizes file contents to stable storage.
+    ///
+    /// Metadata that is not needed to retrieve the file contents may be omitted,
+    /// matching the behavior of [`std::fs::File::sync_data`].
     pub async fn sync_data(&self) -> io::Result<()> {
         sys_fs::sync_data(FsOp::SyncData { fd: self.raw_fd() }).await
     }
 
     /// Reads bytes starting at `offset` without using the shared file cursor.
+    ///
+    /// Positioned reads are useful when multiple tasks share a cloned handle and
+    /// must avoid racing on the kernel-managed cursor.
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.read_impl(Some(offset), buf).await
     }
@@ -184,6 +246,9 @@ impl File {
     }
 
     /// Writes bytes starting at `offset` without using the shared file cursor.
+    ///
+    /// Positioned writes are useful when multiple tasks share a cloned handle and
+    /// must avoid racing on the kernel-managed cursor.
     pub async fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
         self.write_impl(Some(offset), buf).await
     }
@@ -358,6 +423,9 @@ impl AsyncWrite for File {
 
 impl OpenOptions {
     /// Creates a blank set of open options.
+    ///
+    /// No access mode is enabled by default; call methods such as
+    /// [`read`](Self::read) or [`write`](Self::write) before opening.
     pub fn new() -> Self {
         Self {
             inner: OpOpenOptions::default(),
@@ -377,6 +445,9 @@ impl OpenOptions {
     }
 
     /// Controls append mode.
+    ///
+    /// When append is enabled, writes are placed at the end of the file by the
+    /// operating system.
     pub fn append(&mut self, value: bool) -> &mut Self {
         self.inner.append = value;
         self
@@ -395,6 +466,8 @@ impl OpenOptions {
     }
 
     /// Controls whether opening must create a brand-new file.
+    ///
+    /// When enabled, opening fails if the path already exists.
     pub fn create_new(&mut self, value: bool) -> &mut Self {
         self.inner.create_new = value;
         self
@@ -404,15 +477,18 @@ impl OpenOptions {
     ///
     /// # Examples
     ///
-    /// ```
-    /// # let _ = || async {
-    /// let file = runite::fs::OpenOptions::new()
-    ///     .read(true)
-    ///     .write(true)
-    ///     .open("example.txt")
-    ///     .await;
-    /// # let _ = file;
-    /// # };
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut options = runite::fs::OpenOptions::new();
+    ///     let file = options
+    ///         .read(true)
+    ///         .write(true)
+    ///         .open("example.txt")
+    ///         .await
+    ///         .unwrap();
+    ///     let _ = file.metadata().await.unwrap();
+    /// });
+    /// runite::run();
     /// ```
     pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
         sys_fs::open(FsOp::Open {
@@ -461,6 +537,8 @@ impl Metadata {
     }
 
     /// Returns the raw POSIX mode bits reported by the platform backend.
+    ///
+    /// Non-POSIX platforms may report backend-specific compatibility bits.
     pub fn mode(&self) -> u16 {
         self.inner.mode
     }
@@ -493,6 +571,9 @@ impl Stream for ReadDir {
 
 impl DirEntry {
     /// Returns the full path to this directory entry.
+    ///
+    /// The path is the directory path passed to [`read_dir`] joined with this
+    /// entry's file name.
     pub fn path(&self) -> PathBuf {
         self.inner.path.clone()
     }
@@ -503,12 +584,25 @@ impl DirEntry {
     }
 
     /// Resolves metadata for this entry.
+    ///
+    /// Metadata is fetched when this method is called, not cached when the entry
+    /// is yielded.
     pub async fn metadata(&self) -> io::Result<Metadata> {
         metadata(self.path()).await
     }
 }
 
 /// Reads the entire contents of a file into memory.
+///
+/// # Examples
+///
+/// ```no_run
+/// runite::queue_future(async {
+///     let bytes = runite::fs::read("input.bin").await.unwrap();
+///     assert!(!bytes.is_empty());
+/// });
+/// runite::run();
+/// ```
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let mut file = File::open(path.as_ref()).await?;
     let mut output = Vec::new();
@@ -523,6 +617,8 @@ pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 }
 
 /// Replaces the contents of a file with `data`, creating it if needed.
+///
+/// Existing contents are truncated before the new bytes are written.
 pub async fn write(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -534,6 +630,8 @@ pub async fn write(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> io::Result
 }
 
 /// Returns metadata for a filesystem path.
+///
+/// Symbolic links are followed.
 pub async fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
     sys_fs::metadata(FsOp::Metadata {
         target: MetadataTarget::Path(path.as_ref().to_path_buf()),
@@ -553,6 +651,8 @@ pub async fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 /// Creates a directory and any missing parent directories.
+///
+/// Existing directories along the path are accepted.
 pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     let mut current = PathBuf::new();
@@ -590,6 +690,9 @@ pub async fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 /// Renames or moves a filesystem entry.
+///
+/// Replacement behavior is platform-specific and matches the underlying
+/// operating system operation.
 pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     sys_fs::rename(FsOp::Rename {
         from: from.as_ref().to_path_buf(),
@@ -603,10 +706,11 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 /// # Examples
 ///
 /// ```
-/// # let _ = || async {
-/// let mut entries = runite::fs::read_dir(".").await.unwrap();
-/// let _ = entries.next_entry().await;
-/// # };
+/// runite::queue_future(async {
+///     let mut entries = runite::fs::read_dir(".").await.unwrap();
+///     let _ = entries.next_entry().await.unwrap();
+/// });
+/// runite::run();
 /// ```
 pub async fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     sys_fs::read_dir(FsOp::ReadDir {
