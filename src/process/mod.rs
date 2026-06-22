@@ -1,4 +1,15 @@
-//! Async subprocess support.
+//! Async subprocess management.
+//!
+//! This module provides a portable, runtime-aware equivalent of
+//! [`std::process`]. Use [`Command`] to configure and spawn a subprocess,
+//! [`Child`] to wait for or terminate it, [`Stdio`] to choose how standard
+//! streams are wired, and the child pipe types to read and write those streams
+//! without blocking the runtime thread.
+//!
+//! The API is designed to be platform-neutral even though each backend uses the
+//! host operating system's process facilities. Examples that start external
+//! programs are marked `no_run` because available commands and paths vary across
+//! environments.
 //!
 //! # Examples
 //!
@@ -27,6 +38,23 @@
 //! assert!(child.wait().await?.success());
 //! # Ok(())
 //! # }
+//! ```
+//!
+//! The same pattern can be driven by the event loop in a doctest or binary:
+//!
+//! ```no_run
+//! use runite::process::Command;
+//!
+//! runite::queue_future(async {
+//!     let status = Command::new("/bin/echo")
+//!         .arg("ready")
+//!         .status()
+//!         .await
+//!         .expect("subprocess should run");
+//!     assert!(status.success());
+//! });
+//!
+//! runite::run();
 //! ```
 
 mod child;
