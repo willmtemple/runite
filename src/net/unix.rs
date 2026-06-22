@@ -665,10 +665,7 @@ mod tests {
     }
 
     fn test_socket_path(name: &str) -> PathBuf {
-        let dir = std::env::current_dir()
-            .expect("current directory should be available")
-            .join("target")
-            .join("runite-uds-tests");
+        let dir = PathBuf::from("target").join("runite-uds-tests");
         std::fs::create_dir_all(&dir).expect("test socket directory should be created");
         dir.join(format!(
             "{}-{}-{:?}.sock",
