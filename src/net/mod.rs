@@ -221,17 +221,17 @@ impl TcpStream {
             pending_write: None,
             pending_shutdown: None,
         };
-        (OwnedReadHalf { stream: read }, OwnedWriteHalf { stream: write })
+        (
+            OwnedReadHalf { stream: read },
+            OwnedWriteHalf { stream: write },
+        )
     }
 
     /// Reassembles a [`TcpStream`] from the two halves produced by
     /// [`into_split`](Self::into_split).
     ///
     /// Returns [`ReuniteError`] if the halves came from different streams.
-    pub fn reunite(
-        read: OwnedReadHalf,
-        write: OwnedWriteHalf,
-    ) -> Result<Self, ReuniteError> {
+    pub fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<Self, ReuniteError> {
         if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
             drop(read);
             Ok(write.stream)
@@ -647,8 +647,7 @@ impl Stream for Incoming {
         if this.pending.is_none() {
             let fd = this.listener.raw_fd();
             this.pending = Some(Box::pin(async move {
-                let accepted =
-                    crate::sys::current::net::accept(NetOp::Accept { fd }).await?;
+                let accepted = crate::sys::current::net::accept(NetOp::Accept { fd }).await?;
                 // SAFETY: `accepted.fd` is the fresh descriptor returned by
                 // accept; ownership is transferred to `OwnedFd` exactly once.
                 Ok(TcpStream::from_owned_fd(unsafe {
@@ -657,7 +656,10 @@ impl Stream for Incoming {
             }));
         }
 
-        let future = this.pending.as_mut().expect("pending accept future present");
+        let future = this
+            .pending
+            .as_mut()
+            .expect("pending accept future present");
         match future.as_mut().poll(cx) {
             Poll::Ready(result) => {
                 this.pending = None;
@@ -1274,8 +1276,7 @@ mod tests {
 
                 let listener_for_accept = Arc::clone(&listener);
                 let server = queue_future(async move {
-                    let (mut stream, _) =
-                        listener_for_accept.accept().await.expect("accept");
+                    let (mut stream, _) = listener_for_accept.accept().await.expect("accept");
                     let mut buffer = [0; 4];
                     stream.read_exact(&mut buffer).await.expect("server read");
                     stream.write_all(b"pong").await.expect("server write");
@@ -1292,7 +1293,10 @@ mod tests {
                 });
 
                 let mut response = [0; 4];
-                read_half.read_exact(&mut response).await.expect("split read");
+                read_half
+                    .read_exact(&mut response)
+                    .await
+                    .expect("split read");
                 assert_eq!(&response, b"pong");
 
                 let write_half = writer.await.expect("writer task");
