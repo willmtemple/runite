@@ -1,4 +1,35 @@
-//! Async standard-input helpers.
+//! Async standard stream helpers.
+//!
+//! [`Stdin`] reads from fd 0, [`Stdout`] writes to fd 1, and [`Stderr`] writes
+//! to fd 2 through the runtime's platform I/O backend. The handles duplicate the
+//! process stdio descriptors, so dropping them does not close the process-wide
+//! standard streams.
+//!
+//! # Terminal UIs
+//!
+//! Terminal applications can use [`stdin`] for async reads from the TTY,
+//! [`stdout`] for rendering, and [`crate::signal::unix::SignalKind::WindowChange`]
+//! for resize notifications. `Stdin` implements [`AsyncRead`] directly and can
+//! be read with byte-sized buffers, which lets a raw-mode TTY feed key bytes to
+//! a parser as they arrive.
+//!
+//! `runite` intentionally does not provide a TUI framework, termios/raw-mode
+//! management, or escape-sequence parsing. Applications should enable raw mode
+//! themselves, or use a terminal crate such as `crossterm`, then compose that
+//! with these async fd handles. The runtime is well-suited as the async I/O
+//! substrate under terminal UIs just as it is under graphical applications.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use runite::io::AsyncWriteExt;
+//!
+//! # async fn write_line() -> std::io::Result<()> {
+//! let mut out = runite::stdout()?;
+//! out.write_all(b"hello from runite\n").await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use core::future::Future;
 use core::pin::Pin;
@@ -8,12 +39,14 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::sync::{Arc, Mutex};
 
-use crate::io::AsyncRead;
+use crate::io::{AsyncRead, AsyncWrite};
 use crate::op::completion::completion_for_current_thread;
+use crate::op::fs::FsOp;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::platform::linux_x86_64::runtime::with_current_driver;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::platform::linux_x86_64::uring::{IORING_OP_READ, IoUringCqe, IoUringSqe};
+use crate::sys::current::fs as sys_fs;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::cell::Cell;
 
@@ -27,6 +60,7 @@ const FILE_CURSOR: u64 = u64::MAX;
 const READ_CHUNK_BYTES: usize = 1024;
 
 type PendingStdinRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
+type PendingStandardWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 
 /// Async line-oriented stdin reader.
 ///
@@ -38,17 +72,41 @@ pub struct Stdin {
     pending_read: Option<PendingStdinRead>,
 }
 
+/// Async writer for standard output.
+pub struct Stdout {
+    writer: StandardWriter,
+}
+
+/// Async writer for standard error.
+pub struct Stderr {
+    writer: StandardWriter,
+}
+
+struct StandardWriter {
+    fd: OwnedFd,
+    pending_write: Option<PendingStandardWrite>,
+}
+
 /// Opens an async stdin reader.
 pub fn stdin() -> io::Result<Stdin> {
-    // SAFETY: `STDIN_FILENO` is passed by value; on success `fcntl` returns a
-    // new close-on-exec descriptor owned by the caller.
-    let raw = cvt(unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 0) })?;
     Ok(Stdin {
-        // SAFETY: `raw` was just returned by `F_DUPFD_CLOEXEC`, so it is a
-        // valid, uniquely owned file descriptor to transfer into `OwnedFd`.
-        fd: unsafe { OwnedFd::from_raw_fd(raw) },
+        fd: duplicate_fd(libc::STDIN_FILENO)?,
         buffer: Vec::new(),
         pending_read: None,
+    })
+}
+
+/// Opens an async stdout writer.
+pub fn stdout() -> io::Result<Stdout> {
+    Ok(Stdout {
+        writer: StandardWriter::new(duplicate_fd(libc::STDOUT_FILENO)?),
+    })
+}
+
+/// Opens an async stderr writer.
+pub fn stderr() -> io::Result<Stderr> {
+    Ok(Stderr {
+        writer: StandardWriter::new(duplicate_fd(libc::STDERR_FILENO)?),
     })
 }
 
@@ -118,6 +176,60 @@ impl Stdin {
     }
 }
 
+impl Stdout {
+    /// Writes bytes to standard output.
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer.write(buf).await
+    }
+}
+
+impl Stderr {
+    /// Writes bytes to standard error.
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer.write(buf).await
+    }
+}
+
+impl StandardWriter {
+    fn new(fd: OwnedFd) -> Self {
+        Self {
+            fd,
+            pending_write: None,
+        }
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        standard_write_future(self.fd.as_raw_fd(), buf.to_vec()).await
+    }
+
+    fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        if self.pending_write.is_none() {
+            self.pending_write = Some(standard_write_future(self.fd.as_raw_fd(), buf.to_vec()));
+        }
+
+        match self
+            .pending_write
+            .as_mut()
+            .expect("pending standard stream write must exist")
+            .as_mut()
+            .poll(cx)
+        {
+            Poll::Ready(result) => {
+                self.pending_write = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 impl AsyncRead for Stdin {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -158,6 +270,42 @@ impl AsyncRead for Stdin {
     }
 }
 
+impl AsyncWrite for Stdout {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().writer.poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for Stderr {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().writer.poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn stdin_read_future(fd: RawFd, len: usize) -> PendingStdinRead {
     Box::pin(async move {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -185,6 +333,14 @@ fn stdin_read_future(fd: RawFd, len: usize) -> PendingStdinRead {
         })
         .await
     })
+}
+
+fn standard_write_future(fd: RawFd, data: Vec<u8>) -> PendingStandardWrite {
+    Box::pin(sys_fs::write(FsOp::Write {
+        fd,
+        offset: None,
+        data,
+    }))
 }
 
 async fn offload<T: Send + 'static>(
@@ -267,6 +423,15 @@ fn blocking_read(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
     }
 }
 
+fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: `fd` is passed by value; on success `fcntl` returns a new
+    // close-on-exec descriptor owned by the caller.
+    let raw = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: `raw` was just returned by `F_DUPFD_CLOEXEC`, so it is a valid,
+    // uniquely owned file descriptor to transfer into `OwnedFd`.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
 fn decode_line(bytes: Vec<u8>) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -293,5 +458,156 @@ fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
         Err(io::Error::last_os_error())
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::{Arc, Mutex};
+
+    use crate::io::AsyncWriteExt;
+
+    use super::*;
+
+    #[test]
+    fn stdout_and_stderr_write_successfully() {
+        let stdout_written = Arc::new(Mutex::new(None::<usize>));
+        let stderr_written = Arc::new(Mutex::new(None::<usize>));
+
+        {
+            let stdout_written = Arc::clone(&stdout_written);
+            let stderr_written = Arc::clone(&stderr_written);
+            crate::queue_future(async move {
+                let mut out = stdout().expect("stdout should open");
+                let mut err = stderr().expect("stderr should open");
+
+                let out_bytes = out
+                    .write(b"runite stdout async write test\n")
+                    .await
+                    .expect("stdout write should succeed");
+                let err_bytes = err
+                    .write(b"runite stderr async write test\n")
+                    .await
+                    .expect("stderr write should succeed");
+
+                *stdout_written.lock().expect("stdout mutex poisoned") = Some(out_bytes);
+                *stderr_written.lock().expect("stderr mutex poisoned") = Some(err_bytes);
+            });
+        }
+
+        crate::run();
+
+        assert_eq!(
+            *stdout_written.lock().expect("stdout mutex poisoned"),
+            Some(b"runite stdout async write test\n".len())
+        );
+        assert_eq!(
+            *stderr_written.lock().expect("stderr mutex poisoned"),
+            Some(b"runite stderr async write test\n".len())
+        );
+    }
+
+    #[test]
+    fn stdout_writes_to_tty_fd() {
+        let (master, slave) = open_pty();
+        let written = Arc::new(Mutex::new(None::<usize>));
+
+        {
+            let written = Arc::clone(&written);
+            crate::queue_future(async move {
+                let mut out = Stdout {
+                    writer: StandardWriter::new(slave),
+                };
+                let bytes = out
+                    .write_all(b"tty output\n")
+                    .await
+                    .map(|()| b"tty output\n".len())
+                    .expect("tty stdout write should succeed");
+                *written.lock().expect("written mutex poisoned") = Some(bytes);
+            });
+        }
+
+        crate::run();
+
+        assert_eq!(
+            *written.lock().expect("written mutex poisoned"),
+            Some(b"tty output\n".len())
+        );
+
+        let mut buffer = [0u8; 64];
+        let read = blocking_read(master.as_raw_fd(), &mut buffer).expect("pty master should read");
+        assert_eq!(&buffer[..read], b"tty output\r\n");
+    }
+
+    #[test]
+    fn stdin_reads_single_byte_from_tty_fd() {
+        let (master, slave) = open_pty();
+        write_fd(master.as_raw_fd(), b"x\n").expect("pty master should write input");
+
+        let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
+        {
+            let observed = Arc::clone(&observed);
+            crate::queue_future(async move {
+                let mut input = Stdin {
+                    fd: slave,
+                    buffer: Vec::new(),
+                    pending_read: None,
+                };
+                let mut byte = [0u8; 1];
+                let read = input
+                    .read(&mut byte)
+                    .await
+                    .expect("single-byte tty stdin read should succeed");
+                *observed.lock().expect("observed mutex poisoned") = Some(byte[..read].to_vec());
+            });
+        }
+
+        crate::run();
+
+        assert_eq!(
+            observed.lock().expect("observed mutex poisoned").as_deref(),
+            Some(b"x".as_slice())
+        );
+    }
+
+    fn open_pty() -> (OwnedFd, OwnedFd) {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: `master` and `slave` are valid out-pointers. Null optional
+        // pointers request the default name, termios, and window size.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty should succeed");
+        // SAFETY: `openpty` initialized `master` with an owned file descriptor.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: `openpty` initialized `slave` with an owned file descriptor.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        (master, slave)
+    }
+
+    fn write_fd(fd: RawFd, data: &[u8]) -> io::Result<usize> {
+        loop {
+            // SAFETY: `fd` is open for the duration of this test helper, and
+            // `data` points to `data.len()` initialized bytes.
+            let written =
+                unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+            if written >= 0 {
+                return Ok(written as usize);
+            }
+
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
     }
 }
