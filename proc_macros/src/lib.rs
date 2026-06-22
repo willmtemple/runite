@@ -1,3 +1,10 @@
+//! Procedural macros consumed through `runite`.
+//!
+//! This crate provides the implementation for [`#[runite::main]`](main), the
+//! attribute macro re-exported by the `runite` crate. It is an implementation
+//! detail and is not intended to be used directly; depend on `runite` and invoke
+//! the macro as `#[runite::main]` instead.
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};

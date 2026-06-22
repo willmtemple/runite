@@ -1,9 +1,40 @@
 //! File-descriptor readiness helpers backed by the runtime driver.
+//!
+//! These helpers are useful when integrating custom descriptor types with
+//! `runite` without writing a full async wrapper.
 
 use std::io;
 use std::os::fd::RawFd;
 
 /// Waits until `fd` becomes readable or reports an error/hangup condition.
+///
+/// The descriptor must remain open until the returned future completes or is
+/// dropped. On readiness, callers should perform their own read and handle
+/// nonblocking errors according to the descriptor's mode.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::io::Write;
+/// use std::os::fd::AsRawFd;
+/// use std::os::unix::net::UnixStream;
+///
+/// let (reader, mut writer) = UnixStream::pair()?;
+/// let read_fd = reader.as_raw_fd();
+///
+/// runite::queue_future(async move {
+///     runite::fd::wait_readable(read_fd)
+///         .await
+///         .expect("reader should become readable");
+/// });
+///
+/// std::thread::spawn(move || {
+///     writer.write_all(b"ready").expect("write should succeed");
+/// });
+///
+/// runite::run();
+/// # std::io::Result::Ok(())
+/// ```
 pub async fn wait_readable(fd: RawFd) -> io::Result<()> {
     crate::sys::current::fd::wait_readable(fd).await
 }

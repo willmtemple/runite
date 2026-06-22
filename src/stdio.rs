@@ -24,11 +24,14 @@
 //! ```no_run
 //! use runite::io::AsyncWriteExt;
 //!
-//! # async fn write_line() -> std::io::Result<()> {
-//! let mut out = runite::stdout()?;
-//! out.write_all(b"hello from runite\n").await?;
-//! # Ok(())
-//! # }
+//! runite::queue_future(async {
+//!     let mut out = runite::stdout().expect("stdout should open");
+//!     out.write_all(b"hello from runite\n")
+//!         .await
+//!         .expect("stdout write should succeed");
+//! });
+//!
+//! runite::run();
 //! ```
 
 use core::future::Future;
@@ -66,6 +69,8 @@ type PendingStandardWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'st
 ///
 /// The reader is `io_uring`-first. When the active stdin fd rejects `IORING_OP_READ`, the module
 /// falls back to a helper-thread blocking read on the same duplicated fd.
+///
+/// Create one with [`stdin`].
 pub struct Stdin {
     fd: OwnedFd,
     buffer: Vec<u8>,
@@ -96,6 +101,8 @@ struct StandardWriter {
 }
 
 /// Opens an async stdin reader.
+///
+/// The returned [`Stdin`] owns a duplicate of the process stdin descriptor.
 pub fn stdin() -> io::Result<Stdin> {
     Ok(Stdin {
         fd: duplicate_fd(libc::STDIN_FILENO)?,
@@ -126,6 +133,8 @@ impl Stdin {
     /// Reads a single UTF-8 line, including the trailing newline when present.
     ///
     /// Returns `Ok(None)` on EOF.
+    ///
+    /// Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
     pub async fn read_line(&mut self) -> io::Result<Option<String>> {
         loop {
             if let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
@@ -148,6 +157,9 @@ impl Stdin {
     }
 
     /// Reads bytes from standard input into `buf`.
+    ///
+    /// Returns the number of bytes copied into `buf`, or `0` if `buf` is empty
+    /// or stdin reaches EOF.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
