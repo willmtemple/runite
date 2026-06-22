@@ -10,6 +10,22 @@
 //!
 //! Existing non-default, non-ignored process handlers are not overwritten:
 //! [`signal`] returns an error instead.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! runite::queue_future(async {
+//!     let mut resize = runite::signal::unix::signal(
+//!         runite::signal::unix::SignalKind::WindowChange,
+//!     )
+//!     .expect("SIGWINCH handler should install");
+//!
+//!     resize.recv().await;
+//!     eprintln!("terminal window changed size");
+//! });
+//!
+//! runite::run();
+//! ```
 
 use std::cell::RefCell;
 use std::future::poll_fn;
@@ -37,6 +53,9 @@ thread_local! {
 }
 
 /// POSIX signal kind supported by the runtime.
+///
+/// Each variant maps to one Unix signal number. Register a stream with
+/// [`signal`] and await events with [`Signal::recv`].
 #[derive(Clone, Copy, Debug)]
 pub enum SignalKind {
     /// `SIGINT`, commonly sent by Ctrl-C.
@@ -71,6 +90,9 @@ pub struct Signal {
 ///
 /// Repeated calls for the same kind share the process-wide `sigaction`
 /// registration and return independent stream handles.
+///
+/// Returns an error if another non-default, non-ignored handler is already
+/// installed for the requested signal.
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     let dispatch = dispatch()?;
     let index = kind.index();
@@ -91,6 +113,10 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
 
 impl Signal {
     /// Waits for the next signal event observed by this stream.
+    ///
+    /// Signals are coalesced by kind; if several identical signals arrive before
+    /// the stream is polled again, one wake may represent multiple process
+    /// signal deliveries.
     pub async fn recv(&mut self) -> Option<()> {
         poll_fn(|cx| {
             let current = self.state.generation.load(Ordering::Acquire);

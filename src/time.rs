@@ -15,6 +15,8 @@ use core::time::Duration;
 use crate::{clear_timeout, set_timeout};
 
 /// Future returned by [`sleep`].
+///
+/// Dropping the future before it completes cancels the timer registration.
 pub struct Sleep {
     delay: Option<Duration>,
     state: Option<Rc<SleepState>>,
@@ -31,9 +33,22 @@ pub struct Elapsed;
 /// # Examples
 ///
 /// ```
-/// # let _ = || async {
-/// runite::time::sleep(std::time::Duration::from_millis(10)).await;
-/// # };
+/// use std::sync::{
+///     Arc,
+///     atomic::{AtomicBool, Ordering},
+/// };
+///
+/// let completed = Arc::new(AtomicBool::new(false));
+/// let completed_task = Arc::clone(&completed);
+///
+/// runite::queue_future(async move {
+///     runite::time::sleep(std::time::Duration::from_millis(1)).await;
+///     completed_task.store(true, Ordering::SeqCst);
+/// });
+///
+/// runite::run();
+///
+/// assert!(completed.load(Ordering::SeqCst));
 /// ```
 pub fn sleep(duration: Duration) -> Sleep {
     Sleep {
@@ -53,14 +68,27 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// # Examples
 ///
 /// ```
-/// # let _ = || async {
-/// let result = runite::time::timeout(
-///     std::time::Duration::from_millis(5),
-///     async { 42usize },
-/// )
-/// .await;
-/// assert_eq!(result, Ok(42));
-/// # };
+/// use std::sync::{
+///     Arc,
+///     atomic::{AtomicUsize, Ordering},
+/// };
+///
+/// let observed = Arc::new(AtomicUsize::new(0));
+/// let observed_task = Arc::clone(&observed);
+///
+/// runite::queue_future(async move {
+///     let value = runite::time::timeout(
+///         std::time::Duration::from_millis(5),
+///         async { 42usize },
+///     )
+///     .await
+///     .expect("future should complete before timeout");
+///     observed_task.store(value, Ordering::SeqCst);
+/// });
+///
+/// runite::run();
+///
+/// assert_eq!(observed.load(Ordering::SeqCst), 42);
 /// ```
 pub async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
 where
