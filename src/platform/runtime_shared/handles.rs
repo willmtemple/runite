@@ -51,9 +51,9 @@ pub struct WorkerHandle {
 }
 
 #[derive(Clone)]
-/// Handle returned by `set_timeout`.
+/// Handle returned by [`timeout`](crate::timeout).
 ///
-/// Clearing this handle from a different runtime thread than the one that
+/// Cancelling this handle from a different runtime thread than the one that
 /// created it is a no-op rather than a panic: the `generation` field uniquely
 /// identifies the originating `ThreadState`, so a stale handle simply fails
 /// the generation check and is silently ignored.
@@ -63,15 +63,17 @@ pub struct TimeoutHandle {
 }
 
 impl TimeoutHandle {
-    pub fn clear(&self) {
-        super::scheduler::clear_timeout(self);
+    /// Cancels the pending timeout. If the callback has already fired, this is
+    /// a no-op.
+    pub fn cancel(&self) {
+        super::scheduler::cancel_timeout(self);
     }
 }
 
 #[derive(Clone)]
-/// Handle returned by `set_interval`.
+/// Handle returned by [`interval`](crate::interval).
 ///
-/// Clearing this handle from a different runtime thread than the one that
+/// Cancelling this handle from a different runtime thread than the one that
 /// created it is a no-op rather than a panic; see [`TimeoutHandle`] for the
 /// generation-token rationale.
 pub struct IntervalHandle {
@@ -80,8 +82,10 @@ pub struct IntervalHandle {
 }
 
 impl IntervalHandle {
-    pub fn clear(&self) {
-        super::scheduler::clear_interval(self);
+    /// Cancels the repeating timer, preventing any further callback
+    /// invocations. Cancelling an already-cancelled interval is a no-op.
+    pub fn cancel(&self) {
+        super::scheduler::cancel_interval(self);
     }
 }
 

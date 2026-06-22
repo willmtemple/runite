@@ -56,9 +56,8 @@ pub use handles::{
     YieldNow,
 };
 pub use scheduler::{
-    Runtime, clear_interval, clear_timeout, current_thread_handle, queue_future, queue_microtask,
-    queue_task, run, run_ready_tasks, run_until_stalled, set_interval, set_timeout, spawn_worker,
-    yield_now,
+    Runtime, current_thread_handle, interval, queue_future, queue_microtask, queue_task, run,
+    run_ready_tasks, run_until_stalled, spawn_worker, timeout, yield_now,
 };
 pub(crate) use scheduler::{try_current_thread_handle, with_current_driver_any};
 #[allow(unused_imports)]

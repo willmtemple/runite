@@ -1,6 +1,6 @@
 use runite::{
-    IntervalHandle, ThreadHandle, clear_interval, current_thread_handle, queue_future,
-    queue_microtask, queue_task, set_interval, set_timeout, spawn_worker, yield_now,
+    IntervalHandle, ThreadHandle, current_thread_handle, interval, queue_future, queue_microtask,
+    queue_task, spawn_worker, timeout, yield_now,
 };
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -87,7 +87,7 @@ fn main() {
             set_dashboard_interval(slot, ticks);
         }
 
-        set_timeout(Duration::from_millis(30), || {
+        timeout(Duration::from_millis(30), || {
             log_event!(11, "[main] timeout: network snapshot ready");
         });
 
@@ -145,7 +145,7 @@ fn main() {
                     let slot = Rc::clone(&sample_interval);
                     let count = Rc::clone(&sample_count);
                     let main_for_samples = main_for_worker.clone();
-                    let handle = set_interval(Duration::from_millis(40), move || {
+                    let handle = interval(Duration::from_millis(40), move || {
                         let next = count.get() + 1;
                         count.set(next);
                         queue_log(
@@ -154,8 +154,8 @@ fn main() {
                             format!("[worker->main] interval: sample batch {next} ready"),
                         );
                         if next == 2 {
-                            let interval = slot.borrow_mut().take().expect("interval should exist");
-                            clear_interval(&interval);
+                            let active = slot.borrow_mut().take().expect("interval should exist");
+                            active.cancel();
                             queue_log(&main_for_samples, 18, "[worker->main] interval stopped");
                         }
                     });
@@ -164,7 +164,7 @@ fn main() {
 
                 {
                     let main_for_flush = main_for_worker.clone();
-                    set_timeout(Duration::from_millis(110), move || {
+                    timeout(Duration::from_millis(110), move || {
                         queue_log_microtask(
                             &main_for_flush,
                             20,
@@ -176,7 +176,7 @@ fn main() {
             || log_event!(21, "[main] worker exited"),
         );
 
-        set_timeout(Duration::from_millis(70), move || {
+        timeout(Duration::from_millis(70), move || {
             let queued = worker.queue_task({
                 let main_from_remote_task = main_handle.clone();
                 move || {
@@ -204,7 +204,7 @@ fn main() {
             );
         });
 
-        set_timeout(Duration::from_millis(140), || {
+        timeout(Duration::from_millis(140), || {
             log_event!(22, "[main] final timeout: commit frame statistics");
         });
     });
@@ -212,7 +212,7 @@ fn main() {
 
 fn set_dashboard_interval(slot: Rc<RefCell<Option<IntervalHandle>>>, ticks: Rc<Cell<usize>>) {
     let slot_for_callback = Rc::clone(&slot);
-    let handle = set_interval(Duration::from_millis(50), move || {
+    let handle = interval(Duration::from_millis(50), move || {
         let next = ticks.get() + 1;
         ticks.set(next);
         if next == 1 {
@@ -220,11 +220,11 @@ fn set_dashboard_interval(slot: Rc<RefCell<Option<IntervalHandle>>>, ticks: Rc<C
             return;
         }
 
-        let interval = slot_for_callback
+        let active = slot_for_callback
             .borrow_mut()
             .take()
             .expect("interval should exist");
-        clear_interval(&interval);
+        active.cancel();
         log_event!(19, "[main] interval: dashboard tick 2 and stop");
     });
     *slot.borrow_mut() = Some(handle);

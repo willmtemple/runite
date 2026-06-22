@@ -130,7 +130,7 @@ where
 /// # Panics
 ///
 /// Panics if the runtime cannot initialize its state for the current thread.
-pub fn set_timeout<R: Runtime, F>(delay: Duration, callback: F) -> TimeoutHandle
+pub fn timeout<R: Runtime, F>(delay: Duration, callback: F) -> TimeoutHandle
 where
     F: FnOnce() + 'static,
 {
@@ -139,7 +139,7 @@ where
     #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
-        event = "set_timeout",
+        event = "timeout",
         timer_id = id,
         delay_ns = delay.as_nanos() as u64,
         deadline_ns = deadline.as_nanos() as u64,
@@ -156,29 +156,29 @@ where
     TimeoutHandle { id, generation }
 }
 
-/// Cancels a timeout previously created by `set_timeout`.
+/// Cancels a timeout previously created by [`timeout`].
 ///
-/// Clearing a handle whose originating runtime thread has already torn down,
+/// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
-pub fn clear_timeout(handle: &TimeoutHandle) {
+pub fn cancel_timeout(handle: &TimeoutHandle) {
     #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
-        event = "clear_timeout",
+        event = "cancel_timeout",
         timer_id = handle.id,
-        "clearing timeout"
+        "cancelling timeout"
     );
     clear_timer(handle.generation, handle.id);
 }
 
 /// Schedules a repeating timer on the current runtime thread.
 ///
-/// The callback is invoked once per interval until the handle is cleared.
+/// The callback is invoked once per interval until the handle is cancelled.
 ///
 /// # Panics
 ///
 /// Panics if the runtime cannot initialize its state for the current thread.
-pub fn set_interval<R: Runtime, F>(delay: Duration, callback: F) -> IntervalHandle
+pub fn interval<R: Runtime, F>(delay: Duration, callback: F) -> IntervalHandle
 where
     F: FnMut() + 'static,
 {
@@ -187,7 +187,7 @@ where
     #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
-        event = "set_interval",
+        event = "interval",
         timer_id = id,
         delay_ns = delay.as_nanos() as u64,
         "scheduling interval"
@@ -217,7 +217,7 @@ where
         #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::TIMER,
-            event = "set_interval_deadline",
+            event = "interval_deadline",
             timer_id = id,
             deadline_ns = deadline.as_nanos() as u64,
             "interval deadline computed"
@@ -230,17 +230,17 @@ where
     IntervalHandle { id, generation }
 }
 
-/// Cancels an interval previously created by `set_interval`.
+/// Cancels an interval previously created by [`interval`].
 ///
-/// Clearing a handle whose originating runtime thread has already torn down,
+/// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
-pub fn clear_interval(handle: &IntervalHandle) {
+pub fn cancel_interval(handle: &IntervalHandle) {
     #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
-        event = "clear_interval",
+        event = "cancel_interval",
         timer_id = handle.id,
-        "clearing interval"
+        "cancelling interval"
     );
     clear_timer(handle.generation, handle.id);
 }

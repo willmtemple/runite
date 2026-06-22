@@ -22,7 +22,7 @@ use crate::platform::runtime_shared as shared;
 
 pub use shared::{
     AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
-    YieldNow, clear_interval, clear_timeout, yield_now,
+    YieldNow, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
@@ -84,18 +84,18 @@ where
     shared::queue_future::<MacosRuntime, F>(future)
 }
 
-pub fn set_timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
+pub fn timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
 where
     F: FnOnce() + 'static,
 {
-    shared::set_timeout::<MacosRuntime, F>(delay, callback)
+    shared::timeout::<MacosRuntime, F>(delay, callback)
 }
 
-pub fn set_interval<F>(delay: Duration, callback: F) -> IntervalHandle
+pub fn interval<F>(delay: Duration, callback: F) -> IntervalHandle
 where
     F: FnMut() + 'static,
 {
-    shared::set_interval::<MacosRuntime, F>(delay, callback)
+    shared::interval::<MacosRuntime, F>(delay, callback)
 }
 
 pub fn spawn_worker<Init, Exit>(initial_task: Init, on_exit: Exit) -> WorkerHandle
