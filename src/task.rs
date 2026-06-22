@@ -23,6 +23,9 @@ use crate::sys::blocking;
 /// Awaiting it yields the closure's return value. If the worker pool dropped
 /// the task without completing it (for example because the process is shutting
 /// down), the future resolves to [`JoinError::Cancelled`].
+///
+/// This handle is itself a future, so it is normally `.await`ed from a future
+/// scheduled on a runtime thread.
 pub struct BlockingJoinHandle<R: Send + 'static> {
     inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>>,
 }
@@ -34,6 +37,9 @@ pub struct BlockingJoinHandle<R: Send + 'static> {
 /// future is aborted before it completes). A queued task's join output is
 /// `Result<T, JoinError>`, so callers should handle these errors when awaiting
 /// any join handle.
+///
+/// Use [`JoinError::is_cancelled`] and [`JoinError::is_aborted`] when the caller
+/// only needs to distinguish the category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
     /// The worker exited without producing a value.
@@ -52,12 +58,16 @@ pub enum JoinError {
 
 impl JoinError {
     /// Returns `true` if the task was aborted before completion.
+    ///
+    /// This is true only for [`JoinError::Aborted`].
     pub fn is_aborted(&self) -> bool {
         matches!(self, JoinError::Aborted)
     }
 
     /// Returns `true` if a blocking-pool worker was cancelled (e.g. during
     /// runtime shutdown) without producing a value.
+    ///
+    /// This is true only for [`JoinError::Cancelled`].
     pub fn is_cancelled(&self) -> bool {
         matches!(self, JoinError::Cancelled)
     }
@@ -95,6 +105,28 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
 /// `f` runs on a real OS thread; it may call blocking syscalls freely. Avoid
 /// touching any per-runtime-thread state from inside `f` — this is a pool
 /// thread, not a runtime thread.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::{
+///     Arc,
+///     atomic::{AtomicUsize, Ordering},
+/// };
+///
+/// let observed = Arc::new(AtomicUsize::new(0));
+/// let observed_task = Arc::clone(&observed);
+///
+/// runite::queue_future(async move {
+///     let handle = runite::spawn_blocking(|| 40usize + 2).expect("blocking task should queue");
+///     let value = handle.await.expect("blocking task should complete");
+///     observed_task.store(value, Ordering::SeqCst);
+/// });
+///
+/// runite::run();
+///
+/// assert_eq!(observed.load(Ordering::SeqCst), 42);
+/// ```
 pub fn spawn_blocking<F, R>(f: F) -> io::Result<BlockingJoinHandle<R>>
 where
     F: FnOnce() -> R + Send + 'static,
