@@ -1,9 +1,11 @@
+mod buf;
 #[cfg(feature = "futures-compat")]
 pub mod compat;
 mod ext;
 mod stream;
 mod traits;
 
+pub use buf::{BufReader, BufWriter};
 pub use ext::{AsyncReadExt, AsyncWriteExt, Lines};
 pub use stream::{Collect, Filter, ForEach, Map, Next, Skip, Stream, StreamExt, Take};
 pub use traits::{AsyncRead, AsyncWrite};
