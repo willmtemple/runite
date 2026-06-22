@@ -25,7 +25,7 @@ use std::task::{Poll, Waker};
 
 use crate::ThreadHandle;
 
-const SIGNAL_COUNT: usize = 6;
+const SIGNAL_COUNT: usize = 7;
 
 static DISPATCH: OnceLock<io::Result<SignalDispatch>> = OnceLock::new();
 static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
@@ -51,6 +51,8 @@ pub enum SignalKind {
     User1,
     /// `SIGUSR2`.
     User2,
+    /// `SIGWINCH`, sent when a terminal window changes size.
+    WindowChange,
 }
 
 /// Per-signal async stream of received signal events.
@@ -132,6 +134,7 @@ impl SignalKind {
             Self::Quit => 3,
             Self::User1 => 4,
             Self::User2 => 5,
+            Self::WindowChange => 6,
         }
     }
 
@@ -143,6 +146,7 @@ impl SignalKind {
             Self::Quit => libc::SIGQUIT,
             Self::User1 => libc::SIGUSR1,
             Self::User2 => libc::SIGUSR2,
+            Self::WindowChange => libc::SIGWINCH,
         }
     }
 }
@@ -359,6 +363,7 @@ fn signal_index(signum: libc::c_int) -> Option<usize> {
         libc::SIGQUIT => Some(3),
         libc::SIGUSR1 => Some(4),
         libc::SIGUSR2 => Some(5),
+        libc::SIGWINCH => Some(6),
         _ => None,
     }
 }
@@ -571,6 +576,7 @@ mod tests {
             SignalKind::Quit,
             SignalKind::User1,
             SignalKind::User2,
+            SignalKind::WindowChange,
         ] {
             let first = signal(kind).expect("signal stream should construct");
             let second = signal(kind).expect("repeat registration should share process handler");
@@ -604,6 +610,34 @@ mod tests {
         assert!(
             *received.lock().expect("received mutex poisoned"),
             "SIGUSR1 recv future should complete"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn signal_receives_sigwinch() {
+        use std::sync::{Arc, Mutex};
+
+        let received = Arc::new(Mutex::new(false));
+        let received_task = Arc::clone(&received);
+        let mut sigwinch =
+            signal(SignalKind::WindowChange).expect("SIGWINCH stream should construct");
+
+        crate::queue_future(async move {
+            sigwinch.recv().await;
+            *received_task.lock().expect("received mutex poisoned") = true;
+        });
+
+        // SAFETY: `getpid` takes no arguments and returns this process id;
+        // `SIGWINCH` is a valid signal number for `kill`.
+        let rc = unsafe { libc::kill(libc::getpid(), libc::SIGWINCH) };
+        assert_eq!(rc, 0, "kill(SIGWINCH) should succeed");
+
+        crate::run();
+
+        assert!(
+            *received.lock().expect("received mutex poisoned"),
+            "SIGWINCH recv future should complete"
         );
     }
 }
