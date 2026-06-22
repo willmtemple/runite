@@ -13,7 +13,7 @@ use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
-use crate::io::{AsyncRead, AsyncWrite};
+use crate::io::{AsyncRead, AsyncWrite, Stream};
 use crate::op::net::NetOp;
 
 #[cfg(feature = "hyper")]
@@ -180,6 +180,44 @@ impl TcpStream {
             how,
         })
         .await
+    }
+
+    /// Splits this stream into independently owned read and write halves.
+    ///
+    /// The halves share the underlying socket via reference counting, so they
+    /// can be moved into separate tasks to read and write concurrently. Use
+    /// [`OwnedReadHalf`]/[`OwnedWriteHalf`] and recombine them later with
+    /// [`TcpStream::reunite`].
+    pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+        let read = Self {
+            inner: Arc::clone(&self.inner),
+            pending_read: None,
+            pending_write: None,
+            pending_shutdown: None,
+        };
+        let write = Self {
+            inner: self.inner,
+            pending_read: None,
+            pending_write: None,
+            pending_shutdown: None,
+        };
+        (OwnedReadHalf { stream: read }, OwnedWriteHalf { stream: write })
+    }
+
+    /// Reassembles a [`TcpStream`] from the two halves produced by
+    /// [`into_split`](Self::into_split).
+    ///
+    /// Returns [`ReuniteError`] if the halves came from different streams.
+    pub fn reunite(
+        read: OwnedReadHalf,
+        write: OwnedWriteHalf,
+    ) -> Result<Self, ReuniteError> {
+        if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
+            drop(read);
+            Ok(write.stream)
+        } else {
+            Err(ReuniteError(read, write))
+        }
     }
 
     /// Duplicates the underlying stream socket.
@@ -387,6 +425,104 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+/// The owned read half of a [`TcpStream`], produced by
+/// [`TcpStream::into_split`]. Implements [`AsyncRead`].
+pub struct OwnedReadHalf {
+    stream: TcpStream,
+}
+
+/// The owned write half of a [`TcpStream`], produced by
+/// [`TcpStream::into_split`]. Implements [`AsyncWrite`].
+pub struct OwnedWriteHalf {
+    stream: TcpStream,
+}
+
+impl OwnedReadHalf {
+    /// Returns the local socket address of the underlying stream.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.local_addr()
+    }
+
+    /// Returns the remote peer address of the underlying stream.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// Reassembles the original [`TcpStream`]; see [`TcpStream::reunite`].
+    pub fn reunite(self, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
+        TcpStream::reunite(self, write)
+    }
+}
+
+impl OwnedWriteHalf {
+    /// Returns the local socket address of the underlying stream.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.local_addr()
+    }
+
+    /// Returns the remote peer address of the underlying stream.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// Shuts down the write half of the connection, signalling EOF to the peer
+    /// while the read half remains usable.
+    pub async fn shutdown(&self) -> io::Result<()> {
+        self.stream.shutdown(Shutdown::Write).await
+    }
+
+    /// Reassembles the original [`TcpStream`]; see [`TcpStream::reunite`].
+    pub fn reunite(self, read: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
+        TcpStream::reunite(read, self)
+    }
+}
+
+impl AsyncRead for OwnedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for OwnedWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_close(cx)
+    }
+}
+
+/// Error returned by [`TcpStream::reunite`] when the two halves did not
+/// originate from the same [`TcpStream`]. Returns ownership of both halves.
+pub struct ReuniteError(pub OwnedReadHalf, pub OwnedWriteHalf);
+
+impl std::fmt::Debug for ReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReuniteError(..)")
+    }
+}
+
+impl std::fmt::Display for ReuniteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the provided halves are not from the same TcpStream")
+    }
+}
+
+impl std::error::Error for ReuniteError {}
+
 impl TcpListener {
     /// Binds a TCP listener to the first resolved address that succeeds.
     pub async fn bind<A>(addr: A) -> io::Result<Self>
@@ -421,6 +557,18 @@ impl TcpListener {
         Ok((stream, accepted.peer_addr))
     }
 
+    /// Returns a [`Stream`] that yields inbound connections as they arrive.
+    ///
+    /// The stream is infinite: it never yields `None`. Each item is the result
+    /// of an accept, so transient errors surface as `Some(Err(_))` without
+    /// ending iteration.
+    pub fn incoming(&self) -> Incoming {
+        Incoming {
+            listener: self.clone(),
+            pending: None,
+        }
+    }
+
     /// Returns the local socket address of this listener.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         crate::sys::current::net::local_addr(self.raw_fd())
@@ -444,6 +592,42 @@ impl TcpListener {
 
     fn raw_fd(&self) -> RawFd {
         self.inner.fd.as_raw_fd()
+    }
+}
+
+/// A [`Stream`] of inbound TCP connections, created by
+/// [`TcpListener::incoming`].
+pub struct Incoming {
+    listener: TcpListener,
+    pending: Option<Pin<Box<dyn Future<Output = io::Result<TcpStream>>>>>,
+}
+
+impl Stream for Incoming {
+    type Item = io::Result<TcpStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.pending.is_none() {
+            let fd = this.listener.raw_fd();
+            this.pending = Some(Box::pin(async move {
+                let accepted =
+                    crate::sys::current::net::accept(NetOp::Accept { fd }).await?;
+                // SAFETY: `accepted.fd` is the fresh descriptor returned by
+                // accept; ownership is transferred to `OwnedFd` exactly once.
+                Ok(TcpStream::from_owned_fd(unsafe {
+                    OwnedFd::from_raw_fd(accepted.fd)
+                }))
+            }));
+        }
+
+        let future = this.pending.as_mut().expect("pending accept future present");
+        match future.as_mut().poll(cx) {
+            Poll::Ready(result) => {
+                this.pending = None;
+                Poll::Ready(Some(result))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -1032,5 +1216,103 @@ mod tests {
 
         let observed = observed.lock().unwrap();
         assert_eq!(observed.as_slice(), ["timed out", "received"]);
+    }
+
+    #[test]
+    fn tcp_into_split_read_write_and_reunite() {
+        use crate::io::{AsyncReadExt, AsyncWriteExt};
+
+        let ok = Arc::new(Mutex::new(false));
+        let ok_for_task = Arc::clone(&ok);
+
+        queue_task(move || {
+            let ok_for_task = Arc::clone(&ok_for_task);
+            queue_future(async move {
+                let listener = Arc::new(
+                    TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                        .await
+                        .expect("listener should bind"),
+                );
+                let local_addr = listener.local_addr().expect("address");
+
+                let listener_for_accept = Arc::clone(&listener);
+                let server = queue_future(async move {
+                    let (mut stream, _) =
+                        listener_for_accept.accept().await.expect("accept");
+                    let mut buffer = [0; 4];
+                    stream.read_exact(&mut buffer).await.expect("server read");
+                    stream.write_all(b"pong").await.expect("server write");
+                    buffer
+                });
+
+                let client = TcpStream::connect(local_addr).await.expect("connect");
+                let (mut read_half, mut write_half) = client.into_split();
+
+                // Write from one task while reading in this one.
+                let writer = queue_future(async move {
+                    write_half.write_all(b"ping").await.expect("split write");
+                    write_half
+                });
+
+                let mut response = [0; 4];
+                read_half.read_exact(&mut response).await.expect("split read");
+                assert_eq!(&response, b"pong");
+
+                let write_half = writer.await.expect("writer task");
+                let server_bytes = server.await.expect("server task");
+                assert_eq!(&server_bytes, b"ping");
+
+                // Halves came from the same stream, so reunite succeeds.
+                TcpStream::reunite(read_half, write_half).expect("reunite");
+
+                *ok_for_task.lock().unwrap() = true;
+            });
+        });
+        run();
+
+        assert!(*ok.lock().unwrap(), "split round-trip should complete");
+    }
+
+    #[test]
+    fn tcp_incoming_yields_connections() {
+        use crate::io::StreamExt;
+
+        let count = Arc::new(Mutex::new(0usize));
+        let count_for_task = Arc::clone(&count);
+
+        queue_task(move || {
+            let count_for_task = Arc::clone(&count_for_task);
+            queue_future(async move {
+                let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .expect("listener should bind");
+                let local_addr = listener.local_addr().expect("address");
+
+                let server = queue_future(async move {
+                    let mut incoming = listener.incoming();
+                    let mut accepted = 0;
+                    while accepted < 3 {
+                        let stream = incoming
+                            .next()
+                            .await
+                            .expect("incoming is infinite")
+                            .expect("accept should succeed");
+                        drop(stream);
+                        accepted += 1;
+                    }
+                    accepted
+                });
+
+                for _ in 0..3 {
+                    let stream = TcpStream::connect(local_addr).await.expect("connect");
+                    drop(stream);
+                }
+
+                *count_for_task.lock().unwrap() = server.await.expect("server task");
+            });
+        });
+        run();
+
+        assert_eq!(*count.lock().unwrap(), 3);
     }
 }
