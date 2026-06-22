@@ -12,6 +12,11 @@ pub async fn wait_readable(fd: RawFd) -> io::Result<()> {
     submit_poll(fd, libc::POLLIN | libc::POLLERR | libc::POLLHUP).await
 }
 
+/// Waits until `fd` becomes writable or reports an error/hangup condition.
+pub async fn wait_writable(fd: RawFd) -> io::Result<()> {
+    submit_poll(fd, libc::POLLOUT | libc::POLLERR | libc::POLLHUP).await
+}
+
 async fn submit_poll(fd: RawFd, mask: i16) -> io::Result<()> {
     let (future, handle) = completion_for_current_thread::<io::Result<()>>();
     let callback_handle = handle.clone();
