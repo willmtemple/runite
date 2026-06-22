@@ -1,4 +1,24 @@
 //! Single-value watch channels.
+//!
+//! # Examples
+//!
+//! Borrow the latest value immediately, then wait for a later change.
+//!
+//! ```
+//! let (sender, mut receiver) = runite::channel::watch::channel("initial");
+//! assert_eq!(*receiver.borrow(), "initial");
+//!
+//! runite::queue_future(async move {
+//!     sender.send("updated").unwrap();
+//! });
+//!
+//! runite::queue_future(async move {
+//!     receiver.changed().await.unwrap();
+//!     assert_eq!(*receiver.borrow(), "updated");
+//! });
+//!
+//! runite::run();
+//! ```
 
 use std::fmt;
 use std::future::poll_fn;
