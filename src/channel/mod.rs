@@ -9,6 +9,10 @@
 //!
 //! - [`oneshot`] for single-value handoff
 //! - [`mpsc`] for bounded and unbounded multi-producer/single-consumer queues
+//! - [`broadcast`] for bounded fan-out to many receivers
+//! - [`watch`] for sharing the latest value with many receivers
 
+pub mod broadcast;
 pub mod mpsc;
 pub mod oneshot;
+pub mod watch;
