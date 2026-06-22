@@ -1,4 +1,8 @@
-//! Multi-producer, single-consumer channels.
+//! Multi-producer, single-consumer queues.
+//!
+//! MPSC channels carry a sequence of messages from one or more senders to one
+//! receiver. Use [`channel`] for bounded queues with backpressure or
+//! [`unbounded_channel`] when producers must never await capacity.
 //!
 //! # Examples
 //!
@@ -34,6 +38,18 @@ use crate::sys::current::channel::runtime_waiter;
 ///
 /// Bounded senders provide both [`Sender::try_send`] and async [`Sender::send`] backpressure.
 ///
+/// # Examples
+///
+/// ```
+/// runite::queue_future(async {
+///     let (tx, mut rx) = runite::channel::mpsc::channel(1);
+///     tx.send("message").await.unwrap();
+///     assert_eq!(rx.recv().await, Some("message"));
+/// });
+///
+/// runite::run();
+/// ```
+///
 /// # Panics
 ///
 /// Panics if `capacity == 0`.
@@ -54,6 +70,21 @@ pub fn channel<T: Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// Creates an unbounded channel.
 ///
 /// Unbounded senders never wait for capacity, but the single receiver is still asynchronous.
+///
+/// # Examples
+///
+/// ```
+/// let (tx, mut rx) = runite::channel::mpsc::unbounded_channel();
+/// tx.send(1).unwrap();
+/// tx.send(2).unwrap();
+///
+/// runite::queue_future(async move {
+///     assert_eq!(rx.recv().await, Some(1));
+///     assert_eq!(rx.recv().await, Some(2));
+/// });
+///
+/// runite::run();
+/// ```
 pub fn unbounded_channel<T: Send + 'static>() -> (UnboundedSender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(State::new(None)));
     (
@@ -68,16 +99,25 @@ pub fn unbounded_channel<T: Send + 'static>() -> (UnboundedSender<T>, Receiver<T
 }
 
 /// Bounded multi-producer sender.
+///
+/// Cloning a sender creates another producer for the same queue. Async
+/// [`send`](Self::send) applies backpressure when the bounded queue is full.
 pub struct Sender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
 /// Unbounded multi-producer sender.
+///
+/// Sends never wait for capacity; they only fail after the receiver is closed or
+/// dropped.
 pub struct UnboundedSender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
 /// Single consumer for both bounded and unbounded MPSC channels.
+///
+/// The receiver drains messages in FIFO order and returns `None` from
+/// [`recv`](Self::recv) once all senders are gone and the queue is empty.
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     stream_wait: Option<CompletionFuture<Option<T>>>,
@@ -301,6 +341,18 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// When the bounded channel is full, this future waits until the receiver frees capacity.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (tx, mut rx) = runite::channel::mpsc::channel(1);
+    ///     tx.send("hello").await.unwrap();
+    ///     assert_eq!(rx.recv().await, Some("hello"));
+    /// });
+    ///
+    /// runite::run();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -311,6 +363,16 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Attempts to queue a message immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::channel::mpsc::{self, TrySendError};
+    ///
+    /// let (tx, _rx) = mpsc::channel(1);
+    /// assert_eq!(tx.try_send(1), Ok(()));
+    /// assert_eq!(tx.try_send(2), Err(TrySendError::Full(2)));
+    /// ```
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
         let mut completions = Vec::new();
         let result = {
@@ -325,6 +387,15 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Returns `true` if the receiver has been closed or dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, mut rx) = runite::channel::mpsc::channel::<usize>(1);
+    /// assert!(!tx.is_closed());
+    /// rx.close();
+    /// assert!(tx.is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         self.shared
             .lock()
@@ -413,6 +484,19 @@ impl<T: Send + 'static> Sender<T> {
 
 impl<T: Send + 'static> UnboundedSender<T> {
     /// Queues a message immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, mut rx) = runite::channel::mpsc::unbounded_channel();
+    /// tx.send("first").unwrap();
+    ///
+    /// runite::queue_future(async move {
+    ///     assert_eq!(rx.recv().await, Some("first"));
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mut completions = Vec::new();
         let result = {
@@ -429,6 +513,15 @@ impl<T: Send + 'static> UnboundedSender<T> {
     }
 
     /// Returns `true` if the receiver has been closed or dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::mpsc::unbounded_channel::<usize>();
+    /// assert!(!tx.is_closed());
+    /// drop(rx);
+    /// assert!(tx.is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         self.shared
             .lock()
@@ -442,6 +535,20 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// Returns `None` when the channel is closed and all buffered messages have been drained.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (tx, mut rx) = runite::channel::mpsc::channel(2);
+    ///     tx.send(11).await.unwrap();
+    ///     drop(tx);
+    ///     assert_eq!(rx.recv().await, Some(11));
+    ///     assert_eq!(rx.recv().await, None);
+    /// });
+    ///
+    /// runite::run();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -452,6 +559,17 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Attempts to receive a message immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::channel::mpsc::{self, TryRecvError};
+    ///
+    /// let (tx, mut rx) = mpsc::channel(1);
+    /// assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    /// tx.try_send("ready").unwrap();
+    /// assert_eq!(rx.try_recv(), Ok("ready"));
+    /// ```
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut completions = Vec::new();
         let result = {
@@ -476,6 +594,16 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// Already-buffered messages remain available to [`recv`](Self::recv) and
     /// [`try_recv`](Self::try_recv).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::channel::mpsc;
+    ///
+    /// let (tx, mut rx) = mpsc::channel(1);
+    /// rx.close();
+    /// assert_eq!(tx.try_send(5), Err(mpsc::TrySendError::Closed(5)));
+    /// ```
     pub fn close(&mut self) {
         let mut completions = Vec::new();
         {
@@ -489,6 +617,15 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Returns `true` if the channel is closed or all senders have been dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::mpsc::channel::<usize>(1);
+    /// assert!(!rx.is_closed());
+    /// drop(tx);
+    /// assert!(rx.is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         let state = self
             .shared

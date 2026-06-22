@@ -1,4 +1,21 @@
 //! Single-use channels for handing one value from a sender to a receiver.
+//!
+//! Use a oneshot channel when one task needs to complete a single request, reply
+//! to another task, or transfer ownership of one value exactly once. The sender
+//! is consumed by [`Sender::send`], and the receiver resolves to an error if the
+//! sender is dropped before sending.
+//!
+//! # Examples
+//!
+//! ```
+//! runite::queue_future(async {
+//!     let (sender, mut receiver) = runite::channel::oneshot::channel();
+//!     sender.send("ready").unwrap();
+//!     assert_eq!(receiver.recv().await.unwrap(), "ready");
+//! });
+//!
+//! runite::run();
+//! ```
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -36,11 +53,17 @@ pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
 }
 
 /// Sending half of a oneshot channel.
+///
+/// A sender can either send one value with [`send`](Self::send) or be dropped to
+/// close the channel without a value.
 pub struct Sender<T: Send + 'static> {
     shared: Option<Arc<Mutex<State<T>>>>,
 }
 
 /// Receiving half of a oneshot channel.
+///
+/// A receiver can wait asynchronously with [`recv`](Self::recv) or poll
+/// synchronously with [`try_recv`](Self::try_recv).
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     consumed: bool,
@@ -75,6 +98,18 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// This consumes the sender. If the receiver is already waiting on a runtime thread, the
     /// receive future is woken through the runtime's cross-thread notifier path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (sender, mut receiver) = runite::channel::oneshot::channel();
+    ///     sender.send(7).unwrap();
+    ///     assert_eq!(receiver.recv().await.unwrap(), 7);
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
         let Some(shared) = self.shared.take() else {
             return Err(SendError(value));
@@ -103,6 +138,15 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Returns `true` if the receiver has been closed or dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, mut receiver) = runite::channel::oneshot::channel::<usize>();
+    /// assert!(!sender.is_closed());
+    /// receiver.close();
+    /// assert!(sender.is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         self.shared.as_ref().is_none_or(|shared| {
             shared
@@ -116,6 +160,18 @@ impl<T: Send + 'static> Sender<T> {
 impl<T: Send + 'static> Receiver<T> {
     /// Waits for the channel's value.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (sender, mut receiver) = runite::channel::oneshot::channel();
+    ///     sender.send("done").unwrap();
+    ///     assert_eq!(receiver.recv().await.unwrap(), "done");
+    /// });
+    ///
+    /// runite::run();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread. Async channel
@@ -127,6 +183,17 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Attempts to receive the value without waiting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::channel::oneshot::{self, TryRecvError};
+    ///
+    /// let (sender, mut receiver) = oneshot::channel();
+    /// assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+    /// sender.send(3).unwrap();
+    /// assert_eq!(receiver.try_recv(), Ok(3));
+    /// ```
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         if self.consumed {
             return Err(TryRecvError::Closed);
@@ -153,6 +220,16 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// Closing prevents future sends from succeeding. If a value has already been sent, it can
     /// still be retrieved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use runite::channel::oneshot::{self, SendError};
+    ///
+    /// let (sender, mut receiver) = oneshot::channel();
+    /// receiver.close();
+    /// assert_eq!(sender.send(9), Err(SendError(9)));
+    /// ```
     pub fn close(&mut self) {
         let mut state = self
             .shared
@@ -162,6 +239,15 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Returns `true` if the channel is closed to future sends.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (sender, receiver) = runite::channel::oneshot::channel::<usize>();
+    /// assert!(!receiver.is_closed());
+    /// drop(sender);
+    /// assert!(receiver.is_closed());
+    /// ```
     pub fn is_closed(&self) -> bool {
         let state = self
             .shared

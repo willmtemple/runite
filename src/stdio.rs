@@ -1,9 +1,10 @@
 //! Async standard stream helpers.
 //!
-//! [`Stdin`] reads from fd 0, [`Stdout`] writes to fd 1, and [`Stderr`] writes
-//! to fd 2 through the runtime's platform I/O backend. The handles duplicate the
-//! process stdio descriptors, so dropping them does not close the process-wide
-//! standard streams.
+//! This module opens runtime-aware handles for process standard input, output,
+//! and error. [`Stdin`] reads from standard input, while [`Stdout`] and
+//! [`Stderr`] write through the runtime's platform I/O backend. Each handle
+//! duplicates the process stdio descriptor, so dropping it does not close the
+//! process-wide standard stream.
 //!
 //! # Terminal UIs
 //!
@@ -29,6 +30,26 @@
 //!     out.write_all(b"hello from runite\n")
 //!         .await
 //!         .expect("stdout write should succeed");
+//! });
+//!
+//! runite::run();
+//! ```
+//!
+//! Reading from standard input follows the same event-loop pattern:
+//!
+//! ```no_run
+//! use runite::io::AsyncReadExt;
+//!
+//! runite::queue_future(async {
+//!     let mut input = runite::stdin().expect("stdin should open");
+//!     let mut byte = [0; 1];
+//!     let read = input
+//!         .read(&mut byte)
+//!         .await
+//!         .expect("stdin read should succeed");
+//!     if read != 0 {
+//!         eprintln!("first byte: {}", byte[0]);
+//!     }
 //! });
 //!
 //! runite::run();
@@ -65,10 +86,13 @@ const READ_CHUNK_BYTES: usize = 1024;
 type PendingStdinRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingStandardWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 
-/// Async line-oriented stdin reader.
+/// Async reader for standard input.
 ///
-/// The reader is `io_uring`-first. When the active stdin fd rejects `IORING_OP_READ`, the module
-/// falls back to a helper-thread blocking read on the same duplicated fd.
+/// `Stdin` owns a duplicate of the process standard input descriptor and
+/// implements [`AsyncRead`] for byte-oriented reads. It also provides
+/// [`read_line`](Self::read_line) for simple line-oriented input. On Linux, the
+/// reader tries `io_uring` first and falls back to a helper-thread blocking read
+/// if the active descriptor does not support runtime-native reads.
 ///
 /// Create one with [`stdin`].
 pub struct Stdin {
@@ -103,6 +127,20 @@ struct StandardWriter {
 /// Opens an async stdin reader.
 ///
 /// The returned [`Stdin`] owns a duplicate of the process stdin descriptor.
+///
+/// # Examples
+///
+/// ```no_run
+/// use runite::io::AsyncReadExt;
+///
+/// runite::queue_future(async {
+///     let mut input = runite::stdin().expect("stdin should open");
+///     let mut buffer = [0; 8];
+///     let _read = input.read(&mut buffer).await.expect("stdin should read");
+/// });
+///
+/// runite::run();
+/// ```
 pub fn stdin() -> io::Result<Stdin> {
     Ok(Stdin {
         fd: duplicate_fd(libc::STDIN_FILENO)?,
@@ -114,6 +152,21 @@ pub fn stdin() -> io::Result<Stdin> {
 /// Opens an async stdout writer.
 ///
 /// The returned [`Stdout`] owns a duplicate of the process stdout descriptor.
+///
+/// # Examples
+///
+/// ```no_run
+/// use runite::io::AsyncWriteExt;
+///
+/// runite::queue_future(async {
+///     let mut out = runite::stdout().expect("stdout should open");
+///     out.write_all(b"rendered frame\n")
+///         .await
+///         .expect("stdout should write");
+/// });
+///
+/// runite::run();
+/// ```
 pub fn stdout() -> io::Result<Stdout> {
     Ok(Stdout {
         writer: StandardWriter::new(duplicate_fd(libc::STDOUT_FILENO)?),
@@ -123,6 +176,21 @@ pub fn stdout() -> io::Result<Stdout> {
 /// Opens an async stderr writer.
 ///
 /// The returned [`Stderr`] owns a duplicate of the process stderr descriptor.
+///
+/// # Examples
+///
+/// ```no_run
+/// use runite::io::AsyncWriteExt;
+///
+/// runite::queue_future(async {
+///     let mut err = runite::stderr().expect("stderr should open");
+///     err.write_all(b"diagnostic\n")
+///         .await
+///         .expect("stderr should write");
+/// });
+///
+/// runite::run();
+/// ```
 pub fn stderr() -> io::Result<Stderr> {
     Ok(Stderr {
         writer: StandardWriter::new(duplicate_fd(libc::STDERR_FILENO)?),
@@ -135,6 +203,19 @@ impl Stdin {
     /// Returns `Ok(None)` on EOF.
     ///
     /// Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut input = runite::stdin().expect("stdin should open");
+    ///     if let Some(line) = input.read_line().await.expect("stdin should read") {
+    ///         eprintln!("line length: {}", line.len());
+    ///     }
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub async fn read_line(&mut self) -> io::Result<Option<String>> {
         loop {
             if let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
@@ -160,6 +241,21 @@ impl Stdin {
     ///
     /// Returns the number of bytes copied into `buf`, or `0` if `buf` is empty
     /// or stdin reaches EOF.
+    ///
+    /// For extension methods such as `read_exact` and `read_to_end`, use the
+    /// [`AsyncReadExt`](crate::io::AsyncReadExt) trait.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut input = runite::stdin().expect("stdin should open");
+    ///     let mut byte = [0; 1];
+    ///     let _read = input.read(&mut byte).await.expect("stdin should read");
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -205,6 +301,18 @@ impl Stdout {
     ///
     /// For extension methods such as `write_all` and `flush`, use the
     /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut out = runite::stdout().expect("stdout should open");
+    ///     let bytes = out.write(b"partial frame\n").await.expect("stdout should write");
+    ///     assert!(bytes > 0);
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.writer.write(buf).await
     }
@@ -215,6 +323,18 @@ impl Stderr {
     ///
     /// For extension methods such as `write_all` and `flush`, use the
     /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut err = runite::stderr().expect("stderr should open");
+    ///     let bytes = err.write(b"warning\n").await.expect("stderr should write");
+    ///     assert!(bytes > 0);
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.writer.write(buf).await
     }

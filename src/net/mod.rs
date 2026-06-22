@@ -1,7 +1,39 @@
-//! Portable async networking API.
+//! Portable async networking primitives.
 //!
-//! The public surface follows the general shape of `std::net`, but uses async methods for socket
-//! operations that would otherwise block the caller.
+//! This module provides TCP and UDP sockets that integrate with runite's
+//! event-loop-per-thread runtime. The public surface follows the general shape
+//! of [`std::net`], but uses async methods for operations that would otherwise
+//! block the caller. Unix domain sockets are available from [`unix`] on Unix
+//! platforms and are re-exported from this module.
+//!
+//! # Examples
+//!
+//! A TCP listener and client can run on the same local runtime loop:
+//!
+//! ```
+//! use runite::net::{TcpListener, TcpStream};
+//!
+//! runite::queue_future(async {
+//!     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+//!     let address = listener.local_addr().unwrap();
+//!
+//!     let server = runite::queue_future(async move {
+//!         let (mut stream, _) = listener.accept().await.unwrap();
+//!         let mut byte = [0];
+//!         stream.read_exact(&mut byte).await.unwrap();
+//!         stream.write_all(&byte).await.unwrap();
+//!     });
+//!
+//!     let mut client = TcpStream::connect(address).await.unwrap();
+//!     client.write_all(b"x").await.unwrap();
+//!     let mut echoed = [0];
+//!     client.read_exact(&mut echoed).await.unwrap();
+//!     assert_eq!(echoed, *b"x");
+//!     server.await.unwrap();
+//! });
+//!
+//! runite::run();
+//! ```
 
 use core::future::Future;
 use core::pin::Pin;
@@ -51,10 +83,12 @@ type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 
-/// Async TCP stream.
+/// Async TCP stream connected to a peer.
 ///
-/// This type also implements Hyper's runtime I/O traits, allowing it to be used directly as an
-/// HTTP transport.
+/// `TcpStream` owns a connected stream socket and provides async byte-oriented
+/// reads, writes, shutdown, socket option access, and owned split halves. With
+/// the `hyper` feature enabled, it also implements Hyper's runtime I/O traits
+/// so it can be used directly as an HTTP transport.
 pub struct TcpStream {
     inner: Arc<TcpStreamInner>,
     pending_read: Option<PendingRead>,
@@ -62,20 +96,44 @@ pub struct TcpStream {
     pending_shutdown: Option<PendingShutdown>,
 }
 
-#[derive(Clone, Debug)]
 /// Async TCP listening socket.
+///
+/// A listener accepts inbound [`TcpStream`] connections from a bound local
+/// address. Use [`TcpListener::accept`] for one connection at a time or
+/// [`TcpListener::incoming`] for a [`Stream`] adapter.
+#[derive(Clone, Debug)]
 pub struct TcpListener {
     inner: Arc<TcpListenerInner>,
 }
 
-#[derive(Debug)]
 /// Async UDP socket.
+///
+/// `UdpSocket` sends and receives discrete datagrams. It can operate in
+/// unconnected mode with [`send_to`](Self::send_to) and
+/// [`recv_from`](Self::recv_from), or be connected to a default peer with
+/// [`connect`](Self::connect).
+#[derive(Debug)]
 pub struct UdpSocket {
     inner: Arc<UdpSocketInner>,
 }
 
 impl TcpStream {
     /// Connects to the first resolved address that succeeds.
+    ///
+    /// The address is resolved with [`ToSocketAddrs`]. If resolution returns
+    /// more than one address, each endpoint is attempted until one connects.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// runite::queue_future(async {
+    ///     let mut stream = runite::net::TcpStream::connect("127.0.0.1:8080")
+    ///         .await
+    ///         .unwrap();
+    ///     stream.write_all(b"ping").await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn connect<A>(addr: A) -> io::Result<Self>
     where
         A: ToSocketAddrs + Send + 'static,
@@ -97,7 +155,9 @@ impl TcpStream {
         }))
     }
 
-    /// Connects to `addr`, failing if the deadline elapses first.
+    /// Connects to `addr`, failing if the timeout elapses first.
+    ///
+    /// A zero timeout is rejected with [`io::ErrorKind::InvalidInput`].
     pub async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<Self> {
         validate_timeout(timeout)?;
         crate::sys::current::net::connect_stream_timeout(*addr, timeout)
@@ -106,6 +166,9 @@ impl TcpStream {
     }
 
     /// Reads bytes from the stream.
+    ///
+    /// Returns the number of bytes copied into `buf`. A return value of `0`
+    /// indicates EOF when `buf` is not empty.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let data = match self.read_timeout_value() {
             Some(timeout) => {
@@ -141,6 +204,10 @@ impl TcpStream {
     }
 
     /// Writes bytes to the stream.
+    ///
+    /// The operation may write fewer bytes than `buf.len()`; use
+    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
+    /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.write_timeout_value() {
             Some(timeout) => {
@@ -241,6 +308,9 @@ impl TcpStream {
     }
 
     /// Duplicates the underlying stream socket.
+    ///
+    /// The returned stream refers to the same TCP connection but owns an
+    /// independent file descriptor.
     pub async fn try_clone(&self) -> io::Result<Self> {
         crate::sys::current::net::duplicate(self.raw_fd())
             .await
@@ -258,11 +328,16 @@ impl TcpStream {
     }
 
     /// Reads the current `TCP_NODELAY` setting.
+    ///
+    /// When enabled, small writes are sent without Nagle coalescing.
     pub fn nodelay(&self) -> io::Result<bool> {
         crate::sys::current::net::nodelay(self.raw_fd())
     }
 
     /// Enables or disables `TCP_NODELAY`.
+    ///
+    /// Enabling this option can reduce latency for protocols that exchange
+    /// small messages.
     pub fn set_nodelay(&self, enabled: bool) -> io::Result<()> {
         crate::sys::current::net::set_nodelay(self.raw_fd(), enabled)
     }
@@ -559,6 +634,21 @@ impl std::error::Error for ReuniteError {}
 
 impl TcpListener {
     /// Binds a TCP listener to the first resolved address that succeeds.
+    ///
+    /// Binding to port `0` asks the OS to assign an available port, which can be
+    /// retrieved with [`local_addr`](Self::local_addr).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let listener = runite::net::TcpListener::bind("127.0.0.1:0")
+    ///         .await
+    ///         .unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn bind<A>(addr: A) -> io::Result<Self>
     where
         A: ToSocketAddrs + Send + 'static,
@@ -581,6 +671,9 @@ impl TcpListener {
     }
 
     /// Accepts an incoming connection.
+    ///
+    /// The returned address is the peer address reported by the operating
+    /// system for the accepted stream.
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         let accepted =
             crate::sys::current::net::accept(NetOp::Accept { fd: self.raw_fd() }).await?;
@@ -672,6 +765,20 @@ impl Stream for Incoming {
 
 impl UdpSocket {
     /// Binds a UDP socket to the first resolved address that succeeds.
+    ///
+    /// Binding to port `0` asks the OS to choose an available local port.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::UdpSocket::bind("127.0.0.1:0")
+    ///         .await
+    ///         .unwrap();
+    ///     assert!(socket.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn bind<A>(addr: A) -> io::Result<Self>
     where
         A: ToSocketAddrs + Send + 'static,
@@ -724,6 +831,8 @@ impl UdpSocket {
     }
 
     /// Sends a datagram to the connected peer.
+    ///
+    /// The socket must first be connected with [`connect`](Self::connect).
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         match self.write_timeout_value() {
             Some(timeout) => {
@@ -742,6 +851,8 @@ impl UdpSocket {
     }
 
     /// Receives a datagram from the connected peer.
+    ///
+    /// The socket must first be connected with [`connect`](Self::connect).
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         let data = match self.read_timeout_value() {
             Some(timeout) => {
@@ -788,6 +899,25 @@ impl UdpSocket {
     }
 
     /// Sends a datagram to `addr`.
+    ///
+    /// The destination is resolved with [`ToSocketAddrs`]. If multiple
+    /// destinations are returned, each is tried until a send succeeds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let receiver = runite::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    ///     let sender = runite::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    ///     let receiver_addr = receiver.local_addr().unwrap();
+    ///
+    ///     sender.send_to(b"x", receiver_addr).await.unwrap();
+    ///     let mut buf = [0; 1];
+    ///     let (read, _peer) = receiver.recv_from(&mut buf).await.unwrap();
+    ///     assert_eq!(&buf[..read], b"x");
+    /// });
+    /// runite::run();
+    /// ```
     pub async fn send_to<A>(&self, buf: &[u8], addr: A) -> io::Result<usize>
     where
         A: ToSocketAddrs + Send + 'static,

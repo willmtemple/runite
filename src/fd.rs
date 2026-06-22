@@ -2,6 +2,30 @@
 //!
 //! These helpers are useful when integrating custom descriptor types with
 //! `runite` without writing a full async wrapper.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use std::io::Write;
+//! use std::os::fd::AsRawFd;
+//! use std::os::unix::net::UnixStream;
+//!
+//! let (reader, mut writer) = UnixStream::pair()?;
+//! let read_fd = reader.as_raw_fd();
+//!
+//! runite::queue_future(async move {
+//!     runite::fd::wait_readable(read_fd)
+//!         .await
+//!         .expect("reader should become readable");
+//! });
+//!
+//! std::thread::spawn(move || {
+//!     writer.write_all(b"ready").expect("write should succeed");
+//! });
+//!
+//! runite::run();
+//! # std::io::Result::Ok(())
+//! ```
 
 use std::io;
 use std::os::fd::RawFd;
