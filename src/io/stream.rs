@@ -2,17 +2,117 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
+/// Asynchronous sequence of values.
+///
+/// A stream is the asynchronous counterpart to [`Iterator`]. Each call to
+/// [`poll_next`](Self::poll_next) attempts to produce the next item without
+/// blocking. Returning [`Poll::Pending`] means the stream stored the current
+/// waker and will wake it when another item, or the end of the stream, may be
+/// available.
+///
+/// # Examples
+///
+/// ```
+/// use core::pin::Pin;
+/// use core::task::{Context, Poll};
+///
+/// use runite::io::{Stream, StreamExt};
+///
+/// struct Counter { next: u8, end: u8 }
+///
+/// impl Stream for Counter {
+///     type Item = u8;
+///
+///     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+///         if self.next == self.end {
+///             Poll::Ready(None)
+///         } else {
+///             let item = self.next;
+///             self.next += 1;
+///             Poll::Ready(Some(item))
+///         }
+///     }
+///
+///     fn size_hint(&self) -> (usize, Option<usize>) {
+///         let remaining = (self.end - self.next) as usize;
+///         (remaining, Some(remaining))
+///     }
+/// }
+///
+/// runite::queue_future(async {
+///     let values = Counter { next: 0, end: 3 }.collect::<Vec<_>>().await;
+///     assert_eq!(values, [0, 1, 2]);
+/// });
+/// runite::run();
+/// ```
 pub trait Stream {
+    /// The type of item yielded by this stream.
     type Item;
 
+    /// Attempts to resolve the next item in the stream.
+    ///
+    /// Return `Poll::Ready(Some(item))` when an item is available,
+    /// `Poll::Ready(None)` after the stream has ended, or [`Poll::Pending`]
+    /// when the stream cannot currently make progress.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>;
 
+    /// Returns bounds on the remaining length of the stream.
+    ///
+    /// The first element is a lower bound and the second is an optional upper
+    /// bound, following [`Iterator::size_hint`].
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, None)
     }
 }
 
+/// Extension methods for [`Stream`].
+///
+/// This trait is implemented for all streams and provides futures and stream
+/// combinators similar to those in the broader Rust async ecosystem.
+///
+/// # Examples
+///
+/// ```
+/// # use core::pin::Pin;
+/// # use core::task::{Context, Poll};
+/// # use runite::io::{Stream, StreamExt};
+/// # struct Counter { next: u8, end: u8 }
+/// # impl Stream for Counter {
+/// #     type Item = u8;
+/// #     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+/// #         if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) }
+/// #     }
+/// # }
+/// runite::queue_future(async {
+///     let values = Counter { next: 0, end: 6 }
+///         .skip(1)
+///         .take(3)
+///         .map(|item| item * 2)
+///         .collect::<Vec<_>>()
+///         .await;
+///     assert_eq!(values, [2, 4, 6]);
+/// });
+/// runite::run();
+/// ```
 pub trait StreamExt: Stream {
+    /// Returns a future that resolves to the next item from this stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let mut stream = Counter { next: 4, end: 6 };
+    ///     assert_eq!(stream.next().await, Some(4));
+    ///     assert_eq!(stream.next().await, Some(5));
+    ///     assert_eq!(stream.next().await, None);
+    /// });
+    /// runite::run();
+    /// ```
     fn next(&mut self) -> Next<'_, Self>
     where
         Self: Unpin,
@@ -20,6 +120,22 @@ pub trait StreamExt: Stream {
         Next { stream: self }
     }
 
+    /// Creates a stream that transforms each item with `f`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let values = Counter { next: 1, end: 4 }.map(|item| item * 10).collect::<Vec<_>>().await;
+    ///     assert_eq!(values, [10, 20, 30]);
+    /// });
+    /// runite::run();
+    /// ```
     fn map<F, B>(self, f: F) -> Map<Self, F>
     where
         Self: Sized,
@@ -28,6 +144,22 @@ pub trait StreamExt: Stream {
         Map { stream: self, f }
     }
 
+    /// Creates a stream that yields only items for which `predicate` returns `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let values = Counter { next: 0, end: 6 }.filter(|item| item % 2 == 0).collect::<Vec<_>>().await;
+    ///     assert_eq!(values, [0, 2, 4]);
+    /// });
+    /// runite::run();
+    /// ```
     fn filter<F>(self, predicate: F) -> Filter<Self, F>
     where
         Self: Sized,
@@ -39,6 +171,24 @@ pub trait StreamExt: Stream {
         }
     }
 
+    /// Collects all remaining stream items into a collection.
+    ///
+    /// The collection type must implement [`Default`] and [`Extend`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let values = Counter { next: 2, end: 5 }.collect::<Vec<_>>().await;
+    ///     assert_eq!(values, [2, 3, 4]);
+    /// });
+    /// runite::run();
+    /// ```
     fn collect<C>(self) -> Collect<Self, C>
     where
         Self: Sized,
@@ -50,6 +200,33 @@ pub trait StreamExt: Stream {
         }
     }
 
+    /// Runs an async closure for each remaining item.
+    ///
+    /// Items are processed sequentially: the next stream item is not polled until
+    /// the future returned for the previous item has completed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use std::{cell::RefCell, rc::Rc};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let observed = Rc::clone(&seen);
+    /// runite::queue_future(async move {
+    ///     Counter { next: 0, end: 3 }
+    ///         .for_each(|item| {
+    ///             let seen = Rc::clone(&seen);
+    ///             async move { seen.borrow_mut().push(item) }
+    ///         })
+    ///         .await;
+    /// });
+    /// runite::run();
+    /// assert_eq!(&*observed.borrow(), &[0, 1, 2]);
+    /// ```
     fn for_each<F, Fut>(self, f: F) -> ForEach<Self, F, Fut>
     where
         Self: Sized,
@@ -63,6 +240,22 @@ pub trait StreamExt: Stream {
         }
     }
 
+    /// Creates a stream that yields at most `n` items.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let values = Counter { next: 0, end: 10 }.take(2).collect::<Vec<_>>().await;
+    ///     assert_eq!(values, [0, 1]);
+    /// });
+    /// runite::run();
+    /// ```
     fn take(self, n: usize) -> Take<Self>
     where
         Self: Sized,
@@ -73,6 +266,22 @@ pub trait StreamExt: Stream {
         }
     }
 
+    /// Creates a stream that drops the first `n` items, then yields the rest.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use runite::io::{Stream, StreamExt};
+    /// # struct Counter { next: u8, end: u8 }
+    /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
+    /// runite::queue_future(async {
+    ///     let values = Counter { next: 0, end: 5 }.skip(3).collect::<Vec<_>>().await;
+    ///     assert_eq!(values, [3, 4]);
+    /// });
+    /// runite::run();
+    /// ```
     fn skip(self, n: usize) -> Skip<Self>
     where
         Self: Sized,
@@ -98,6 +307,7 @@ impl<S: Stream + Unpin + ?Sized> Stream for &mut S {
     }
 }
 
+/// Future returned by [`StreamExt::next`].
 pub struct Next<'a, S: ?Sized> {
     stream: &'a mut S,
 }
@@ -110,6 +320,7 @@ impl<S: Stream + Unpin + ?Sized> Future for Next<'_, S> {
     }
 }
 
+/// Stream returned by [`StreamExt::map`].
 pub struct Map<S, F> {
     stream: S,
     f: F,
@@ -136,6 +347,7 @@ where
     }
 }
 
+/// Stream returned by [`StreamExt::filter`].
 pub struct Filter<S, F> {
     stream: S,
     predicate: F,
@@ -165,6 +377,7 @@ where
     }
 }
 
+/// Future returned by [`StreamExt::collect`].
 pub struct Collect<S, C> {
     stream: S,
     collection: C,
@@ -191,6 +404,7 @@ where
     }
 }
 
+/// Future returned by [`StreamExt::for_each`].
 pub struct ForEach<S, F, Fut> {
     stream: S,
     f: F,
@@ -230,6 +444,7 @@ where
     }
 }
 
+/// Stream returned by [`StreamExt::take`].
 pub struct Take<S> {
     stream: S,
     remaining: usize,
@@ -268,6 +483,7 @@ where
     }
 }
 
+/// Stream returned by [`StreamExt::skip`].
 pub struct Skip<S> {
     stream: S,
     remaining: usize,

@@ -1,3 +1,14 @@
+//! Asynchronous I/O traits, adapters, and stream utilities.
+//!
+//! The `io` module defines runite's small current-thread I/O abstraction layer:
+//! [`AsyncRead`] and [`AsyncWrite`] are poll-based byte traits, extension traits
+//! turn those poll methods into futures, [`Stream`] represents asynchronous
+//! sequences, and [`BufReader`]/[`BufWriter`] amortize small reads and writes.
+//!
+//! Runite futures are thread-local and are driven by the current thread's event
+//! loop. Doctest examples in this module use [`crate::queue_future`] followed by
+//! [`crate::run`] to execute async work until the loop is idle.
+
 mod buf;
 #[cfg(feature = "futures-compat")]
 pub mod compat;
