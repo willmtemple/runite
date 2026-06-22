@@ -99,7 +99,7 @@ mod runtime_api {
     };
     pub use crate::platform::current::runtime::{
         AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-        WorkerHandle, YieldNow, clear_interval, clear_timeout, yield_now,
+        WorkerHandle, YieldNow, yield_now,
     };
 
     /// Queues a one-shot closure to run as a macrotask on the current runtime thread.
@@ -190,9 +190,9 @@ mod runtime_api {
 
     /// Schedules `callback` to run once after at least `delay` has elapsed.
     ///
-    /// Returns a [`TimeoutHandle`]; call [`clear_timeout`] (or
-    /// [`TimeoutHandle::clear`]) before it fires to cancel it. For async code,
-    /// prefer [`time::sleep`](crate::time::sleep).
+    /// Returns a [`TimeoutHandle`]; call [`TimeoutHandle::cancel`] before it
+    /// fires to cancel it. For async code, prefer
+    /// [`time::sleep`](crate::time::sleep).
     ///
     /// # Examples
     ///
@@ -203,22 +203,22 @@ mod runtime_api {
     ///
     /// let fired = Rc::new(Cell::new(false));
     /// let flag = Rc::clone(&fired);
-    /// runite::set_timeout(Duration::from_millis(1), move || flag.set(true));
+    /// runite::timeout(Duration::from_millis(1), move || flag.set(true));
     /// runite::run();
     /// assert!(fired.get());
     /// ```
-    pub fn set_timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
+    pub fn timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
     where
         F: FnOnce() + 'static,
     {
-        imp::set_timeout(delay, callback)
+        imp::timeout(delay, callback)
     }
 
     /// Schedules `callback` to run repeatedly, once per `delay` interval.
     ///
-    /// Returns an [`IntervalHandle`]; call [`clear_interval`] (or
-    /// [`IntervalHandle::clear`]) to stop it. The runtime will not exit while an
-    /// interval is active, so callers must clear it to allow [`run`] to return.
+    /// Returns an [`IntervalHandle`]; call [`IntervalHandle::cancel`] to stop
+    /// it. The runtime will not exit while an interval is active, so callers
+    /// must cancel it to allow [`run`] to return.
     ///
     /// # Examples
     ///
@@ -232,22 +232,22 @@ mod runtime_api {
     /// let slot: Rc<std::cell::RefCell<Option<runite::IntervalHandle>>> =
     ///     Rc::new(std::cell::RefCell::new(None));
     /// let slot_in_cb = Rc::clone(&slot);
-    /// let handle = runite::set_interval(Duration::from_millis(1), move || {
+    /// let handle = runite::interval(Duration::from_millis(1), move || {
     ///     let n = counter.get() + 1;
     ///     counter.set(n);
     ///     if n == 3 {
-    ///         slot_in_cb.borrow().as_ref().unwrap().clear();
+    ///         slot_in_cb.borrow().as_ref().unwrap().cancel();
     ///     }
     /// });
     /// *slot.borrow_mut() = Some(handle);
     /// runite::run();
     /// assert_eq!(ticks.get(), 3);
     /// ```
-    pub fn set_interval<F>(delay: Duration, callback: F) -> IntervalHandle
+    pub fn interval<F>(delay: Duration, callback: F) -> IntervalHandle
     where
         F: FnMut() + 'static,
     {
-        imp::set_interval(delay, callback)
+        imp::interval(delay, callback)
     }
 
     /// Spawns a new OS thread running its own independent runtime event loop.

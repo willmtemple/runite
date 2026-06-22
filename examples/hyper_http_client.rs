@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
 use hyper::Request;
 use runite::time::sleep;
-use runite::{clear_interval, queue_future, set_interval};
+use runite::{interval, queue_future};
 
 fn spawn_demo_server() -> std::io::Result<(std::net::SocketAddr, thread::JoinHandle<()>)> {
     let listener = StdTcpListener::bind(("127.0.0.1", 0))?;
@@ -49,9 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     println!("Sleeping a moment to let the server start...");
-    let interval = set_interval(Duration::from_millis(400), || println!("..."));
+    let ticker = interval(Duration::from_millis(400), || println!("..."));
     sleep(Duration::from_secs(2)).await;
-    clear_interval(&interval);
+    ticker.cancel();
     println!("Let's go!");
 
     let request = Request::builder()

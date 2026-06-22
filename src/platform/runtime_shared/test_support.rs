@@ -12,8 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use super::{
-    IntervalHandle, Runtime, clear_interval, current_thread_handle, queue_future, queue_microtask,
-    queue_task, run, set_interval, set_timeout, spawn_worker, yield_now,
+    IntervalHandle, Runtime, current_thread_handle, interval, queue_future, queue_microtask,
+    queue_task, run, spawn_worker, timeout, yield_now,
 };
 use crate::op::completion::completion_for_current_thread;
 
@@ -39,7 +39,7 @@ pub fn runtime_executes_local_and_remote_work<R: Runtime>() {
     }
     {
         let log = Arc::clone(&log);
-        set_timeout::<R, _>(Duration::from_millis(5), move || {
+        timeout::<R, _>(Duration::from_millis(5), move || {
             log.lock().unwrap().push("main timeout".into());
         });
     }
@@ -49,16 +49,16 @@ pub fn runtime_executes_local_and_remote_work<R: Runtime>() {
         let handle_slot_clone = Rc::clone(&handle_slot);
         let tick_count = Rc::new(Cell::new(0usize));
         let tick_count_clone = Rc::clone(&tick_count);
-        let interval = set_interval::<R, _>(Duration::from_millis(3), move || {
+        let interval_handle = interval::<R, _>(Duration::from_millis(3), move || {
             let next = tick_count_clone.get() + 1;
             tick_count_clone.set(next);
             log.lock().unwrap().push(format!("main interval {next}"));
             if next == 2 {
                 let handle = handle_slot_clone.borrow_mut().take().unwrap();
-                clear_interval(&handle);
+                handle.cancel();
             }
         });
-        *handle_slot.borrow_mut() = Some(interval);
+        *handle_slot.borrow_mut() = Some(interval_handle);
     }
 
     {
@@ -84,7 +84,7 @@ pub fn runtime_executes_local_and_remote_work<R: Runtime>() {
                         log.lock().unwrap().push("worker future end".into());
                     }
                 });
-                set_timeout::<R, _>(Duration::from_millis(7), move || {
+                timeout::<R, _>(Duration::from_millis(7), move || {
                     let _ = main_handle_for_worker.queue_task({
                         let log = Arc::clone(&log);
                         move || log.lock().unwrap().push("worker timeout to main".into())
@@ -141,19 +141,19 @@ pub fn runtime_waits_for_cross_thread_operation_completion<R: Runtime>() {
 }
 
 pub fn zero_interval_fires_once_per_turn_without_spinning<R: Runtime>() {
-    // set_interval(Duration::ZERO, ..) must not busy-spin the event loop.
+    // interval(Duration::ZERO, ..) must not busy-spin the event loop.
     // Each tick is one macrotask turn.
     let count = Rc::new(Cell::new(0usize));
     let count_clone = Rc::clone(&count);
     let handle_slot: Rc<RefCell<Option<IntervalHandle>>> = Rc::new(RefCell::new(None));
     let handle_slot_clone = Rc::clone(&handle_slot);
 
-    let handle = set_interval::<R, _>(Duration::ZERO, move || {
+    let handle = interval::<R, _>(Duration::ZERO, move || {
         let next = count_clone.get() + 1;
         count_clone.set(next);
         if next == 5 {
             let handle = handle_slot_clone.borrow_mut().take().unwrap();
-            clear_interval(&handle);
+            handle.cancel();
         }
     });
     *handle_slot.borrow_mut() = Some(handle);

@@ -10,7 +10,7 @@ use super::LocalTask;
 /// Both platforms use the Linux side-table model: interval callbacks live in
 /// `ThreadState::live_intervals` keyed by `TimerNode::id`, so `Interval` carries
 /// no payload. This keeps the heap free of `Rc`/`RefCell` cycles and lets
-/// `clear_interval` work uniformly whether the next tick is parked in the heap
+/// `cancel_interval` work uniformly whether the next tick is parked in the heap
 /// or pending as a macrotask.
 pub(crate) enum TimerKind {
     Timeout(LocalTask),

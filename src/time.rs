@@ -12,7 +12,7 @@ use core::task::Waker;
 use core::task::{Context, Poll};
 use core::time::Duration;
 
-use crate::{clear_timeout, set_timeout};
+use crate::timeout as schedule_timeout;
 
 /// Future returned by [`sleep`].
 ///
@@ -25,7 +25,7 @@ pub struct Sleep {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Error returned by [`timeout`] when the deadline expires first.
+/// Error returned by [`deadline`] when the deadline expires first.
 pub struct Elapsed;
 
 /// Returns a future that completes after `duration` has elapsed on the current runtime thread.
@@ -61,7 +61,7 @@ pub fn sleep(duration: Duration) -> Sleep {
 
 /// Runs `future` until it completes or `duration` elapses, whichever happens first.
 ///
-/// The wrapped future is dropped when the timeout fires. As with other runtime operations, dropping
+/// The wrapped future is dropped when the deadline fires. As with other runtime operations, dropping
 /// a future cancels interest in the result but does not guarantee cancellation of any underlying
 /// OS work that future may have started.
 ///
@@ -77,12 +77,12 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// let observed_task = Arc::clone(&observed);
 ///
 /// runite::queue_future(async move {
-///     let value = runite::time::timeout(
+///     let value = runite::time::deadline(
 ///         std::time::Duration::from_millis(5),
 ///         async { 42usize },
 ///     )
 ///     .await
-///     .expect("future should complete before timeout");
+///     .expect("future should complete before the deadline");
 ///     observed_task.store(value, Ordering::SeqCst);
 /// });
 ///
@@ -90,7 +90,7 @@ pub fn sleep(duration: Duration) -> Sleep {
 ///
 /// assert_eq!(observed.load(Ordering::SeqCst), 42);
 /// ```
-pub async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
+pub async fn deadline<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
 where
     F: Future,
 {
@@ -123,7 +123,7 @@ impl Future for Sleep {
             let delay = self.delay.take().unwrap_or(Duration::ZERO);
             let state = Rc::new(SleepState::default());
             let state_for_callback = Rc::clone(&state);
-            let timeout_handle = set_timeout(delay, move || state_for_callback.complete());
+            let timeout_handle = schedule_timeout(delay, move || state_for_callback.complete());
             self.state = Some(state);
             self.handle = Some(timeout_handle);
         }
@@ -158,7 +158,7 @@ impl Drop for Sleep {
         }
 
         if let Some(handle) = self.handle.take() {
-            clear_timeout(&handle);
+            handle.cancel();
         }
     }
 }
@@ -195,7 +195,7 @@ mod tests {
 
     use crate::{queue_future, queue_task, run};
 
-    use super::{sleep, timeout};
+    use super::{deadline, sleep};
 
     #[test]
     fn sleep_and_timeout_work() {
@@ -210,12 +210,12 @@ mod tests {
                     sleep(Duration::from_millis(5)).await;
                     log_for_task.lock().unwrap().push("slept");
 
-                    let result = timeout(Duration::from_millis(5), async {
+                    let result = deadline(Duration::from_millis(5), async {
                         sleep(Duration::from_millis(20)).await;
                         42usize
                     })
                     .await;
-                    assert!(result.is_err(), "timeout should fire first");
+                    assert!(result.is_err(), "deadline should fire first");
                     log_for_task.lock().unwrap().push("timed out");
                 });
             });

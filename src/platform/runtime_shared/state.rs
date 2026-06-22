@@ -87,7 +87,7 @@ pub(crate) struct ThreadState {
     /// firing. Intervals may simultaneously sit in the timer heap (waiting
     /// for their next deadline) or be pending in the macrotask queue (when
     /// they overshot their deadline during the previous handler); the live
-    /// map is what makes `clear_interval` work uniformly across both states.
+    /// map is what makes `cancel_interval` work uniformly across both states.
     pub(crate) live_intervals: LiveIntervals,
     pub(crate) next_timer_id: Cell<usize>,
     pub(crate) children: RefCell<Vec<ChildWorker>>,

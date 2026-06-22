@@ -61,8 +61,8 @@ fn main() {
 - **Workers:** `spawn_worker` plus the `Send`-only cross-thread `ThreadHandle::queue_task`.
 - **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;
   use `abort`, `abort_handle`, `is_finished`, and cloneable `AbortHandle`s for cancellation.
-- **Timers:** `set_timeout`, `clear_timeout`, `set_interval`, `clear_interval`,
-  and `time::{sleep, timeout}`.
+- **Timers:** `timeout` and `interval` (each returns a handle with `.cancel()`),
+  and `time::{sleep, deadline}`.
 - **I/O:** async `fs`, `net` (TCP/UDP/Unix-domain), `stdio`, and crate-local
   `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters; TCP split/reunite,
   listener `incoming()` streams, async stdin/stdout/stderr, and `BufReader`/`BufWriter`.
