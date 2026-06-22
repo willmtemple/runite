@@ -1,5 +1,10 @@
 //! Multi-producer, multi-consumer broadcast channels.
 //!
+//! Broadcast channels fan out each sent value to every active receiver. They are
+//! useful for event streams where each subscriber needs to observe all messages
+//! sent after it subscribes. The channel uses a bounded ring buffer, so slow
+//! receivers detect missed messages with [`RecvError::Lagged`].
+//!
 //! # Examples
 //!
 //! Each receiver observes every message sent after it subscribes.
@@ -61,6 +66,18 @@ use crate::sys::current::channel::runtime_waiter;
 /// # Panics
 ///
 /// Panics if `capacity == 0`.
+///
+/// # Examples
+///
+/// ```
+/// runite::queue_future(async {
+///     let (tx, mut rx) = runite::channel::broadcast::channel(4);
+///     assert_eq!(tx.send("event"), Ok(1));
+///     assert_eq!(rx.recv().await.unwrap(), "event");
+/// });
+///
+/// runite::run();
+/// ```
 pub fn channel<T: Clone + Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "broadcast channels require capacity > 0");
     let shared = Arc::new(Mutex::new(State::new(capacity)));
@@ -254,6 +271,21 @@ impl<T: Clone + Send + 'static> Sender<T> {
     /// Sends a value to all active receivers.
     ///
     /// Returns the number of receivers that were active when the value was sent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, mut first) = runite::channel::broadcast::channel(8);
+    /// let mut second = tx.subscribe();
+    /// assert_eq!(tx.send("update"), Ok(2));
+    ///
+    /// runite::queue_future(async move {
+    ///     assert_eq!(first.recv().await.unwrap(), "update");
+    ///     assert_eq!(second.recv().await.unwrap(), "update");
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub fn send(&self, value: T) -> Result<usize, SendError<T>> {
         let (receiver_count, waiters) = {
             let mut state = self
@@ -274,6 +306,15 @@ impl<T: Clone + Send + 'static> Sender<T> {
     ///
     /// The returned receiver starts at the sender's current tail and does not
     /// replay messages that are already buffered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, _rx) = runite::channel::broadcast::channel::<usize>(4);
+    /// assert_eq!(tx.receiver_count(), 1);
+    /// let _second = tx.subscribe();
+    /// assert_eq!(tx.receiver_count(), 2);
+    /// ```
     pub fn subscribe(&self) -> Receiver<T> {
         let next_seq = {
             let mut state = self
@@ -291,6 +332,15 @@ impl<T: Clone + Send + 'static> Sender<T> {
     }
 
     /// Returns the number of active receivers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::broadcast::channel::<usize>(4);
+    /// assert_eq!(tx.receiver_count(), 1);
+    /// drop(rx);
+    /// assert_eq!(tx.receiver_count(), 0);
+    /// ```
     pub fn receiver_count(&self) -> usize {
         self.shared
             .lock()
@@ -312,6 +362,18 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     /// or [`RecvError::Closed`] after all senders are dropped and buffered
     /// messages have been drained.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let (tx, mut rx) = runite::channel::broadcast::channel(2);
+    ///     tx.send("a").unwrap();
+    ///     assert_eq!(rx.recv().await.unwrap(), "a");
+    /// });
+    ///
+    /// runite::run();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -323,6 +385,15 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     ///
     /// If this receiver has lagged, the count reflects only messages still
     /// retained in the bounded buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::broadcast::channel(4);
+    /// tx.send(1).unwrap();
+    /// tx.send(2).unwrap();
+    /// assert_eq!(rx.len(), 2);
+    /// ```
     pub fn len(&self) -> usize {
         let state = self
             .shared
@@ -338,6 +409,15 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     }
 
     /// Returns `true` if no messages are currently available to this receiver.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::broadcast::channel(4);
+    /// assert!(rx.is_empty());
+    /// tx.send("event").unwrap();
+    /// assert!(!rx.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -346,6 +426,15 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     ///
     /// Like [`Sender::subscribe`], the new receiver starts at the channel tail
     /// and does not replay values already buffered for this receiver.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (tx, rx) = runite::channel::broadcast::channel(4);
+    /// tx.send("old").unwrap();
+    /// let fresh = rx.resubscribe();
+    /// assert!(fresh.is_empty());
+    /// ```
     pub fn resubscribe(&self) -> Receiver<T> {
         let next_seq = {
             let mut state = self
