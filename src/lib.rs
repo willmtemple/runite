@@ -68,29 +68,284 @@ pub mod macros;
 /// runtime thread before calling [`run`].
 pub use runite_proc_macros::main;
 
-/// Driver primitives re-exported from the active backend.
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-pub use platform::current::driver::{
-    Driver, ReadyEvents, ThreadNotifier, create_driver, monotonic_now,
-};
-/// Runtime/event-loop primitives re-exported from the active backend.
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
-pub use platform::current::runtime::{
-    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
-    clear_interval, clear_timeout, current_thread_handle, queue_future, queue_microtask,
-    queue_task, run, run_ready_tasks, run_until_stalled, set_interval, set_timeout, spawn_worker,
-    yield_now,
-};
+pub use runtime_api::*;
 
-/// Standard stream primitives.
+/// The crate's core event-loop API.
+///
+/// Defined in one place so each item carries its own documentation (rather than
+/// inheriting a single blanket summary from a grouped re-export) and so the
+/// per-platform `runtime.rs` shims stay free of duplicated doc comments. The
+/// items are glob-re-exported at the crate root, which is their public path.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+mod runtime_api {
+    use core::future::Future;
+    use core::time::Duration;
+
+    use crate::platform::current::runtime as imp;
+
+    // Handle and marker types; their documentation lives at the definition site
+    // and is inlined here through these plain (undocumented) re-exports.
+    pub use crate::platform::current::driver::{
+        Driver, ReadyEvents, ThreadNotifier, create_driver, monotonic_now,
+    };
+    pub use crate::platform::current::runtime::{
+        AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+        WorkerHandle, YieldNow, clear_interval, clear_timeout, yield_now,
+    };
+
+    /// Queues a one-shot closure to run as a macrotask on the current runtime thread.
+    ///
+    /// Macrotasks run after the microtask queue has been fully drained, in FIFO
+    /// order with respect to other macrotasks (timers, I/O completions, and other
+    /// queued tasks). To run async work instead, use [`queue_future`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let ran = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&ran);
+    /// runite::queue_task(move || flag.set(true));
+    /// runite::run();
+    /// assert!(ran.get());
+    /// ```
+    pub fn queue_task<F>(task: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        imp::queue_task(task)
+    }
+
+    /// Queues a one-shot closure to run as a microtask on the current runtime thread.
+    ///
+    /// Microtasks run ahead of macrotasks: the runtime fully drains the microtask
+    /// queue before servicing the next macrotask or polling the I/O driver. Use
+    /// this for work that must complete before the loop yields to I/O again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let order = Rc::new(Cell::new(String::new()));
+    /// let a = Rc::clone(&order);
+    /// let b = Rc::clone(&order);
+    /// runite::queue_task(move || a.set(a.take() + "task;"));
+    /// runite::queue_microtask(move || b.set(b.take() + "micro;"));
+    /// runite::run();
+    /// // The microtask drains before the queued macrotask runs.
+    /// assert_eq!(order.take(), "micro;task;");
+    /// ```
+    pub fn queue_microtask<F>(task: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        imp::queue_microtask(task)
+    }
+
+    /// Spawns `future` onto the current runtime thread and returns a [`JoinHandle`].
+    ///
+    /// The future runs concurrently with other tasks on this thread. Awaiting the
+    /// returned handle yields `Result<T, JoinError>`: `Ok` with the output, or
+    /// [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was aborted.
+    /// Dropping the handle detaches the task; it keeps running to completion.
+    ///
+    /// The future is `!Send` and never migrates off this thread.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let out = Rc::new(Cell::new(0u32));
+    /// let sink = Rc::clone(&out);
+    /// runite::queue_future(async move {
+    ///     let handle = runite::queue_future(async { 21u32 });
+    ///     let value = handle.await.expect("task should not be aborted");
+    ///     sink.set(value * 2);
+    /// });
+    /// runite::run();
+    /// assert_eq!(out.get(), 42);
+    /// ```
+    pub fn queue_future<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        imp::queue_future(future)
+    }
+
+    /// Schedules `callback` to run once after at least `delay` has elapsed.
+    ///
+    /// Returns a [`TimeoutHandle`]; call [`clear_timeout`] (or
+    /// [`TimeoutHandle::clear`]) before it fires to cancel it. For async code,
+    /// prefer [`time::sleep`](crate::time::sleep).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    /// use std::time::Duration;
+    ///
+    /// let fired = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&fired);
+    /// runite::set_timeout(Duration::from_millis(1), move || flag.set(true));
+    /// runite::run();
+    /// assert!(fired.get());
+    /// ```
+    pub fn set_timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
+    where
+        F: FnOnce() + 'static,
+    {
+        imp::set_timeout(delay, callback)
+    }
+
+    /// Schedules `callback` to run repeatedly, once per `delay` interval.
+    ///
+    /// Returns an [`IntervalHandle`]; call [`clear_interval`] (or
+    /// [`IntervalHandle::clear`]) to stop it. The runtime will not exit while an
+    /// interval is active, so callers must clear it to allow [`run`] to return.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    /// use std::time::Duration;
+    ///
+    /// let ticks = Rc::new(Cell::new(0u32));
+    /// let counter = Rc::clone(&ticks);
+    /// let slot: Rc<std::cell::RefCell<Option<runite::IntervalHandle>>> =
+    ///     Rc::new(std::cell::RefCell::new(None));
+    /// let slot_in_cb = Rc::clone(&slot);
+    /// let handle = runite::set_interval(Duration::from_millis(1), move || {
+    ///     let n = counter.get() + 1;
+    ///     counter.set(n);
+    ///     if n == 3 {
+    ///         slot_in_cb.borrow().as_ref().unwrap().clear();
+    ///     }
+    /// });
+    /// *slot.borrow_mut() = Some(handle);
+    /// runite::run();
+    /// assert_eq!(ticks.get(), 3);
+    /// ```
+    pub fn set_interval<F>(delay: Duration, callback: F) -> IntervalHandle
+    where
+        F: FnMut() + 'static,
+    {
+        imp::set_interval(delay, callback)
+    }
+
+    /// Spawns a new OS thread running its own independent runtime event loop.
+    ///
+    /// `initial_task` (which must be `Send`, since it crosses to the new thread)
+    /// runs first on the worker; `on_exit` runs on the worker as it shuts down.
+    /// Returns a [`WorkerHandle`] for joining or queueing further work via
+    /// [`ThreadHandle::queue_task`]. This is the building block for scaling across
+    /// cores: start one worker per core. See the crate's architecture guide.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::mpsc;
+    ///
+    /// let (tx, rx) = mpsc::channel();
+    /// let _worker = runite::spawn_worker(
+    ///     move || {
+    ///         runite::queue_future(async move {
+    ///             tx.send(7u32).unwrap();
+    ///         });
+    ///     },
+    ///     || {},
+    /// );
+    /// assert_eq!(rx.recv().unwrap(), 7);
+    /// ```
+    pub fn spawn_worker<Init, Exit>(initial_task: Init, on_exit: Exit) -> WorkerHandle
+    where
+        Init: FnOnce() + Send + 'static,
+        Exit: FnOnce() + 'static,
+    {
+        imp::spawn_worker(initial_task, on_exit)
+    }
+
+    /// Returns a [`ThreadHandle`] to the current runtime thread.
+    ///
+    /// The handle is `Send` and can be moved to other threads to queue work back
+    /// onto this one with [`ThreadHandle::queue_task`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current thread cannot initialize its runtime driver.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let _handle = runite::current_thread_handle();
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn current_thread_handle() -> ThreadHandle {
+        imp::current_thread_handle()
+    }
+
+    /// Runs the current thread's event loop until all work is complete.
+    ///
+    /// Drives queued tasks, microtasks, timers, and I/O completions until the
+    /// runtime is idle (no pending tasks, futures, timers, or active intervals),
+    /// then returns. This is what [`main`](crate::main) calls after queueing the
+    /// entry point.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let done = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&done);
+    /// runite::queue_future(async move { flag.set(true); });
+    /// runite::run();
+    /// assert!(done.get());
+    /// ```
+    pub fn run() {
+        imp::run()
+    }
+
+    /// Drives the event loop until it would next block waiting on the I/O driver.
+    ///
+    /// Runs all currently ready tasks, microtasks, and expired timers, then
+    /// returns without sleeping for I/O — useful for embedding the runtime inside
+    /// another event loop. Unlike [`run`], it does not wait for pending I/O.
+    pub fn run_until_stalled() {
+        imp::run_until_stalled()
+    }
+
+    /// Runs only the tasks and microtasks that are ready right now, then returns.
+    ///
+    /// Does not arm timers or poll the I/O driver. Intended for fine-grained
+    /// manual driving of the loop when embedding the runtime.
+    pub fn run_ready_tasks() {
+        imp::run_ready_tasks()
+    }
+}
+
+// Standard-stream handles and constructors; documentation is inlined from the
+// `stdio` module's definitions.
 pub use stdio::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
 
-/// Spawns blocking work on the shared OS-thread pool and returns a future that
-/// resolves to the closure's result. See [`task::spawn_blocking`].
+// Blocking-offload API; documentation is inlined from the `task` module's
+// definitions.
 pub use task::{BlockingJoinHandle, JoinError, spawn_blocking};
