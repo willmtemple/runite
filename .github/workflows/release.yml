@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       - name: Verify tag matches crate version
         run: |
           tag="${GITHUB_REF_NAME#v}"

@@ -22,9 +22,9 @@ jobs:
     name: Lint & docs (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       # mise's rust backend delegates to rustup, whose toolchain lives outside the
       # cached mise dir. On a mise cache hit the component install is skipped and
       # rustup auto-installs a minimal toolchain (no rustfmt/clippy), so install the
@@ -55,9 +55,9 @@ jobs:
     name: Test (Linux x86_64, io_uring)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Build
@@ -69,9 +69,9 @@ jobs:
     name: Test (macOS aarch64, kqueue)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Build
@@ -83,7 +83,7 @@ jobs:
     name: Licenses & advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -92,9 +92,9 @@ jobs:
     name: Code coverage (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       # cargo-llvm-cov needs the llvm-tools component; install it explicitly because
       # a mise cache hit skips mise's own component install (see the lint job).
       - name: Ensure rust components
@@ -106,7 +106,7 @@ jobs:
       - name: Collect coverage
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: lcov
           path: lcov.info
@@ -115,9 +115,9 @@ jobs:
     name: Benchmarks (compile + smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Build benches
@@ -129,9 +129,9 @@ jobs:
     name: Publish dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       # Only the proc-macro crate can be dry-run before the first release: it has
