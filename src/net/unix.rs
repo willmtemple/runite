@@ -211,7 +211,10 @@ impl Stream for Incoming<'_> {
             }));
         }
 
-        let future = this.pending.as_mut().expect("pending accept future present");
+        let future = this
+            .pending
+            .as_mut()
+            .expect("pending accept future present");
         match future.as_mut().poll(cx) {
             Poll::Ready(result) => {
                 this.pending = None;

@@ -20,10 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = queue_future(async move {
         let mut incoming = listener.incoming();
-        let stream = incoming
-            .next()
-            .await
-            .expect("incoming streams never end")?;
+        let stream = incoming.next().await.expect("incoming streams never end")?;
         println!("[server] accepted echo client");
 
         let (mut reader, mut writer) = stream.into_split();
@@ -47,7 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut echoed = vec![0; message.len()];
     client.read_exact(&mut echoed).await?;
     assert_eq!(echoed, message);
-    println!("[client] echo: {}", String::from_utf8_lossy(&echoed).trim_end());
+    println!(
+        "[client] echo: {}",
+        String::from_utf8_lossy(&echoed).trim_end()
+    );
 
     drop(client);
     server.await??;
