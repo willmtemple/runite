@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Non-blocking control syscalls (socket/bind/listen/shutdown/close, fd duplication) now run
   inline on the event loop instead of being offloaded to the blocking thread pool when their
   io_uring opcode is unsupported.
+- Linux network data-path operations (connect/accept/send/recv/datagram recv) now fall back to a
+  non-blocking readiness path (`IORING_OP_POLL_ADD`) instead of the blocking thread pool when an
+  io_uring opcode is unsupported, so socket I/O is never offloaded.
 
 ### Security
 
