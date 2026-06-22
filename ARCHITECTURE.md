@@ -48,6 +48,27 @@ Lazy initialization contract:
   helper calls, and `current_thread_handle` will return `Option<ThreadHandle>` when no runtime is
   installed.
 
+## Scaling across cores
+
+`runite` scales by running more independent event loops, not by making one scheduler shared. Each
+runtime thread owns its own scheduler queues, timer heap, and platform I/O driver (`io_uring` ring on
+Linux, `kqueue` on macOS). There is no work-stealing layer between runtime threads.
+
+Futures are thread-local and deliberately `!Send`: a task queued on one runtime thread is always
+polled, woken, aborted, and joined on that same thread. Tasks never migrate between threads. This is a
+trade-off: applications do not get cross-thread future ergonomics or automatic load balancing, but the
+hot path stays free of scheduler synchronization and scheduling remains predictable.
+
+To use multiple cores, the application starts one event loop per core with `spawn_worker`. Each worker
+installs its own runtime state and runs independently. Cross-thread coordination is explicit and goes
+through the `Send`-only boundary: `ThreadHandle::queue_task` accepts `FnOnce() + Send + 'static`,
+enqueues a macrotask on the target worker, and wakes that worker's driver.
+
+For network servers, the idiomatic multi-core shape is `SO_REUSEPORT`: start one worker per core, let
+each worker bind its own listener to the same address, and run an independent accept loop on each
+worker. The kernel then load-balances incoming connections across those per-core listeners without a
+shared accept lock or a userspace dispatch thread.
+
 # Task scheduling — micro vs macro tasks
 
 Microtasks:
@@ -173,7 +194,11 @@ loop exits:
 
 # Cancellation semantics
 
-Drop is the only cancellation primitive today.
+Drop is the I/O cancellation primitive today. Aborting a queued future uses the same mechanism:
+`JoinHandle::abort` marks the task aborted, drops the task future on its owning runtime thread, and
+wakes any joiner. Awaiting a `JoinHandle<T>` yields `Result<T, JoinError>`; an aborted task resolves to
+`Err(JoinError::Aborted)` (`src/platform/runtime_shared/future_task.rs`,
+`src/platform/runtime_shared/handles.rs`).
 
 Dropping a `CompletionFuture`:
 
@@ -187,6 +212,10 @@ Dropping a `CompletionFuture`:
 - If no cancel callback exists because submission failed before registration, the future decrements
   the pending operation count directly (`src/op/completion.rs`).
 
+There is no separate cancellation plumbing for in-flight I/O. Dropping an async task cascades normal
+Rust `Drop` through the suspended future tree; any in-flight operation future dropped by that cascade
+runs the same completion cancel callback and, on Linux, submits `IORING_OP_ASYNC_CANCEL`.
+
 What Drop does not mean:
 
 - It does not guarantee the kernel or OS operation stopped.
@@ -196,8 +225,8 @@ What Drop does not mean:
 Implication for buffer ownership:
 
 - Any buffer the kernel may read from or write into must outlive the I/O even after Drop returns.
-- The current implementation satisfies this mostly by moving owned `Vec<u8>` allocations into the
-  completion closure, but that is also the source of the broken buffer model described below.
+- The current implementation satisfies this by moving owned staging buffers into completion/cancel
+  guards as described below.
 
 **[future]** An explicit `CancellationToken` plus `select!`/`with_cancellation`-style APIs will be
 added in phase 9 so cancellation can be expressed without relying only on Drop.
@@ -230,6 +259,18 @@ This is sound for arbitrary borrowed buffers, but it is not zero-copy. A future 
 an `OwnedBuf`/registered-buffer style (tokio-uring-like) option that transfers ownership of a stable
 allocation to the operation and returns it on completion. Registered buffers remain outside the
 current phase scope.
+
+# Subprocesses
+
+On Linux, child process exit is represented as fd readiness. `Command::spawn` opens a pidfd for the
+child, and `Child::wait` parks on `wait_readable(pidfd)`, which submits `IORING_OP_POLL_ADD` through
+the thread's io_uring driver before collecting the status with `waitpid`
+(`src/sys/linux/process.rs`, `src/sys/linux/fd.rs`). There is no SIGCHLD handler and no blocking-pool
+offload for child exit.
+
+Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
+Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, while macOS uses the
+existing kqueue/blocking-pool split for its backend.
 
 # Driver abstraction (current and [future])
 
@@ -295,6 +336,7 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 | network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls |
 | Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path |
 | stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path |
+| child exit | pidfd readiness via `IORING_OP_POLL_ADD`; no SIGCHLD handler or blocking-pool offload | process wait backend |
 | wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot |
 
 Notes:
@@ -415,7 +457,8 @@ ThreadHandle
   thread.
 
 JoinHandle
-: The `!Send` future returned by `queue_future`; awaiting it yields the spawned future's output.
+: The `!Send` future returned by `queue_future`; awaiting it yields `Result<T, JoinError>`, with
+  `Err(JoinError::Aborted)` after `abort`.
 
 completion
 : The `CompletionFuture`/`CompletionHandle` pair that bridges backend operation completion to a
