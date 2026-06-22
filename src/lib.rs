@@ -44,6 +44,7 @@ pub mod net;
 pub mod op;
 #[doc(hidden)]
 pub mod platform;
+pub mod process;
 pub mod signal;
 pub mod stdio;
 pub mod sync;
