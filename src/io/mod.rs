@@ -8,6 +8,39 @@
 //! Runite futures are thread-local and are driven by the current thread's event
 //! loop. Doctest examples in this module use [`crate::queue_future`] followed by
 //! [`crate::run`] to execute async work until the loop is idle.
+//!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//! use std::io;
+//!
+//! use runite::io::{AsyncRead, AsyncReadExt, BufReader};
+//!
+//! struct Bytes(&'static [u8]);
+//!
+//! impl AsyncRead for Bytes {
+//!     fn poll_read(
+//!         mut self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &mut [u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         let read = buf.len().min(self.0.len());
+//!         buf[..read].copy_from_slice(&self.0[..read]);
+//!         self.0 = &self.0[read..];
+//!         Poll::Ready(Ok(read))
+//!     }
+//! }
+//!
+//! runite::queue_future(async {
+//!     let mut reader = BufReader::with_capacity(4, Bytes(b"hello"));
+//!     let mut out = Vec::new();
+//!     reader.read_to_end(&mut out).await.unwrap();
+//!     assert_eq!(&out, b"hello");
+//! });
+//! runite::run();
+//! ```
 
 mod buf;
 #[cfg(feature = "futures-compat")]

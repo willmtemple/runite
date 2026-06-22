@@ -1,3 +1,74 @@
+//! Poll-based asynchronous byte I/O traits.
+//!
+//! This module contains the core [`AsyncRead`] and [`AsyncWrite`] traits used by
+//! runite's files, sockets, process pipes, and adapters. Implementations expose
+//! non-blocking poll methods; extension traits such as
+//! [`AsyncReadExt`](super::AsyncReadExt) turn those poll methods into futures for
+//! everyday async code.
+//!
+//! # Examples
+//!
+//! ```
+//! use core::pin::Pin;
+//! use core::task::{Context, Poll};
+//! use std::cell::RefCell;
+//! use std::io;
+//! use std::rc::Rc;
+//!
+//! use runite::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+//!
+//! struct Bytes(&'static [u8]);
+//!
+//! impl AsyncRead for Bytes {
+//!     fn poll_read(
+//!         mut self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &mut [u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         let read = buf.len().min(self.0.len());
+//!         buf[..read].copy_from_slice(&self.0[..read]);
+//!         self.0 = &self.0[read..];
+//!         Poll::Ready(Ok(read))
+//!     }
+//! }
+//!
+//! #[derive(Clone)]
+//! struct Sink(Rc<RefCell<Vec<u8>>>);
+//!
+//! impl AsyncWrite for Sink {
+//!     fn poll_write(
+//!         self: Pin<&mut Self>,
+//!         _cx: &mut Context<'_>,
+//!         buf: &[u8],
+//!     ) -> Poll<io::Result<usize>> {
+//!         self.0.borrow_mut().extend_from_slice(buf);
+//!         Poll::Ready(Ok(buf.len()))
+//!     }
+//!
+//!     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//!         Poll::Ready(Ok(()))
+//!     }
+//!
+//!     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+//!         Poll::Ready(Ok(()))
+//!     }
+//! }
+//!
+//! let written = Rc::new(RefCell::new(Vec::new()));
+//! let observed = Rc::clone(&written);
+//! runite::queue_future(async move {
+//!     let mut reader = Bytes(b"ping");
+//!     let mut buf = [0; 4];
+//!     reader.read_exact(&mut buf).await.unwrap();
+//!
+//!     let mut writer = Sink(written);
+//!     writer.write_all(&buf).await.unwrap();
+//!     writer.flush().await.unwrap();
+//! });
+//! runite::run();
+//! assert_eq!(&*observed.borrow(), b"ping");
+//! ```
+
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io;
