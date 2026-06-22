@@ -11,6 +11,10 @@ use crate::op::completion::{CompletionFuture, CompletionHandle};
 use crate::sys::current::channel::runtime_waiter;
 
 /// Creates a watch channel initialized with `initial`.
+///
+/// A watch channel stores a single latest value. Receivers can borrow the
+/// current value at any time and await notification when a newer version is
+/// published.
 pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(State {
         value: initial,
@@ -32,12 +36,20 @@ pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-/// Watch sending half.
+/// Sending half of a watch channel.
+///
+/// Cloning a sender creates another producer for the same latest-value slot.
+/// Sending replaces the stored value and wakes receivers that are waiting for a
+/// newer version.
 pub struct Sender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
-/// Watch receiving half.
+/// Receiving half of a watch channel.
+///
+/// A receiver tracks the last version it observed. Use [`changed`](Self::changed)
+/// to wait for a newer value, then [`borrow_and_update`](Self::borrow_and_update)
+/// to access it and mark that version as seen.
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     version: u64,
@@ -45,6 +57,9 @@ pub struct Receiver<T: Send + 'static> {
 }
 
 /// Borrowed watch value.
+///
+/// This guard dereferences to the current value and holds the channel lock while
+/// it is alive, so keep borrows short and avoid holding them across `.await`.
 pub struct Ref<'a, T: Send + 'static> {
     guard: MutexGuard<'a, State<T>>,
 }
@@ -66,10 +81,15 @@ struct WatchWaiter {
 
 #[derive(Debug, Eq, PartialEq)]
 /// Error returned when sending fails because there are no receivers.
+///
+/// The unsent replacement value is returned to the caller.
 pub struct SendError<T>(pub T);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned when a watch channel closes before another change arrives.
+///
+/// Existing values can still be borrowed; this error means all senders were
+/// dropped while the receiver was waiting for a newer version.
 pub struct RecvError;
 
 impl<T: Send + 'static> State<T> {
@@ -152,6 +172,8 @@ impl<T: Send + 'static> Clone for Receiver<T> {
 
 impl<T: Send + 'static> Sender<T> {
     /// Replaces the watched value and notifies receivers.
+    ///
+    /// Returns [`SendError`] with the value if no receivers remain.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let waiters = {
             let mut state = self
@@ -170,6 +192,10 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Mutates the watched value and notifies receivers.
+    ///
+    /// This notifies even if the closure leaves the value unchanged; use
+    /// [`send_if_modified`](Self::send_if_modified) to make notification
+    /// conditional.
     pub fn send_modify(&self, f: impl FnOnce(&mut T)) {
         let waiters = {
             let mut state = self
@@ -200,7 +226,9 @@ impl<T: Send + 'static> Sender<T> {
         true
     }
 
-    /// Borrows the current value.
+    /// Borrows the current value from the sender side.
+    ///
+    /// The returned [`Ref`] holds the channel lock until dropped.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
             guard: self
@@ -211,6 +239,9 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Creates a new receiver that starts at the current version.
+    ///
+    /// The receiver considers the current value already observed and waits for
+    /// subsequent calls to [`send`](Self::send) or mutation methods.
     pub fn subscribe(&self) -> Receiver<T> {
         let version = {
             let mut state = self
@@ -250,6 +281,9 @@ impl<T: Send + 'static> Sender<T> {
 impl<T: Send + 'static> Receiver<T> {
     /// Waits until the watched value changes.
     ///
+    /// Returns [`RecvError`] if all senders are dropped before a newer version
+    /// becomes available.
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -258,6 +292,9 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Borrows the current value without marking it observed.
+    ///
+    /// A later [`changed`](Self::changed) call can still complete immediately if
+    /// this value is newer than the receiver's recorded version.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
             guard: self
@@ -268,6 +305,8 @@ impl<T: Send + 'static> Receiver<T> {
     }
 
     /// Borrows the current value and marks it observed.
+    ///
+    /// The returned [`Ref`] holds the channel lock until dropped.
     pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
         let guard = self
             .shared

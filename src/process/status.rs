@@ -9,7 +9,7 @@ impl ExitStatus {
         Self(status)
     }
 
-    /// Returns true if the process exited successfully.
+    /// Returns `true` if the process exited successfully.
     pub fn success(&self) -> bool {
         self.0.success()
     }

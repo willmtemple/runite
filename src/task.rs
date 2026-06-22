@@ -31,13 +31,22 @@ pub struct BlockingJoinHandle<R: Send + 'static> {
 ///
 /// Produced both by [`BlockingJoinHandle`] (when a blocking-pool worker exits
 /// without delivering a value) and by [`crate::JoinHandle`] (when a queued
-/// future is aborted before it completes).
+/// future is aborted before it completes). A queued task's join output is
+/// `Result<T, JoinError>`, so callers should handle these errors when awaiting
+/// any join handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
-    /// The worker exited without producing a value (shutdown, panic, etc.).
+    /// The worker exited without producing a value.
+    ///
+    /// This is used for blocking tasks whose result channel closes before the
+    /// worker delivers a value, such as during runtime shutdown or panic
+    /// unwinding.
     Cancelled,
-    /// The task was aborted via [`JoinHandle::abort`](crate::JoinHandle::abort)
-    /// or an [`AbortHandle`](crate::AbortHandle) before it completed.
+    /// The task was aborted before it completed.
+    ///
+    /// This is returned by [`crate::JoinHandle`] when
+    /// [`JoinHandle::abort`](crate::JoinHandle::abort) or an
+    /// [`AbortHandle`](crate::AbortHandle) cancels the queued future.
     Aborted,
 }
 

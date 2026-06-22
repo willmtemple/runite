@@ -31,19 +31,31 @@ impl Pipe {
     }
 }
 
-/// Async writer connected to a child process's stdin.
+/// Async writer connected to a child process's standard input.
+///
+/// Created when [`Command::stdin`](super::Command::stdin) is configured with
+/// [`Stdio::piped`](super::Stdio::piped). Closing or dropping this handle closes
+/// the child's stdin pipe and can signal EOF to the child.
 pub struct ChildStdin {
     pipe: Pipe,
     pending_write: Option<PendingWrite>,
 }
 
-/// Async reader connected to a child process's stdout.
+/// Async reader connected to a child process's standard output.
+///
+/// Created when [`Command::stdout`](super::Command::stdout) is configured with
+/// [`Stdio::piped`](super::Stdio::piped). It implements [`AsyncRead`] for
+/// consuming bytes produced by the child.
 pub struct ChildStdout {
     pipe: Pipe,
     pending_read: Option<PendingRead>,
 }
 
-/// Async reader connected to a child process's stderr.
+/// Async reader connected to a child process's standard error.
+///
+/// Created when [`Command::stderr`](super::Command::stderr) is configured with
+/// [`Stdio::piped`](super::Stdio::piped). It implements [`AsyncRead`] for
+/// consuming diagnostic bytes produced by the child.
 pub struct ChildStderr {
     pipe: Pipe,
     pending_read: Option<PendingRead>,

@@ -34,12 +34,21 @@ pub fn channel<T: Clone + Send + 'static>(capacity: usize) -> (Sender<T>, Receiv
     )
 }
 
-/// Broadcast sending half.
+/// Sending half of a broadcast channel.
+///
+/// Cloning a sender creates another producer for the same bounded ring buffer.
+/// Values are delivered to every active [`Receiver`], subject to lag handling
+/// when a receiver falls behind the channel capacity.
 pub struct Sender<T: Clone + Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
-/// Broadcast receiving half.
+/// Receiving half of a broadcast channel.
+///
+/// Each receiver tracks its own position in the shared ring buffer. If more
+/// than the channel capacity of messages are sent before this receiver catches
+/// up, [`recv`](Self::recv) returns [`RecvError::Lagged`] and advances to the
+/// oldest message still retained.
 pub struct Receiver<T: Clone + Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     next_seq: u64,
@@ -75,12 +84,15 @@ enum RecvOutcome<T> {
 
 #[derive(Debug, Eq, PartialEq)]
 /// Error returned when sending fails because there are no receivers.
+///
+/// The unsent value is returned to the caller.
 pub struct SendError<T>(pub T);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned when receiving from a broadcast channel fails.
 pub enum RecvError {
-    /// The receiver missed this many messages.
+    /// The receiver missed this many messages because it lagged behind the
+    /// bounded ring buffer.
     Lagged(u64),
     /// All senders have been dropped and all buffered messages have been read.
     Closed,
@@ -217,6 +229,9 @@ impl<T: Clone + Send + 'static> Sender<T> {
     }
 
     /// Creates a new receiver for values sent after this call.
+    ///
+    /// The returned receiver starts at the sender's current tail and does not
+    /// replay messages that are already buffered.
     pub fn subscribe(&self) -> Receiver<T> {
         let next_seq = {
             let mut state = self
@@ -249,7 +264,11 @@ impl<T: Clone + Send + 'static> Sender<T> {
 }
 
 impl<T: Clone + Send + 'static> Receiver<T> {
-    /// Waits for the next value.
+    /// Waits for the next value for this receiver.
+    ///
+    /// Returns [`RecvError::Lagged`] if this receiver missed retained messages,
+    /// or [`RecvError::Closed`] after all senders are dropped and buffered
+    /// messages have been drained.
     ///
     /// # Panics
     ///
@@ -259,6 +278,9 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     }
 
     /// Returns the number of messages currently available to this receiver.
+    ///
+    /// If this receiver has lagged, the count reflects only messages still
+    /// retained in the bounded buffer.
     pub fn len(&self) -> usize {
         let state = self
             .shared
@@ -279,6 +301,9 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     }
 
     /// Creates a new receiver for values sent after this call.
+    ///
+    /// Like [`Sender::subscribe`], the new receiver starts at the channel tail
+    /// and does not replay values already buffered for this receiver.
     pub fn resubscribe(&self) -> Receiver<T> {
         let next_seq = {
             let mut state = self

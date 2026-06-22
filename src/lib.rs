@@ -8,7 +8,11 @@
 //!
 //! - [`main`] for executable entry points (sync or `async fn main`)
 //! - [`run`], [`queue_task`], [`queue_microtask`], and [`queue_future`] for event-loop work
-//! - [`fs`], [`net`], [`time`], and [`channel`] for async runtime services
+//! - [`fs`], [`net`], [`process`], [`time`], and [`channel`] for async runtime services
+//! - [`channel::broadcast`] and [`channel::watch`] for fan-out and state-change channels
+//! - [`io::BufReader`]/[`io::BufWriter`] for buffered I/O
+//! - [`net::TcpStream::into_split`] and listener `incoming()` streams for connection tasks
+//! - [`stdout`] and [`stderr`] for async standard output streams
 //!
 //! # Platform support
 //!

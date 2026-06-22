@@ -3,6 +3,11 @@ use std::io;
 use super::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
 
 /// A spawned child process.
+///
+/// A `Child` owns the operating-system process handle and any async standard
+/// stream pipes requested through [`Command`](super::Command). Drop closes the
+/// Rust-side handle but does not wait for the process; call [`wait`](Self::wait)
+/// to reap it.
 pub struct Child {
     inner: crate::sys::current::process::Child,
     /// Handle to child stdin when configured with [`super::Stdio::piped`].
@@ -32,6 +37,8 @@ impl Child {
     }
 
     /// Attempts to collect the exit status without blocking.
+    ///
+    /// Returns `Ok(None)` while the child is still running.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.inner
             .try_wait()
@@ -44,6 +51,9 @@ impl Child {
     }
 
     /// Sends a forceful termination request to the child.
+    ///
+    /// This only asks the operating system to terminate the process; call
+    /// [`wait`](Self::wait) afterward to observe the final status.
     pub fn kill(&mut self) -> io::Result<()> {
         self.inner.kill()
     }
