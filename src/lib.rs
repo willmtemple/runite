@@ -77,7 +77,7 @@ pub use platform::current::driver::{
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 pub use platform::current::runtime::{
-    IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
+    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
     clear_interval, clear_timeout, current_thread_handle, queue_future, queue_microtask,
     queue_task, run, run_ready_tasks, run_until_stalled, set_interval, set_timeout, spawn_worker,
     yield_now,

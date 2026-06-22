@@ -46,7 +46,7 @@ fn bench_tcp_echo(c: &mut Criterion) {
                     client.read_exact(&mut buf).await.expect("client read");
                 }
                 drop(client);
-                server.await;
+                let _ = server.await;
             })
         });
     });

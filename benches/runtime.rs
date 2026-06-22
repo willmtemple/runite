@@ -73,7 +73,7 @@ fn bench_mpsc_pingpong(c: &mut Criterion) {
                         break;
                     }
                 }
-                producer.await;
+                let _ = producer.await;
             })
         });
     });

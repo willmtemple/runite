@@ -111,7 +111,7 @@ mod tests {
                     .await
                     .expect("client read_to_end should succeed");
                 assert_eq!(read, b"hello over traits".len());
-                server.await;
+                server.await.expect("server task should not be aborted");
                 *received_for_task.lock().unwrap() = Some(out);
             });
         });
@@ -169,7 +169,7 @@ mod tests {
                 AsyncWriteExt::write_all(&mut client, &data)
                     .await
                     .expect("client write_all should succeed");
-                let server_received = server.await;
+                let server_received = server.await.expect("server task should not be aborted");
                 assert_eq!(server_received, data);
                 *received_for_task.lock().unwrap() = Some(server_received);
             });

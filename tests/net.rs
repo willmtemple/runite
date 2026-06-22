@@ -34,7 +34,7 @@ fn tcp_echo_roundtrip() {
             .expect("client read");
         assert_eq!(&got[..12], b"hello runite");
 
-        server.await;
+        server.await.expect("server task should not be aborted");
     });
 }
 
@@ -70,7 +70,7 @@ fn tcp_large_transfer_in_chunks() {
             .await
             .expect("client shutdown write");
 
-        let received = server.await;
+        let received = server.await.expect("server task should not be aborted");
         assert_eq!(received, expected);
     });
 }

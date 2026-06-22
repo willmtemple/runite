@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
-use super::future_task::{FutureTask, JoinState};
+use super::future_task::{FutureTask, JoinState, TaskShared};
 use super::handles::{
     IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
 };
@@ -273,7 +273,8 @@ where
     // fire.
     with_current_thread::<R, _>(|_| {});
 
-    let state = Rc::new(JoinState::new());
+    let shared = Rc::new(TaskShared::new());
+    let state = Rc::new(JoinState::new(Rc::clone(&shared)));
     let completion = Rc::clone(&state);
     let task = Rc::new(FutureTask {
         future: RefCell::new(Some(Box::pin(async move {
@@ -281,7 +282,9 @@ where
             completion.complete(output);
         }))),
         queued: Cell::new(false),
+        shared: Rc::clone(&shared),
     });
+    shared.set_task(&task);
 
     task.schedule();
 

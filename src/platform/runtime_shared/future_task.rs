@@ -2,15 +2,17 @@
 //! vtable used to schedule `queue_future` continuations.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
 use super::state::with_installed_thread;
+use crate::task::JoinError;
 
 pub(crate) struct FutureTask {
     pub(crate) future: RefCell<Option<LocalBoxFuture>>,
     pub(crate) queued: Cell<bool>,
+    pub(crate) shared: Rc<TaskShared>,
 }
 
 impl FutureTask {
@@ -33,6 +35,8 @@ impl FutureTask {
     fn poll(self: Rc<Self>) {
         self.queued.set(false);
 
+        // An abort that landed while this task sat in the microtask queue has
+        // already taken the future; nothing left to poll.
         let Some(mut future) = self.future.borrow_mut().take() else {
             return;
         };
@@ -42,7 +46,14 @@ impl FutureTask {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(()) => {}
             Poll::Pending => {
-                *self.future.borrow_mut() = Some(future);
+                // If the task aborted itself during this poll (e.g. it holds
+                // its own `AbortHandle`), drop the future instead of restoring
+                // it so it is never polled again.
+                if self.shared.is_aborted() {
+                    drop(future);
+                } else {
+                    *self.future.borrow_mut() = Some(future);
+                }
             }
         }
     }
@@ -99,41 +110,117 @@ unsafe fn future_task_drop(data: *const ()) {
     drop(unsafe { Rc::<FutureTask>::from_raw(data.cast::<FutureTask>()) });
 }
 
+/// Tracks the lifecycle of a queued future independently of its output type so
+/// that the non-generic [`AbortHandle`](super::handles::AbortHandle) can drive
+/// cancellation without knowing `T`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    /// The task is still queued or running.
+    Running,
+    /// The task finished and its output is available to the joiner.
+    Finished,
+    /// The task was aborted before completion.
+    Aborted,
+}
+
+/// Type-erased, shared cancellation state for a queued future.
+///
+/// Held by the [`FutureTask`], the [`JoinState`], and any
+/// [`AbortHandle`](super::handles::AbortHandle)s. Aborting drops the task's
+/// future (which cascades `Drop` into any in-flight driver operations, so they
+/// are cancelled) and wakes the joiner with [`JoinError::Aborted`].
+pub(crate) struct TaskShared {
+    task: RefCell<Weak<FutureTask>>,
+    join_waker: RefCell<Option<Waker>>,
+    state: Cell<TaskState>,
+}
+
+impl TaskShared {
+    pub(crate) fn new() -> Self {
+        Self {
+            task: RefCell::new(Weak::new()),
+            join_waker: RefCell::new(None),
+            state: Cell::new(TaskState::Running),
+        }
+    }
+
+    /// Links this shared state to its owning task. Called once, immediately
+    /// after the task is constructed.
+    pub(crate) fn set_task(&self, task: &Rc<FutureTask>) {
+        *self.task.borrow_mut() = Rc::downgrade(task);
+    }
+
+    /// Returns `true` once the task has completed or been aborted.
+    pub(crate) fn is_finished(&self) -> bool {
+        !matches!(self.state.get(), TaskState::Running)
+    }
+
+    fn is_aborted(&self) -> bool {
+        matches!(self.state.get(), TaskState::Aborted)
+    }
+
+    /// Aborts the task: drops its future so it is never polled again and wakes
+    /// the joiner with [`JoinError::Aborted`]. A no-op if the task already
+    /// finished or was aborted.
+    pub(crate) fn abort(&self) {
+        if !matches!(self.state.get(), TaskState::Running) {
+            return;
+        }
+        self.state.set(TaskState::Aborted);
+
+        // Dropping the future cancels any in-flight driver operations it is
+        // parked on via their `Drop` impls. If the task is mid-poll (self
+        // abort) the future is on the stack and this take is a no-op;
+        // `FutureTask::poll` then drops it instead of restoring it.
+        if let Some(task) = self.task.borrow().upgrade() {
+            let _ = task.future.borrow_mut().take();
+        }
+
+        if let Some(waker) = self.join_waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+}
+
 pub(crate) struct JoinState<T> {
+    pub(crate) shared: Rc<TaskShared>,
     result: RefCell<Option<T>>,
-    waker: RefCell<Option<Waker>>,
-    ready: Cell<bool>,
 }
 
 impl<T> JoinState<T> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(shared: Rc<TaskShared>) -> Self {
         Self {
+            shared,
             result: RefCell::new(None),
-            waker: RefCell::new(None),
-            ready: Cell::new(false),
         }
     }
 
     pub(crate) fn complete(&self, value: T) {
+        // A task aborted between its final poll and this call must not deliver
+        // a value; the joiner already (or will) observe `JoinError::Aborted`.
+        if !matches!(self.shared.state.get(), TaskState::Running) {
+            return;
+        }
         *self.result.borrow_mut() = Some(value);
-        self.ready.set(true);
+        self.shared.state.set(TaskState::Finished);
 
-        if let Some(waker) = self.waker.borrow_mut().take() {
+        if let Some(waker) = self.shared.join_waker.borrow_mut().take() {
             waker.wake();
         }
     }
 
-    pub(crate) fn poll(&self, cx: &mut Context<'_>) -> Poll<T> {
-        if self.ready.get() {
-            return Poll::Ready(
-                self.result
-                    .borrow_mut()
-                    .take()
-                    .expect("join handle polled after completion"),
-            );
+    pub(crate) fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<T, JoinError>> {
+        match self.shared.state.get() {
+            TaskState::Finished => Poll::Ready(Ok(self
+                .result
+                .borrow_mut()
+                .take()
+                .expect("join handle polled after completion"))),
+            TaskState::Aborted => Poll::Ready(Err(JoinError::Aborted)),
+            TaskState::Running => {
+                *self.shared.join_waker.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
         }
-
-        *self.waker.borrow_mut() = Some(cx.waker().clone());
-        Poll::Pending
     }
 }
