@@ -71,11 +71,16 @@ pub struct BufReader<R> {
 
 impl<R: AsyncRead> BufReader<R> {
     /// Creates a buffered reader with the default capacity.
+    ///
+    /// The default is currently 8 KiB.
     pub fn new(inner: R) -> Self {
         Self::with_capacity(DEFAULT_BUF_SIZE, inner)
     }
 
     /// Creates a buffered reader with the specified capacity.
+    ///
+    /// A capacity of zero disables internal buffering and delegates reads
+    /// directly to the wrapped reader.
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
         Self {
             inner,
@@ -106,6 +111,9 @@ impl<R: AsyncRead> BufReader<R> {
     }
 
     /// Returns the bytes currently held in the internal buffer.
+    ///
+    /// The slice contains bytes that can be read without polling the inner
+    /// reader again.
     pub fn buffer(&self) -> &[u8] {
         &self.buf[self.pos..self.filled]
     }
@@ -282,11 +290,16 @@ pub struct BufWriter<W> {
 
 impl<W: AsyncWrite> BufWriter<W> {
     /// Creates a buffered writer with the default capacity.
+    ///
+    /// The default is currently 8 KiB.
     pub fn new(inner: W) -> Self {
         Self::with_capacity(DEFAULT_BUF_SIZE, inner)
     }
 
     /// Creates a buffered writer with the specified capacity.
+    ///
+    /// A capacity of zero disables internal buffering and delegates writes
+    /// directly to the wrapped writer.
     pub fn with_capacity(capacity: usize, inner: W) -> Self {
         Self {
             inner,

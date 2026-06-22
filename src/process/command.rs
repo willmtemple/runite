@@ -6,6 +6,10 @@ use super::{Child, ExitStatus};
 use crate::io::AsyncReadExt;
 
 /// Subprocess standard I/O configuration.
+///
+/// Use this with [`Command::stdin`], [`Command::stdout`], and
+/// [`Command::stderr`] to decide whether a child inherits a standard stream,
+/// connects it to the null device, or exposes it as an async pipe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stdio(pub(crate) StdioKind);
 
@@ -17,17 +21,17 @@ pub(crate) enum StdioKind {
 }
 
 impl Stdio {
-    /// Inherit the parent process handle.
+    /// Inherits the parent process handle for this standard stream.
     pub fn inherit() -> Self {
         Self(StdioKind::Inherit)
     }
 
-    /// Connect the handle to the platform null device.
+    /// Connects this standard stream to the platform null device.
     pub fn null() -> Self {
         Self(StdioKind::Null)
     }
 
-    /// Create an async pipe connected to the child handle.
+    /// Creates an async pipe connected to the child handle.
     pub fn piped() -> Self {
         Self(StdioKind::Piped)
     }
@@ -52,6 +56,11 @@ pub(crate) struct CommandSpec {
 }
 
 /// Builder for spawning an async subprocess.
+///
+/// `Command` mirrors the shape of [`std::process::Command`] while returning
+/// runtime-aware child handles and async pipes. Configuration methods mutate the
+/// builder and return `&mut Self` so they can be chained before [`spawn`](Self::spawn),
+/// [`status`](Self::status), or [`output`](Self::output).
 #[derive(Clone, Debug)]
 pub struct Command {
     spec: CommandSpec,
@@ -73,13 +82,13 @@ impl Command {
         }
     }
 
-    /// Adds one argument.
+    /// Adds one argument to the command line.
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.spec.args.push(arg.as_ref().to_os_string());
         self
     }
 
-    /// Adds multiple arguments.
+    /// Adds multiple arguments to the command line.
     pub fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -91,7 +100,7 @@ impl Command {
         self
     }
 
-    /// Sets an environment variable for the child.
+    /// Sets or overrides an environment variable for the child.
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
         self.spec.env.push(EnvChange::Set(
             key.as_ref().to_os_string(),
@@ -100,7 +109,7 @@ impl Command {
         self
     }
 
-    /// Sets multiple environment variables for the child.
+    /// Sets or overrides multiple environment variables for the child.
     pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -114,6 +123,9 @@ impl Command {
     }
 
     /// Removes an environment variable from the child environment.
+    ///
+    /// The removal is applied after inherited environment handling and before
+    /// the child starts.
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.spec
             .env
@@ -122,6 +134,9 @@ impl Command {
     }
 
     /// Clears the child environment.
+    ///
+    /// Variables added later with [`env`](Self::env) or [`envs`](Self::envs)
+    /// are still included.
     pub fn env_clear(&mut self) -> &mut Self {
         self.spec.env.push(EnvChange::Clear);
         self
@@ -133,35 +148,42 @@ impl Command {
         self
     }
 
-    /// Configures child stdin.
+    /// Configures the child's standard input stream.
     pub fn stdin(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stdin = stdio.0;
         self
     }
 
-    /// Configures child stdout.
+    /// Configures the child's standard output stream.
     pub fn stdout(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stdout = stdio.0;
         self
     }
 
-    /// Configures child stderr.
+    /// Configures the child's standard error stream.
     pub fn stderr(&mut self, stdio: Stdio) -> &mut Self {
         self.spec.stderr = stdio.0;
         self
     }
 
-    /// Spawns the command.
+    /// Spawns the command and returns a handle to the running child.
+    ///
+    /// If any standard stream was configured with [`Stdio::piped`], the
+    /// corresponding field on the returned [`Child`] contains an async pipe.
     pub fn spawn(&mut self) -> io::Result<Child> {
         crate::sys::current::process::spawn(&self.spec).map(Child::from_inner)
     }
 
-    /// Spawns the command and waits for it to exit.
+    /// Spawns the command and waits asynchronously for it to exit.
     pub async fn status(&mut self) -> io::Result<ExitStatus> {
         self.spawn()?.wait().await
     }
 
     /// Spawns the command, captures stdout, and waits for it to exit.
+    ///
+    /// The command's standard output is forced to [`Stdio::piped`]. The returned
+    /// bytes contain stdout only; a non-success exit status is reported as an
+    /// [`io::Error`].
     pub async fn output(&mut self) -> io::Result<Vec<u8>> {
         self.stdout(Stdio::piped());
         let mut child = self.spawn()?;
