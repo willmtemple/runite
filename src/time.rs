@@ -197,7 +197,8 @@ pub fn interval(period: Duration) -> Interval {
 /// Schedules `callback` to run once after at least `delay` has elapsed.
 ///
 /// Returns a [`crate::TimeoutHandle`]; call [`crate::TimeoutHandle::cancel`]
-/// before it fires to cancel it. For async code, prefer [`sleep`].
+/// before it fires to cancel it. Dropping the handle does not cancel the
+/// timeout. For async code, prefer [`sleep`].
 ///
 /// # Examples
 ///

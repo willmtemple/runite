@@ -79,6 +79,10 @@ pub struct TimeoutHandle {
 impl TimeoutHandle {
     /// Cancels the pending timeout. If the callback has already fired, this is
     /// a no-op.
+    ///
+    /// Dropping a `TimeoutHandle` does **not** cancel the timeout; the handle is
+    /// a cloneable cancellation token, so you must keep it and call `cancel` to
+    /// stop the callback from firing.
     pub fn cancel(&self) {
         super::scheduler::cancel_timeout(self);
     }
@@ -98,6 +102,10 @@ pub struct IntervalHandle {
 impl IntervalHandle {
     /// Cancels the repeating timer, preventing any further callback
     /// invocations. Cancelling an already-cancelled interval is a no-op.
+    ///
+    /// Dropping an `IntervalHandle` does **not** cancel the interval; the handle
+    /// is a cloneable cancellation token, so you must keep it and call `cancel`
+    /// to stop the repeating callback (and to let the runtime exit).
     pub fn cancel(&self) {
         super::scheduler::cancel_interval(self);
     }
