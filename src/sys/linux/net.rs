@@ -32,12 +32,16 @@ use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
+// TODO(roadmap): unwired io_uring net-close / op-classifier scaffolding; a Linux
+// agent will wire or remove it before release. See ROADMAP.md.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionPath {
     IoUring,
     Offload,
 }
 
+#[allow(dead_code)]
 pub fn execution_path(op: &NetOp) -> ExecutionPath {
     match op {
         NetOp::Socket { .. }
@@ -433,6 +437,7 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub async fn close(op: NetOp) -> io::Result<()> {
     let NetOp::Close { fd } = op else {
         unreachable!("close backend called with non-close op");
@@ -1370,6 +1375,7 @@ async fn recv_from_ready(fd: RawFd, len: usize, flags: i32) -> io::Result<Receiv
     }
 }
 
+#[allow(dead_code)]
 fn close_sync(fd: RawFd) -> io::Result<()> {
     // SAFETY: `fd` is an owned raw descriptor being closed exactly once by the
     // networking backend.

@@ -320,15 +320,22 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<i32>));
         let worker_local = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let worker_remote = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // The worker stores its thread-local wake counters *after* it calls
+        // `complete`, but `complete` is what unblocks `run()`. Stash the join
+        // handle so we can join the worker before reading the counters; the
+        // join provides the happens-before edge that makes the stores visible
+        // and avoids a race where the main thread reads them as zero.
+        let worker_handle = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
 
         {
             let observed = Arc::clone(&observed);
             let worker_local = Arc::clone(&worker_local);
             let worker_remote = Arc::clone(&worker_remote);
+            let worker_handle = Arc::clone(&worker_handle);
             queue_macrotask(move || {
                 let (future, handle) = completion_for_current_thread::<i32>();
 
-                std::thread::spawn(move || {
+                let join = std::thread::spawn(move || {
                     // Reset this thread's counters so we measure only the
                     // increments produced by this `complete` call.
                     LOCAL_WAKE_COUNT.with(|c| c.set(0));
@@ -345,6 +352,7 @@ mod tests {
                         std::sync::atomic::Ordering::Release,
                     );
                 });
+                *worker_handle.lock().unwrap() = Some(join);
 
                 spawn(async move {
                     let value = future.await;
@@ -354,6 +362,16 @@ mod tests {
         }
 
         run();
+
+        // Join the worker so its counter stores are complete and visible
+        // before we assert on them.
+        worker_handle
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap();
 
         assert_eq!(*observed.lock().unwrap(), Some(7));
 
