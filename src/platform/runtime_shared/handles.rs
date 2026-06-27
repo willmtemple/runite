@@ -14,6 +14,7 @@ use std::task::{Context, Poll};
 
 use super::future_task::{JoinState, TaskShared};
 use super::state::{ThreadShared, WorkerCompletion};
+#[cfg(debug_assertions)]
 use crate::trace_targets;
 
 /// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime is shutting
