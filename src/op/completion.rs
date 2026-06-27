@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::platform::current::runtime::{
-    QueueError, ThreadHandle, current_thread_handle, queue_microtask,
+    QueueError, ThreadHandle, current_thread_handle, queue_microtask, queue_task,
 };
 use crate::trace_targets;
 
@@ -16,9 +16,9 @@ use std::cell::Cell;
 
 #[cfg(test)]
 thread_local! {
-    /// Per-thread count of microtask wakes observed by `queue_wake` on this
-    /// thread. Used by unit tests to assert that same-thread completions take
-    /// the microtask fast path.
+    /// Per-thread count of same-thread (local macrotask) wakes observed by
+    /// `queue_wake` on this thread. Used by unit tests to assert that
+    /// same-thread completions take the local macrotask path.
     pub(crate) static LOCAL_WAKE_COUNT: Cell<u64> = const { Cell::new(0) };
     /// Per-thread count of cross-thread macrotask wakes observed by
     /// `queue_wake` on this thread. Per-thread (not global) so concurrent
@@ -28,8 +28,33 @@ thread_local! {
 
 type CancelCallback = Box<dyn FnOnce() + Send + 'static>;
 
+/// How a same-thread completion wake is scheduled on the owner's run loop.
+///
+/// This mirrors the JavaScript event-loop distinction between the microtask
+/// checkpoint and a macro turn, and is chosen by whoever *creates* the
+/// completion — the completion primitive itself is source-agnostic:
+///
+/// * [`WakeClass::Microtask`] — an **in-process resolution** (a channel send,
+///   `Notify`, an mpsc slot opening). These are the `Promise.resolve` analogs:
+///   they run on the current microtask checkpoint, before the loop takes
+///   another macro turn. Same-thread channel ops use this.
+/// * [`WakeClass::Macrotask`] — an **I/O completion** (a CQE / readiness
+///   event). Like a Node poll-phase callback, it always defers to a macro
+///   turn so it cannot preempt an in-flight microtask checkpoint and cannot
+///   starve the timer/macrotask queues. All I/O ops use this.
+///
+/// The distinction only applies to the same-thread wake path. A cross-thread
+/// wake is always a macrotask: it is an external event by definition, and the
+/// only way to cross the thread boundary is the owner's notify queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WakeClass {
+    Microtask,
+    Macrotask,
+}
+
 struct CompletionState<T> {
     owner: ThreadHandle,
+    wake_class: WakeClass,
     interested: AtomicBool,
     finished: AtomicBool,
     wake_queued: AtomicBool,
@@ -44,23 +69,31 @@ impl<T: Send + 'static> CompletionState<T> {
             return;
         }
 
-        // Fast path: same-thread completion. The completer is running on the
-        // owner's runtime thread, so we can wake by enqueueing a microtask
-        // directly — no remote-queue mutex, no driver notify, no MSG_RING
-        // syscall. This is the common case for purely local I/O on Linux,
-        // where the io_uring CQE handler invokes `finish` on the same thread
-        // that owns the future.
+        // Same-thread completion. The completer is running on the owner's
+        // runtime thread, so we can wake without the cross-thread machinery
+        // (no remote-queue mutex, no driver notify, no MSG_RING syscall) by
+        // enqueueing directly. This is the common case for purely local I/O on
+        // Linux, where the io_uring CQE handler invokes `finish` on the same
+        // thread that owns the future, and for same-thread channel sends.
+        //
+        // The queue we enqueue onto depends on the completion's `wake_class`
+        // (see [`WakeClass`]): an I/O completion takes a macro turn, an
+        // in-process resolution joins the current microtask checkpoint.
         if self.owner.is_current() {
             #[cfg(test)]
             LOCAL_WAKE_COUNT.with(|c| c.set(c.get() + 1));
 
             let state = Arc::clone(self);
-            queue_microtask(move || {
+            let wake = move || {
                 state.wake_queued.store(false, Ordering::Release);
                 if let Some(waker) = state.waker.lock().unwrap().take() {
                     waker.wake();
                 }
-            });
+            };
+            match self.wake_class {
+                WakeClass::Microtask => queue_microtask(wake),
+                WakeClass::Macrotask => queue_task(wake),
+            }
             return;
         }
 
@@ -114,10 +147,12 @@ impl<T> Clone for CompletionHandle<T> {
 
 pub(crate) fn completion<T: Send + 'static>(
     owner: ThreadHandle,
+    wake_class: WakeClass,
 ) -> (CompletionFuture<T>, CompletionHandle<T>) {
     owner.begin_async_operation();
     let state = Arc::new(CompletionState {
         owner,
+        wake_class,
         interested: AtomicBool::new(true),
         finished: AtomicBool::new(false),
         wake_queued: AtomicBool::new(false),
@@ -134,9 +169,13 @@ pub(crate) fn completion<T: Send + 'static>(
     )
 }
 
+/// Build a completion owned by the current runtime thread for an **I/O
+/// operation**. The wake therefore takes a macro turn ([`WakeClass::Macrotask`]),
+/// matching JS poll-phase semantics. Channel/in-process waiters must instead
+/// call [`completion`] with [`WakeClass::Microtask`].
 pub(crate) fn completion_for_current_thread<T: Send + 'static>()
 -> (CompletionFuture<T>, CompletionHandle<T>) {
-    completion(current_thread_handle())
+    completion(current_thread_handle(), WakeClass::Macrotask)
 }
 
 impl<T: Send + 'static> CompletionHandle<T> {
@@ -226,11 +265,13 @@ mod tests {
 
     use crate::{queue_macrotask, run, spawn};
 
-    /// Same-thread completion must take the microtask fast path and resolve.
-    /// We use thread-local counters so this test does not race against any
-    /// other concurrently-running completion-touching test.
+    /// Same-thread completion must take the local macrotask path and resolve.
+    /// I/O completions always defer to a macro turn (JS poll-phase semantics),
+    /// so the same-thread fast path enqueues a *local macrotask*, not a
+    /// microtask. We use thread-local counters so this test does not race
+    /// against any other concurrently-running completion-touching test.
     #[test]
-    fn local_completion_uses_microtask_path() {
+    fn local_completion_uses_local_macrotask_path() {
         LOCAL_WAKE_COUNT.with(|c| c.set(0));
         REMOTE_WAKE_COUNT.with(|c| c.set(0));
 
@@ -248,7 +289,7 @@ mod tests {
 
                 // Complete on the same runtime thread that owns the future.
                 // `queue_wake` therefore runs on this thread and bumps the
-                // thread-local LOCAL counter.
+                // thread-local LOCAL counter via the local-macrotask path.
                 handle.complete(42);
             });
         }
@@ -261,7 +302,7 @@ mod tests {
         let remote = REMOTE_WAKE_COUNT.with(|c| c.get());
         assert_eq!(
             local, 1,
-            "expected exactly one local microtask wake on this thread, got {local}"
+            "expected exactly one local macrotask wake on this thread, got {local}"
         );
         assert_eq!(
             remote, 0,
@@ -324,10 +365,10 @@ mod tests {
         );
         // The std::thread worker has no runtime state installed, so
         // `is_current()` returns false and we must not have taken the
-        // microtask fast path.
+        // local same-thread fast path.
         assert_eq!(
             local_on_worker, 0,
-            "cross-thread completion must not hit the local microtask path, \
+            "cross-thread completion must not hit the local same-thread path, \
              got {local_on_worker} local wakes on the worker"
         );
     }

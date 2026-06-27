@@ -54,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- I/O completions now resume on a **macro turn** instead of a microtask, matching
+  JavaScript event-loop semantics (a completed read/write behaves like a Node
+  poll-phase callback). Previously a same-thread I/O completion woke its future as a
+  microtask, letting it preempt an in-flight microtask checkpoint and potentially
+  starve the timer/macrotask queues. In-process resolutions (channel sends, `Notify`,
+  `yield_now`) remain microtasks — the `Promise.resolve` analog. Each completion now
+  carries an explicit wake class (`WakeClass::Microtask`/`Macrotask`) set by its
+  creator. See the `event_loop_order` integration suite for the asserted contract.
 - `fs::create_dir_all` no longer returns `Ok(())` when the destination path already
   exists as a non-directory (e.g. a regular file); it now reports `AlreadyExists`,
   matching `std::fs::create_dir_all`.
@@ -84,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux network data-path operations (connect/accept/send/recv/datagram recv) now fall back to a
   non-blocking readiness path (`IORING_OP_POLL_ADD`) instead of the blocking thread pool when an
   io_uring opcode is unsupported, so socket I/O is never offloaded.
+- The run loop now polls the driver **once per turn** (its poll phase) rather than after every
+  microtask. Because every externally-reaped event (I/O completion, expired timer, cross-thread
+  task, worker exit) is a macrotask and cannot run mid-checkpoint, the old per-microtask poll
+  issued one `kevent`/`io_uring` syscall per microtask without affecting ordering. Batching it
+  makes microtask-bound scheduling dramatically faster (e.g. `spawn`-fanout and `yield_now`
+  drop from a ~12 µs/turn syscall floor to tens of nanoseconds) while preserving JS-equivalent
+  micro/macro ordering.
 
 ### Security
 
