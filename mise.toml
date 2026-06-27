@@ -23,6 +23,12 @@ rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 # exact release is pinned in `mise.lock`. https://github.com/KrzysztofCwalina/cop
 "github:KrzysztofCwalina/cop" = { version = "latest", exe = "cop" }
 
+# `cargo public-api` powers `mise run api-report`, which renders the crate's
+# public surface as reviewable markdown (docs/public-api.md). It shells out to a
+# nightly rustdoc to emit rustdoc JSON, so the report is a local/dev tool rather
+# than part of the `check` gate.
+"cargo:cargo-public-api" = "0.52.0"
+
 [tasks.build]
 description = "Build the workspace"
 run = "cargo build --workspace --all-targets"
@@ -42,6 +48,14 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 [tasks.doc]
 description = "Build documentation"
 run = "cargo doc --workspace --all-features --no-deps"
+
+[tasks.api-report]
+description = "Render the public API surface to docs/public-api.md for review"
+run = "cargo run --quiet --package xtask -- api-report"
+
+[tasks.api-report-check]
+description = "Fail if docs/public-api.md is stale (regenerate with api-report)"
+run = "cargo run --quiet --package xtask -- api-report --check"
 
 [tasks.bench]
 description = "Run criterion benchmarks (runtime + I/O)"
