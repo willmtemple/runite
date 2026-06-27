@@ -90,21 +90,8 @@ impl JoinError {
     /// # Examples
     ///
     /// ```
-    /// use std::rc::Rc;
-    /// use std::cell::Cell;
-    ///
-    /// let observed = Rc::new(Cell::new(false));
-    /// let observed_task = Rc::clone(&observed);
-    ///
-    /// runite::spawn(async move {
-    ///     let mut set = runite::task::JoinSet::new();
-    ///     set.spawn(async { runite::task::JoinError::Cancelled });
-    ///     let err = set.join_next().await.unwrap().unwrap();
-    ///     observed_task.set(err.is_cancelled());
-    /// });
-    ///
-    /// runite::run();
-    /// assert!(observed.get());
+    /// assert!(runite::task::JoinError::Cancelled.is_cancelled());
+    /// assert!(!runite::task::JoinError::Aborted.is_cancelled());
     /// ```
     pub fn is_cancelled(&self) -> bool {
         matches!(self, JoinError::Cancelled)
@@ -130,7 +117,10 @@ impl std::error::Error for JoinError {}
 /// is called first.
 ///
 /// Like all futures in this runtime, tasks in a `JoinSet` are `!Send` and stay on
-/// the runtime thread where they were spawned.
+/// the runtime thread where they were spawned. This differs from Tokio's
+/// multithreaded `JoinSet`: runite owns local tasks on one event-loop thread,
+/// dropping the set aborts remaining tasks, and dropping an individual
+/// [`JoinHandle`] detaches that task instead of cancelling it.
 ///
 /// # Examples
 ///
@@ -187,8 +177,8 @@ impl<T> JoinSet<T> {
 
     /// Spawns `future` on the current runtime thread and adds it to the set.
     ///
-    /// The task starts running immediately. Its output can later be retrieved by
-    /// awaiting [`join_next`](Self::join_next).
+    /// The task is scheduled through [`crate::spawn`] as a microtask. Its output
+    /// can later be retrieved by awaiting [`join_next`](Self::join_next).
     ///
     /// # Examples
     ///
@@ -223,6 +213,12 @@ impl<T> JoinSet<T> {
     /// set is empty. `abort_all` keeps handles in the set, so aborted tasks are
     /// reported by subsequent calls to `join_next`. `detach_all` removes handles,
     /// so detached tasks will not be reported.
+    ///
+    /// Each call returns one ready task result. If several tasks are ready at
+    /// once, selection follows the set's internal scan order and is not a stable
+    /// completion-order guarantee.
+    ///
+    /// # Performance
     ///
     /// This implementation linearly scans stored handles and registers the same
     /// waker with every pending task; smarter ready-queue wake bookkeeping is a

@@ -6,6 +6,12 @@
 //! [`set_timeout`] and [`set_interval`]; both return handles with `cancel()`
 //! methods.
 //!
+//! Timers are local to one runtime thread. [`set_timeout`] and [`set_interval`]
+//! callbacks run as macrotasks after that thread's microtasks drain, while
+//! [`sleep`] and [`Interval::tick`] wake futures through the local scheduler.
+//! Unlike Tokio's `Send` timer driver, these futures are intended for runite's
+//! `!Send`, event-loop-per-thread model.
+//!
 //! # Examples
 //!
 //! ```
@@ -54,6 +60,8 @@ pub struct Sleep {
 /// The first call to [`tick`](Self::tick) completes immediately. Later ticks
 /// complete on the interval's schedule, adjusted by the configured
 /// [`MissedTickBehavior`] when the task waits too long between calls.
+/// Use this when an async task wants to await ticks; use [`set_interval`] when
+/// you want a callback macrotask instead.
 ///
 /// A zero-period interval is allowed. Its first tick is immediate, and later
 /// ticks yield through the runtime timer queue once per event-loop turn instead
@@ -91,6 +99,15 @@ pub struct Interval {
 }
 
 /// How an [`Interval`] schedules ticks after the consumer has fallen behind.
+///
+/// Suppose an interval has period `p` and a consumer observes a tick after
+/// several periods were missed:
+///
+/// | Behavior | Next tick is scheduled |
+/// | --- | --- |
+/// | [`Burst`](Self::Burst) | At the next original deadline, allowing immediate catch-up ticks. |
+/// | [`Delay`](Self::Delay) | At `now + p`, drifting the schedule forward. |
+/// | [`Skip`](Self::Skip) | At the first original schedule-grid deadline after `now`. |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MissedTickBehavior {
     /// Fire missed ticks back-to-back until the interval catches up, then
@@ -112,6 +129,10 @@ pub enum MissedTickBehavior {
 pub struct Elapsed;
 
 /// Returns a future that completes after `duration` has elapsed on the current runtime thread.
+///
+/// `sleep(Duration::ZERO)` still yields back to the event loop. It registers a
+/// zero-delay timer and resumes after timer/macrotask processing rather than
+/// completing inline on its first poll.
 ///
 /// # Examples
 ///
@@ -150,6 +171,19 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// For `Duration::ZERO`, the first tick is immediate and subsequent ticks yield
 /// through a zero-delay runtime timer, so a loop that repeatedly awaits ticks
 /// makes progress without busy-looping.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::{Duration, Instant};
+///
+/// runite::spawn(async {
+///     let mut interval = runite::time::interval(Duration::from_millis(1));
+///     let _: Instant = interval.tick().await;
+/// });
+///
+/// runite::run();
+/// ```
 pub fn interval(period: Duration) -> Interval {
     Interval {
         period,
@@ -188,8 +222,15 @@ where
 /// Schedules `callback` to run repeatedly, once per `delay` interval.
 ///
 /// Returns an [`crate::IntervalHandle`]; call [`crate::IntervalHandle::cancel`]
-/// to stop it. The runtime will not exit while an interval is active, so
-/// callers must cancel it to allow [`crate::run`] to return.
+/// to stop it. Dropping the handle does not cancel the interval. The runtime
+/// will not exit while an interval is active, so callers must cancel it to allow
+/// [`crate::run`] to return.
+///
+/// Interval callbacks use JavaScript-style event-loop scheduling: a callback is
+/// a macrotask, and at most one callback for a given interval is queued per
+/// event-loop turn. Missed deadlines, including zero-duration intervals, are not
+/// burst-run in a tight loop; the next callback is re-queued as a later
+/// macrotask.
 ///
 /// # Examples
 ///
@@ -226,6 +267,9 @@ where
 /// The wrapped future is dropped when the timeout fires. As with other runtime operations, dropping
 /// a future cancels interest in the result but does not guarantee cancellation of any underlying
 /// OS work that future may have started.
+///
+/// If the wrapped future and the sleeper are both ready in the same poll,
+/// `future` wins: it is polled first and the result is `Ok(output)`.
 ///
 /// # Examples
 ///
@@ -279,6 +323,19 @@ impl Interval {
     /// The first tick resolves immediately to the interval's creation instant.
     /// Later ticks resolve to scheduled instants according to the interval
     /// period and [`MissedTickBehavior`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    ///
+    /// runite::spawn(async {
+    ///     let mut interval = runite::time::interval(Duration::from_millis(1));
+    ///     let _: Instant = interval.tick().await;
+    /// });
+    ///
+    /// runite::run();
+    /// ```
     pub fn tick(&mut self) -> impl Future<Output = Instant> + '_ {
         Tick { interval: self }
     }

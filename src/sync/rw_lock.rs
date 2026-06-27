@@ -29,6 +29,15 @@ struct Waiter {
 /// This lock is intentionally `!Send` and `!Sync`: it is only for tasks that
 /// remain on one runite runtime thread.
 ///
+/// # Differences from blocking and multithreaded locks
+///
+/// This lock never blocks an OS thread and does not poison when a holder
+/// panics. Unlike `std::sync::RwLock` or Tokio's multithreaded `RwLock`, guards
+/// and wait futures are local `!Send` values. A single FIFO queue is shared by
+/// readers and writers: when the front of the queue is a reader, consecutive
+/// front readers are admitted together, but later readers do not bypass a
+/// queued writer.
+///
 /// # Examples
 ///
 /// ```
@@ -83,6 +92,10 @@ pub struct RwLockWriteGuard<'a, T: ?Sized> {
 }
 
 /// Future returned by [`RwLock::read`].
+///
+/// Resolves to an [`RwLockReadGuard`]. Dropping it while queued cancels the
+/// request; dropping it after selection but before completion releases that
+/// reader slot.
 pub struct RwLockReadFuture<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     waiter: Option<(usize, Rc<Cell<bool>>)>,
@@ -90,6 +103,10 @@ pub struct RwLockReadFuture<'a, T: ?Sized> {
 }
 
 /// Future returned by [`RwLock::write`].
+///
+/// Resolves to an [`RwLockWriteGuard`]. Dropping it while queued cancels the
+/// request; dropping it after selection but before completion releases
+/// exclusive access to the next waiter.
 pub struct RwLockWriteFuture<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     waiter: Option<(usize, Rc<Cell<bool>>)>,
@@ -110,6 +127,9 @@ impl<T> RwLock<T> {
     }
 
     /// Consumes the lock and returns the protected value.
+    ///
+    /// Taking ownership proves no guards or wait futures can still borrow this
+    /// lock, so this does not wait and cannot observe queued waiters.
     pub fn into_inner(self) -> T {
         self.value.into_inner()
     }
@@ -120,6 +140,13 @@ impl<T: ?Sized> RwLock<T> {
     ///
     /// Readers are admitted immediately only when no writer holds the lock and
     /// no waiter is queued. Otherwise, the request waits in FIFO order.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the returned future before it is selected removes it from the
+    /// waiter queue. If it has already been selected but is dropped before it
+    /// returns a guard, its reader slot is released and the next eligible
+    /// waiters are woken.
     pub fn read(&self) -> RwLockReadFuture<'_, T> {
         RwLockReadFuture::new(self)
     }
@@ -128,6 +155,12 @@ impl<T: ?Sized> RwLock<T> {
     ///
     /// Writers require exclusive access and are served in FIFO order with
     /// readers from the same waiter queue.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the returned future before it is selected removes it from the
+    /// waiter queue. If it has already been selected but is dropped before it
+    /// returns a guard, exclusive access is released to the next waiter.
     pub fn write(&self) -> RwLockWriteFuture<'_, T> {
         RwLockWriteFuture::new(self)
     }
@@ -165,6 +198,10 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     /// Returns a mutable reference to the protected value.
+    ///
+    /// The `&mut self` borrow proves no guards or wait futures can concurrently
+    /// access the lock, so this is synchronous and cannot observe queued
+    /// waiters.
     pub fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
