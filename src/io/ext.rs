@@ -2,8 +2,11 @@
 //!
 //! This module adapts the low-level poll methods from [`AsyncRead`] and
 //! [`AsyncWrite`] into futures such as [`AsyncReadExt::read_exact`] and
-//! [`AsyncWriteExt::write_all`]. It also provides [`Lines`], a stream adapter for
-//! UTF-8 line-oriented readers.
+//! [`AsyncWriteExt::write_all`]. It also provides [`copy`],
+//! [`copy_bidirectional`], and [`Lines`], a stream adapter for UTF-8
+//! line-oriented readers. The returned futures are intended to stay on the
+//! runite runtime thread that owns their readers and writers; unlike Tokio's
+//! helpers, they do not require `Send` transports or a work-stealing executor.
 //!
 //! # Examples
 //!
@@ -215,7 +218,8 @@ pub trait AsyncReadExt: AsyncRead {
 
     /// Splits this reader into a stream of UTF-8 lines.
     ///
-    /// Newline bytes are not included in yielded strings. The final line is
+    /// A trailing `\n` byte is not included in yielded strings; CRLF input
+    /// retains the `\r`. The final line is
     /// yielded even when the input does not end with a newline.
     ///
     /// # Examples
@@ -404,7 +408,12 @@ impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 ///
 /// The returned future repeatedly reads from `reader`, writes every byte read to
 /// `writer`, and flushes `writer` after `reader` reaches EOF. It resolves to the
-/// number of bytes written.
+/// number of bytes written. EOF triggers [`AsyncWrite::poll_flush`], not
+/// [`AsyncWrite::poll_close`], so `copy` does not close the writer.
+///
+/// Cancellation is not transactional: if this future is dropped, bytes may
+/// already have been read from `reader` and accepted by `writer`, and those
+/// partial writes are not rolled back.
 ///
 /// # Examples
 ///
@@ -460,10 +469,18 @@ where
 
 /// Copies bytes in both directions between two streams until both reach EOF.
 ///
-/// The returned future drives `a` to `b` and `b` to `a` in a single current-thread
-/// task. When one direction reaches EOF, the write half of the opposite stream is
-/// closed with [`AsyncWrite::poll_close`], signalling EOF to that peer while the
-/// other direction continues.
+/// The returned future drives `a` to `b` and `b` to `a` in one current-thread
+/// future. When one direction reaches EOF, the write side of the opposite stream
+/// is closed with [`AsyncWrite::poll_close`] before the other direction is
+/// necessarily finished, so half-shutdown can happen independently in each
+/// direction. The successful result reports the byte counts copied as `(a_to_b,
+/// b_to_a)`.
+///
+/// Cancellation is not transactional: dropping this future can leave either
+/// direction partially copied, and a direction that has already reached EOF may
+/// already have closed the opposite writer. Compared with Tokio's helper, this
+/// is a single current-thread future with no `Send` transport requirement, and
+/// half shutdown is expressed through `poll_close` on runite's [`AsyncWrite`].
 ///
 /// # Examples
 ///
@@ -649,6 +666,9 @@ enum CopyState {
 
 /// Future returned by [`copy`].
 ///
+/// Dropping this future may leave bytes already read and written; cancellation
+/// does not roll back partial progress.
+///
 /// # Examples
 ///
 /// ```
@@ -826,6 +846,10 @@ where
 
 /// Future returned by [`copy_bidirectional`].
 ///
+/// Each direction tracks its own byte count and half-close state. Dropping this
+/// future may leave one or both directions partially copied, and one writer may
+/// already have been closed after the opposite reader reached EOF.
+///
 /// # Examples
 ///
 /// ```
@@ -935,8 +959,9 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Close<'_, W> {
 
 /// Stream of UTF-8 lines returned by [`AsyncReadExt::lines`].
 ///
-/// Each item is an [`io::Result<String>`]. Newline terminators are removed, and
-/// invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
+/// Each item is an [`io::Result<String>`]. A trailing `\n` is removed from each
+/// yielded line; if the input uses CRLF, the preceding `\r` remains in the
+/// string. Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
 pub struct Lines<R> {
     reader: R,
     buf: Vec<u8>,

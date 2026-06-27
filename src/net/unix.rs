@@ -359,7 +359,9 @@ impl UnixDatagram {
     /// Receives a datagram from the connected peer.
     ///
     /// The socket must be connected first with [`connect`](Self::connect) or
-    /// created by [`pair`](Self::pair).
+    /// created by [`pair`](Self::pair). If `buf` is smaller than the datagram,
+    /// the returned length is capped at `buf.len()` and the operating system
+    /// discards the excess bytes.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         let data = crate::sys::current::net::recv(NetOp::Recv {
             fd: self.raw_fd(),
@@ -373,6 +375,9 @@ impl UnixDatagram {
     }
 
     /// Receives a datagram and returns the sender address.
+    ///
+    /// If `buf` is smaller than the datagram, the returned length is capped at
+    /// `buf.len()` and the operating system discards the excess bytes.
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         loop {
             match recv_from_sync(self.raw_fd(), buf) {
