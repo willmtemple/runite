@@ -8,8 +8,24 @@ use std::task::{Context, Poll, Waker};
 
 struct Waiter {
     id: usize,
-    selected: Rc<Cell<bool>>,
+    selected: Rc<Cell<Selection>>,
     waker: Waker,
+}
+
+/// How a waiter was selected, which determines what happens if the waiter's
+/// future is dropped before it observes the wake.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    /// Still waiting; no notification delivered yet.
+    Pending,
+    /// Selected by [`Notify::notify_one`]. This carries a single transferable
+    /// permit: if the future is dropped before completing, the notification is
+    /// forwarded to the next waiter (or stored as a permit).
+    One,
+    /// Selected by [`Notify::notify_waiters`]. This is a broadcast wake with no
+    /// stored permit: if the future is dropped before completing, nothing is
+    /// forwarded.
+    Waiters,
 }
 
 /// A single-threaded async notification primitive.
@@ -72,6 +88,12 @@ impl Notify {
     ///
     /// If [`notify_one`](Self::notify_one) has already stored a permit, this
     /// returns immediately and consumes that permit.
+    ///
+    /// `notify_one` wakes the oldest waiter first (FIFO). If a future returned by
+    /// this method is selected by `notify_one` but dropped before it completes,
+    /// the notification is forwarded to the next waiter (or stored as a permit)
+    /// rather than being lost. A future woken by [`notify_waiters`](Self::notify_waiters)
+    /// is a broadcast wake and is not forwarded when dropped.
     pub async fn notified(&self) {
         Notified::new(self).await
     }
@@ -83,7 +105,7 @@ impl Notify {
     /// immediately.
     pub fn notify_one(&self) {
         if let Some(waiter) = self.waiters.borrow_mut().pop_front() {
-            waiter.selected.set(true);
+            waiter.selected.set(Selection::One);
             waiter.waker.wake();
         } else {
             self.permit.set(true);
@@ -95,7 +117,7 @@ impl Notify {
     /// This does not store a permit for future waiters.
     pub fn notify_waiters(&self) {
         for waiter in self.waiters.borrow_mut().drain(..) {
-            waiter.selected.set(true);
+            waiter.selected.set(Selection::Waiters);
             waiter.waker.wake();
         }
     }
@@ -122,7 +144,7 @@ impl Default for Notify {
 
 struct Notified<'a> {
     notify: &'a Notify,
-    waiter: Option<(usize, Rc<Cell<bool>>)>,
+    waiter: Option<(usize, Rc<Cell<Selection>>)>,
     done: bool,
 }
 
@@ -143,7 +165,7 @@ impl Future for Notified<'_> {
         if self
             .waiter
             .as_ref()
-            .is_some_and(|(_, selected)| selected.get())
+            .is_some_and(|(_, selected)| selected.get() != Selection::Pending)
         {
             self.done = true;
             return Poll::Ready(());
@@ -166,7 +188,7 @@ impl Future for Notified<'_> {
             }
         } else {
             let id = self.notify.allocate_waiter_id();
-            let selected = Rc::new(Cell::new(false));
+            let selected = Rc::new(Cell::new(Selection::Pending));
             self.notify.waiters.borrow_mut().push_back(Waiter {
                 id,
                 selected: Rc::clone(&selected),
@@ -185,10 +207,16 @@ impl Drop for Notified<'_> {
             return;
         }
 
-        if let Some((id, selected)) = &self.waiter
-            && !selected.get()
-        {
-            self.notify.remove_waiter(*id);
+        if let Some((id, selected)) = &self.waiter {
+            match selected.get() {
+                // Never notified: just remove ourselves from the queue.
+                Selection::Pending => self.notify.remove_waiter(*id),
+                // We held a transferable permit from `notify_one` but never
+                // consumed it. Forward it so it is not lost.
+                Selection::One => self.notify.notify_one(),
+                // Broadcast wake from `notify_waiters`: nothing to forward.
+                Selection::Waiters => {}
+            }
         }
     }
 }
@@ -249,5 +277,65 @@ mod tests {
         run();
 
         assert_eq!(&*order.borrow(), &[1, 2]);
+    }
+
+    #[test]
+    fn dropped_notify_one_recipient_forwards_to_next_waiter() {
+        use std::task::{Context, Waker};
+
+        let notify = Notify::new();
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let mut first = Box::pin(notify.notified());
+        let mut second = Box::pin(notify.notified());
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+
+        // Selects `first` (FIFO). Dropping it before it completes must forward
+        // the notification to `second` instead of losing it.
+        notify.notify_one();
+        drop(first);
+
+        assert!(second.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn dropped_notify_one_recipient_with_no_waiter_stores_permit() {
+        use std::task::{Context, Waker};
+
+        let notify = Notify::new();
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let mut only = Box::pin(notify.notified());
+        assert!(only.as_mut().poll(&mut cx).is_pending());
+
+        notify.notify_one();
+        drop(only);
+
+        // With no other waiter, the forwarded notification becomes a stored
+        // permit that the next waiter consumes immediately.
+        let mut next = Box::pin(notify.notified());
+        assert!(next.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn dropped_broadcast_recipient_does_not_store_permit() {
+        use std::task::{Context, Waker};
+
+        let notify = Notify::new();
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let mut waiter = Box::pin(notify.notified());
+        assert!(waiter.as_mut().poll(&mut cx).is_pending());
+
+        // Broadcast wake. Dropping the recipient must not leave a stored permit.
+        notify.notify_waiters();
+        drop(waiter);
+
+        let mut next = Box::pin(notify.notified());
+        assert!(next.as_mut().poll(&mut cx).is_pending());
     }
 }
