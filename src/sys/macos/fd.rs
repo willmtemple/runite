@@ -30,7 +30,7 @@ async fn wait_fd_readiness(fd: RawFd, interest: FdInterest) -> io::Result<()> {
                 let handle = handle.clone();
                 move || {
                     let queued_handle = handle.clone();
-                    let queued = owner.queue_task(move || {
+                    let queued = owner.queue_macrotask(move || {
                         cancel_fd_readiness(token);
                         queued_handle.finish(None);
                     });

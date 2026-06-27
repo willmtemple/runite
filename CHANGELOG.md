@@ -54,7 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking scheduling/timer API rename: `queue_future` → `spawn`,
   `queue_task` → `queue_macrotask`, root `timeout`/`interval` closure timers →
   `time::set_timeout`/`time::set_interval`, and `time::deadline` →
-  `time::timeout`. `time::interval` is now the awaitable interval.
+  `time::timeout`. `time::interval` is now the awaitable interval. The
+  cross-thread `ThreadHandle::queue_task`/`WorkerHandle::queue_task` methods were
+  likewise renamed to `queue_macrotask` for naming consistency.
 - Awaiting a `JoinHandle<T>` now yields `Result<T, JoinError>` instead of `T`, resolving to
   `Err(JoinError::Aborted)` when the task is aborted. `JoinError` gained an `Aborted` variant
   alongside `Cancelled`.

@@ -366,7 +366,7 @@ impl SignalDispatch {
             let queued_registration = Arc::clone(&registration);
             let queued = registration
                 .thread
-                .queue_task(move || queued_registration.notify(index));
+                .queue_macrotask(move || queued_registration.notify(index));
             if queued.is_err() {
                 continue;
             }

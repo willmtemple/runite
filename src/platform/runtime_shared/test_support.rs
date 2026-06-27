@@ -85,7 +85,7 @@ pub fn runtime_executes_local_and_remote_work<R: Runtime>() {
                     }
                 });
                 timeout::<R, _>(Duration::from_millis(7), move || {
-                    let _ = main_handle_for_worker.queue_task({
+                    let _ = main_handle_for_worker.queue_macrotask({
                         let log = Arc::clone(&log);
                         move || log.lock().unwrap().push("worker timeout to main".into())
                     });

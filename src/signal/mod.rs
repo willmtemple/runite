@@ -10,7 +10,7 @@
 //! async-signal-safe handler plus a dedicated blocking-pool reader task. The
 //! handler records a pending bit and wakes a self-pipe/eventfd; the reader task
 //! drains that fd and forwards signal notifications to every registered runtime
-//! thread with [`crate::ThreadHandle::queue_task`].
+//! thread with [`crate::ThreadHandle::queue_macrotask`].
 //!
 //! # Examples
 //!
