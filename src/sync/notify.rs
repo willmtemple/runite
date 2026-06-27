@@ -34,6 +34,13 @@ enum Selection {
 /// [`Notify::notified`] call consumes it immediately. `notify_waiters` wakes all
 /// current waiters and does not create a stored permit.
 ///
+/// # Differences from Tokio
+///
+/// This primitive is local to one runtime thread and has no public named
+/// `Notified` future type. Like Tokio's `Notify`, it stores at most one permit
+/// for `notify_one`, but wakeups are only for local tasks; use channels or
+/// thread handles for cross-thread notification.
+///
 /// # Examples
 ///
 /// ```
@@ -100,6 +107,10 @@ impl Notify {
 
     /// Wakes one waiting task or stores one permit for the next waiter.
     ///
+    /// The oldest waiter is woken first (FIFO). If that selected future is
+    /// dropped before completing, the notification is forwarded to the next
+    /// waiter or stored as the single permit.
+    ///
     /// At most one permit is stored; repeated calls before a waiter arrives
     /// still allow only one future [`notified`](Self::notified) call to complete
     /// immediately.
@@ -114,7 +125,9 @@ impl Notify {
 
     /// Wakes all tasks that are currently waiting.
     ///
-    /// This does not store a permit for future waiters.
+    /// This does not store a permit for future waiters. Broadcast wakeups are
+    /// not forwarded if a selected `notified()` future is dropped before it
+    /// completes.
     pub fn notify_waiters(&self) {
         for waiter in self.waiters.borrow_mut().drain(..) {
             waiter.selected.set(Selection::Waiters);

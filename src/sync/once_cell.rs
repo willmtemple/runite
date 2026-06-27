@@ -18,6 +18,13 @@ enum State {
 /// Concurrent callers wait for that initializer and then receive the same
 /// reference.
 ///
+/// # Differences from other once cells
+///
+/// Initializer futures are local to one runtime thread and may be `!Send`,
+/// unlike `tokio::sync::OnceCell` on Tokio's multithreaded runtime.
+/// `std::sync::OnceLock` is synchronous and blocks threads; this type awaits
+/// local async initialization without atomics.
+///
 /// # Examples
 ///
 /// ```
@@ -78,7 +85,9 @@ impl<T> OnceCell<T> {
     /// Returns the initialized value, if any.
     ///
     /// Returns [`None`] while the cell is empty or while an asynchronous
-    /// initializer is still running.
+    /// initializer is still running. If an initializer is cancelled or panics,
+    /// the cell returns to the empty state and `get()` continues to return
+    /// `None` until another initializer completes.
     pub fn get(&self) -> Option<&T> {
         if self.state.get() != State::Ready {
             return None;
