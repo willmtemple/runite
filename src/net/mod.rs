@@ -106,6 +106,30 @@ pub struct TcpListener {
     inner: Arc<TcpListenerInner>,
 }
 
+/// Configurable TCP socket builder.
+///
+/// `TcpSocket` creates an unbound TCP socket so options such as `SO_REUSEADDR`
+/// and `SO_REUSEPORT` can be configured before calling [`bind`](Self::bind).
+/// Socket options that affect binding should be set before `bind`; changing
+/// them after binding is platform-specific and may not affect the bound socket.
+///
+/// # Examples
+///
+/// ```
+/// runite::queue_future(async {
+///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+///     socket.set_reuseaddr(true).unwrap();
+///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+///     let listener = socket.listen(128).unwrap();
+///     assert!(listener.local_addr().unwrap().port() != 0);
+/// });
+/// runite::run();
+/// ```
+#[derive(Debug)]
+pub struct TcpSocket {
+    fd: OwnedFd,
+}
+
 /// Async UDP socket.
 ///
 /// `UdpSocket` sends and receives discrete datagrams. It can operate in
@@ -115,6 +139,213 @@ pub struct TcpListener {
 #[derive(Debug)]
 pub struct UdpSocket {
     inner: Arc<UdpSocketInner>,
+}
+
+impl TcpSocket {
+    /// Creates a new unbound IPv4 TCP socket.
+    ///
+    /// The socket is created with close-on-exec and non-blocking behavior
+    /// consistent with the runtime's TCP sockets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     let listener = socket.listen(128).unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn new_v4() -> io::Result<Self> {
+        crate::sys::current::net::tcp_socket_v4().map(Self::from_owned_fd)
+    }
+
+    /// Creates a new unbound IPv6 TCP socket.
+    ///
+    /// The socket is created with close-on-exec and non-blocking behavior
+    /// consistent with the runtime's TCP sockets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v6().unwrap();
+    ///     socket.bind("[::1]:0".parse().unwrap()).unwrap();
+    ///     let listener = socket.listen(128).unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn new_v6() -> io::Result<Self> {
+        crate::sys::current::net::tcp_socket_v6().map(Self::from_owned_fd)
+    }
+
+    /// Enables or disables `SO_REUSEADDR`.
+    ///
+    /// Set this option before [`bind`](Self::bind) when the bind behavior should
+    /// be affected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.set_reuseaddr(true).unwrap();
+    ///     assert!(socket.reuseaddr().unwrap());
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn set_reuseaddr(&self, enabled: bool) -> io::Result<()> {
+        crate::sys::current::net::set_reuse_addr(self.raw_fd(), enabled)
+    }
+
+    /// Reads the current `SO_REUSEADDR` setting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     let _ = socket.reuseaddr().unwrap();
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn reuseaddr(&self) -> io::Result<bool> {
+        crate::sys::current::net::reuse_addr(self.raw_fd())
+    }
+
+    /// Enables or disables `SO_REUSEPORT`.
+    ///
+    /// Set this option before [`bind`](Self::bind) on every socket that should
+    /// share the same local address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.set_reuseport(true).unwrap();
+    ///     assert!(socket.reuseport().unwrap());
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn set_reuseport(&self, enabled: bool) -> io::Result<()> {
+        crate::sys::current::net::set_reuse_port(self.raw_fd(), enabled)
+    }
+
+    /// Reads the current `SO_REUSEPORT` setting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     let _ = socket.reuseport().unwrap();
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn reuseport(&self) -> io::Result<bool> {
+        crate::sys::current::net::reuse_port(self.raw_fd())
+    }
+
+    /// Binds the socket to a local address.
+    ///
+    /// Configure binding-related options such as [`set_reuseaddr`](Self::set_reuseaddr)
+    /// and [`set_reuseport`](Self::set_reuseport) before calling this method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     assert!(socket.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
+        crate::sys::current::net::bind_socket(self.raw_fd(), addr)
+    }
+
+    /// Marks the bound socket as a TCP listener.
+    ///
+    /// `backlog` is passed to the operating system's `listen(2)` after being
+    /// checked to fit in an `i32`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     let listener = socket.listen(128).unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
+        let backlog = i32::try_from(backlog).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "backlog exceeds i32 range")
+        })?;
+        crate::sys::current::net::listen_socket(self.raw_fd(), backlog)?;
+        Ok(TcpListener::from_owned_fd(self.fd))
+    }
+
+    /// Connects the socket to a remote address.
+    ///
+    /// This consumes the builder and returns the same [`TcpStream`] type as
+    /// [`TcpStream::connect`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let listener = runite::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    ///     let addr = listener.local_addr().unwrap();
+    ///     let server = runite::queue_future(async move {
+    ///         let (_stream, _peer) = listener.accept().await.unwrap();
+    ///     });
+    ///
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     let _stream = socket.connect(addr).await.unwrap();
+    ///     server.await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
+    pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
+        crate::sys::current::net::connect(NetOp::Connect {
+            fd: self.raw_fd(),
+            addr,
+        })
+        .await?;
+        Ok(TcpStream::from_owned_fd(self.fd))
+    }
+
+    /// Returns the local socket address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// runite::queue_future(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     assert!(socket.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        crate::sys::current::net::local_addr(self.raw_fd())
+    }
+
+    fn from_owned_fd(fd: OwnedFd) -> Self {
+        Self { fd }
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
 }
 
 impl TcpStream {
