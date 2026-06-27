@@ -13,10 +13,11 @@ lockfile = true
 
 [tools]
 # Track stable Rust 1.x; `mise.lock` pins the exact patch release. runite is
-# stable-Rust clean; edition 2024 requires >= 1.85. Components are declared
-# explicitly so a fresh `mise install` (e.g. CI) gets rustfmt + clippy and the
-# llvm-tools that cargo-llvm-cov needs — mise's rust backend installs a minimal
-# profile otherwise.
+# stable-Rust clean. The MSRV is 1.88 (declared in Cargo.toml): edition 2024
+# needs >= 1.85, and the crate also uses `let`-chains, stabilized in 1.88.
+# Components are declared explicitly so a fresh `mise install` (e.g. CI) gets
+# rustfmt + clippy and the llvm-tools that cargo-llvm-cov needs — mise's rust
+# backend installs a minimal profile otherwise.
 rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 
 # Agent Cop static-analysis tool, installed from GitHub release binaries; the
@@ -64,13 +65,13 @@ run = "cargo bench --workspace --all-features"
 [tasks.coverage]
 description = "Generate an HTML + lcov coverage report with cargo-llvm-cov"
 run = [
-  "cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info",
-  "cargo llvm-cov report --html",
+  "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info",
+  "cargo llvm-cov report --html --ignore-filename-regex '(^|/)(xtask|proc_macros)/'",
 ]
 
 [tasks.coverage-ci]
 description = "Emit lcov coverage for CI consumption"
-run = "cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info"
+run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info"
 
 [tasks.cop]
 description = "Run Agent Cop static-analysis checks"

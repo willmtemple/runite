@@ -83,6 +83,22 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Verify the crate honors its declared `rust-version` (Cargo.toml). Pin the
+      # exact MSRV floor rather than mise's tracking-stable toolchain so a newly
+      # used language/library feature that raises the real MSRV fails here instead
+      # of silently invalidating the published `rust-version`.
+      - name: Install Rust 1.88.0
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Check on MSRV
+        run: cargo +1.88.0 check --workspace --all-features
+
   deny:
     name: Licenses & advisories
     runs-on: ubuntu-latest
@@ -108,7 +124,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
         with:
