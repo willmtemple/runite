@@ -4,13 +4,18 @@
 //! directory, and standard-stream choices before spawning a [`Child`](super::Child).
 //! [`Stdio`] describes how each child stream is connected.
 //!
+//! Spawning delegates to [`std::process::Command`] and is synchronous on the
+//! calling runtime thread. The returned [`Child`](super::Child), if any, becomes
+//! async when waiting for process exit or driving piped stdio handles through
+//! runite's fd-readiness backend.
+//!
 //! # Examples
 //!
 //! ```no_run
 //! # async fn example() -> std::io::Result<()> {
 //! use runite::process::{Command, Stdio};
 //!
-//! let output = Command::new("/bin/echo")
+//! let output = Command::new("echo")
 //!     .arg("hello")
 //!     .stdout(Stdio::piped())
 //!     .output()
@@ -110,6 +115,10 @@ pub(crate) struct CommandSpec {
 /// runtime-aware child handles and async pipes. Configuration methods mutate the
 /// builder and return `&mut Self` so they can be chained before [`spawn`](Self::spawn),
 /// [`status`](Self::status), or [`output`](Self::output).
+///
+/// Calling [`spawn`](Self::spawn) itself is synchronous and delegates to
+/// [`std::process::Command::spawn`]. Async runtime integration begins with
+/// [`Child::wait`](super::Child::wait) and with piped standard streams.
 #[derive(Clone, Debug)]
 pub struct Command {
     spec: CommandSpec,
@@ -324,7 +333,7 @@ impl Command {
     /// # fn example() -> std::io::Result<()> {
     /// use runite::process::{Command, Stdio};
     ///
-    /// let mut child = Command::new("/bin/echo")
+    /// let mut child = Command::new("echo")
     ///     .arg("hello")
     ///     .stdout(Stdio::piped())
     ///     .spawn()?;
@@ -344,7 +353,7 @@ impl Command {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let status = Command::new("/bin/true").status().await?;
+    /// let status = Command::new("true").status().await?;
     /// assert!(status.success());
     /// # Ok(())
     /// # }
@@ -371,7 +380,7 @@ impl Command {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let output = Command::new("/bin/echo").arg("hello").output().await?;
+    /// let output = Command::new("echo").arg("hello").output().await?;
     /// assert_eq!(output, b"hello\n");
     /// # Ok(())
     /// # }

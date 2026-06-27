@@ -5,6 +5,12 @@
 //! the runtime's async I/O traits so subprocess input and output can be composed
 //! with other tasks without blocking the event loop.
 //!
+//! Child pipes are set nonblocking when the process is spawned. Reads and writes
+//! retry the OS call after one-shot fd readiness (`io_uring` poll on Linux
+//! x86_64, kqueue on macOS aarch64); they do not use the blocking thread pool.
+//! Like other runite handles, pipe futures should be polled on their creating
+//! runtime thread.
+//!
 //! # Examples
 //!
 //! ```no_run
@@ -12,7 +18,7 @@
 //! use runite::io::{AsyncReadExt, AsyncWriteExt};
 //! use runite::process::{Command, Stdio};
 //!
-//! let mut child = Command::new("/bin/cat")
+//! let mut child = Command::new("cat")
 //!     .stdin(Stdio::piped())
 //!     .stdout(Stdio::piped())
 //!     .spawn()?;
@@ -71,6 +77,12 @@ impl Pipe {
 /// Created when [`Command::stdin`](super::Command::stdin) is configured with
 /// [`Stdio::piped`](super::Stdio::piped). Closing or dropping this handle closes
 /// the child's stdin pipe and can signal EOF to the child.
+///
+/// `poll_close` drops any pending write state and closes the fd immediately; it
+/// does not flush bytes beyond writes that have already completed. Await
+/// [`write_all`](crate::io::AsyncWriteExt::write_all) before `close` when the
+/// child must receive the whole buffer. EOF is visible to the child only after
+/// completed writes and the close.
 pub struct ChildStdin {
     pipe: Pipe,
     pending_write: Option<PendingWrite>,
@@ -80,7 +92,7 @@ pub struct ChildStdin {
 ///
 /// Created when [`Command::stdout`](super::Command::stdout) is configured with
 /// [`Stdio::piped`](super::Stdio::piped). It implements [`AsyncRead`] for
-/// consuming bytes produced by the child.
+/// consuming bytes produced by the child using nonblocking fd readiness.
 pub struct ChildStdout {
     pipe: Pipe,
     pending_read: Option<PendingRead>,
@@ -90,7 +102,8 @@ pub struct ChildStdout {
 ///
 /// Created when [`Command::stderr`](super::Command::stderr) is configured with
 /// [`Stdio::piped`](super::Stdio::piped). It implements [`AsyncRead`] for
-/// consuming diagnostic bytes produced by the child.
+/// consuming diagnostic bytes produced by the child using nonblocking fd
+/// readiness.
 pub struct ChildStderr {
     pipe: Pipe,
     pending_read: Option<PendingRead>,

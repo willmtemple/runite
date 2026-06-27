@@ -9,8 +9,14 @@
 //! supports `!Send` futures. The Unix backend therefore uses one process-wide
 //! async-signal-safe handler plus a dedicated blocking-pool reader task. The
 //! handler records a pending bit and wakes a self-pipe/eventfd; the reader task
-//! drains that fd and forwards signal notifications to every registered runtime
-//! thread with [`crate::ThreadHandle::queue_macrotask`].
+//! drains that fd and forwards signal notifications as per-thread macrotasks
+//! with [`crate::ThreadHandle::queue_macrotask`].
+//!
+//! This is different from Tokio's default multi-threaded scheduler and
+//! async-std: runite cannot freely move `!Send` signal streams between worker
+//! threads, so delivery fans out to the runtime threads that registered local
+//! streams. Delivery is best-effort. Closed runtime threads are skipped, and a
+//! wake for a live thread can be dropped if its macrotask queue is full.
 //!
 //! # Examples
 //!

@@ -1,22 +1,47 @@
 //! File-descriptor readiness helpers backed by the runtime driver.
 //!
 //! These helpers are useful when integrating custom descriptor types with
-//! `runite` without writing a full async wrapper.
+//! `runite` without writing a full async wrapper. They operate on a borrowed raw
+//! file descriptor: runite does not take ownership of the descriptor, and
+//! `wait_readable` is a one-shot readiness wait rather than a persistent
+//! registration. The public API currently exposes readable readiness; writable
+//! readiness is used internally by runtime adapters such as child pipes.
+//!
+//! Readiness means "try the real I/O operation again." A readable notification
+//! can race with other consumers or report an error/hangup condition, so callers
+//! should keep their descriptor nonblocking and perform the actual `read` in a
+//! `WouldBlock` retry loop.
+//!
+//! runite is event-loop-per-thread. Wait futures should be polled on the runtime
+//! thread that created them; tasks and descriptor registrations do not migrate to
+//! another worker.
+//!
+//! # Platform behavior
+//!
+//! On Linux x86_64, readiness uses one-shot `io_uring` poll operations with
+//! best-effort kernel cancellation when the future is dropped. On macOS aarch64,
+//! readiness is registered with kqueue; cancellation is queued back to the owner
+//! thread with [`crate::ThreadHandle::queue_macrotask`]. If that queue is full or
+//! closed, cancellation completion is best-effort and driver cleanup may be left
+//! to runtime shutdown.
 //!
 //! # Examples
 //!
 //! ```no_run
-//! use std::io::Write;
+//! use std::io::{Read, Write};
 //! use std::os::fd::AsRawFd;
 //! use std::os::unix::net::UnixStream;
 //!
-//! let (reader, mut writer) = UnixStream::pair()?;
+//! let (mut reader, mut writer) = UnixStream::pair()?;
 //! let read_fd = reader.as_raw_fd();
 //!
 //! runite::spawn(async move {
 //!     runite::fd::wait_readable(read_fd)
 //!         .await
 //!         .expect("reader should become readable");
+//!     let mut bytes = [0; 5];
+//!     reader.read_exact(&mut bytes).expect("read should succeed");
+//!     assert_eq!(&bytes, b"ready");
 //! });
 //!
 //! std::thread::spawn(move || {
@@ -32,24 +57,33 @@ use std::os::fd::RawFd;
 
 /// Waits until `fd` becomes readable or reports an error/hangup condition.
 ///
-/// The descriptor must remain open until the returned future completes or is
-/// dropped. On readiness, callers should perform their own read and handle
-/// nonblocking errors according to the descriptor's mode.
+/// The descriptor should remain open and should not be reused for a different
+/// resource while the future is pending. Dropping the future requests
+/// cancellation, but cancellation is best-effort: on macOS it is queued back to
+/// the owner thread and may be dropped if that queue is full, with cleanup left
+/// to runtime shutdown. Avoid assumptions that an immediately reused raw fd is
+/// unrelated to an in-flight or just-cancelled wait.
+///
+/// On readiness, callers must perform their own read and handle nonblocking
+/// errors according to the descriptor's mode.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use std::io::Write;
+/// use std::io::{Read, Write};
 /// use std::os::fd::AsRawFd;
 /// use std::os::unix::net::UnixStream;
 ///
-/// let (reader, mut writer) = UnixStream::pair()?;
+/// let (mut reader, mut writer) = UnixStream::pair()?;
 /// let read_fd = reader.as_raw_fd();
 ///
 /// runite::spawn(async move {
 ///     runite::fd::wait_readable(read_fd)
 ///         .await
 ///         .expect("reader should become readable");
+///     let mut bytes = [0; 5];
+///     reader.read_exact(&mut bytes).expect("read should succeed");
+///     assert_eq!(&bytes, b"ready");
 /// });
 ///
 /// std::thread::spawn(move || {
