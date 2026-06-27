@@ -2,8 +2,11 @@
 //!
 //! Broadcast channels fan out each sent value to every active receiver. They are
 //! useful for event streams where each subscriber needs to observe all messages
-//! sent after it subscribes. The channel uses a bounded ring buffer, so slow
-//! receivers detect missed messages with [`RecvError::Lagged`].
+//! sent after it subscribes. The channel uses a bounded userspace ring buffer:
+//! each receiver gets its own cloned value, and slow receivers report
+//! [`RecvError::Lagged`] when messages are overwritten instead of backpressuring
+//! senders. Async waiters are woken on the runite runtime thread that registered
+//! them.
 //!
 //! # Examples
 //!
@@ -96,8 +99,9 @@ pub fn channel<T: Clone + Send + 'static>(capacity: usize) -> (Sender<T>, Receiv
 /// Sending half of a broadcast channel.
 ///
 /// Cloning a sender creates another producer for the same bounded ring buffer.
-/// Values are delivered to every active [`Receiver`], subject to lag handling
-/// when a receiver falls behind the channel capacity.
+/// Values are delivered by cloning to every active [`Receiver`], subject to lag
+/// handling when a receiver falls behind the channel capacity. Senders do not
+/// wait for slow receivers.
 pub struct Sender<T: Clone + Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
@@ -271,6 +275,8 @@ impl<T: Clone + Send + 'static> Sender<T> {
     /// Sends a value to all active receivers.
     ///
     /// Returns the number of receivers that were active when the value was sent.
+    /// The value is stored once in the bounded ring and cloned for receivers as
+    /// they observe it; sending never applies backpressure for slow receivers.
     ///
     /// # Examples
     ///

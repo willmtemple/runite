@@ -1,7 +1,9 @@
 //! Hyper runtime trait implementations for [`TcpStream`].
 //!
-//! Gated behind the `hyper` Cargo feature so consumers that do not need the HTTP transport
-//! integration are not forced to pull in the `hyper` dependency.
+//! Gated behind the `hyper` Cargo feature so consumers that do not need the HTTP
+//! transport integration are not forced to pull in the `hyper` dependency. The
+//! implementation inherits [`TcpStream`]'s current-thread, effectively `!Send`
+//! transport model; it is a Hyper I/O adapter, not a Tokio socket or executor.
 
 use core::pin::Pin;
 use core::task::{Context, Poll};

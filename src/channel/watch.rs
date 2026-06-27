@@ -3,6 +3,9 @@
 //! A watch channel stores the latest value and notifies receivers when a newer
 //! version is published. It is best for sharing state snapshots, configuration,
 //! or status values where receivers do not need every intermediate update.
+//! Waiters are tied to the runite runtime thread that first polls them; multiple
+//! sends coalesce, so a receiver that waits once observes that the version
+//! changed and then borrows the latest value.
 //!
 //! # Examples
 //!
@@ -72,7 +75,8 @@ pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
 ///
 /// Cloning a sender creates another producer for the same latest-value slot.
 /// Sending replaces the stored value and wakes receivers that are waiting for a
-/// newer version.
+/// newer version on their owning runtime threads. Intermediate values coalesce:
+/// receivers observe that the version changed, then borrow the latest value.
 pub struct Sender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
@@ -240,7 +244,8 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// This notifies even if the closure leaves the value unchanged; use
     /// [`send_if_modified`](Self::send_if_modified) to make notification
-    /// conditional.
+    /// conditional. Unlike [`send`](Self::send), this method still mutates the
+    /// stored value and does not return [`SendError`] when no receivers remain.
     ///
     /// # Examples
     ///
@@ -263,6 +268,10 @@ impl<T: Send + 'static> Sender<T> {
     }
 
     /// Mutates the watched value and notifies receivers if `f` returns `true`.
+    ///
+    /// Unlike [`send`](Self::send), this method does not return [`SendError`] if
+    /// no receivers remain. It returns whether `f` reported a modification; when
+    /// it returns `true`, the version is advanced even with zero receivers.
     ///
     /// # Examples
     ///
@@ -369,6 +378,10 @@ impl<T: Send + 'static> Sender<T> {
 
 impl<T: Send + 'static> Receiver<T> {
     /// Waits until the watched value changes.
+    ///
+    /// Multiple sends before this receiver borrows and updates coalesce into one
+    /// observed version change; use [`borrow_and_update`](Self::borrow_and_update)
+    /// to mark the latest value as seen.
     ///
     /// Returns [`RecvError`] if all senders are dropped before a newer version
     /// becomes available.

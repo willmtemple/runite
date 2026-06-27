@@ -5,6 +5,11 @@
 //! are expected, and vice versa, easing interop with the broader `futures`
 //! ecosystem.
 //!
+//! The adapters only forward poll methods. They do not add buffering, make an
+//! object `Send`, or detach it from runite's event-loop ownership. A
+//! `futures-io` consumer must still poll a wrapped runite transport on the
+//! runtime thread that owns that transport.
+//!
 //! # Examples
 //!
 //! ```
@@ -52,7 +57,8 @@ use super::{AsyncRead, AsyncWrite};
 /// This type is available with the `futures-compat` feature. It wraps a value
 /// that implements runite's [`AsyncRead`] and/or [`AsyncWrite`] and exposes the
 /// corresponding `futures_io` traits for integration with libraries that accept
-/// those traits.
+/// those traits. The adapter does not make the wrapped value executor-
+/// independent or `Send`; it only exposes the alternate trait methods.
 ///
 /// # Examples
 ///
@@ -123,7 +129,9 @@ impl<T: AsyncWrite + Unpin> futures_io::AsyncWrite for Compat<T> {
 ///
 /// This type is available with the `futures-compat` feature. It wraps a value
 /// that implements `futures_io::AsyncRead` and/or `futures_io::AsyncWrite` and
-/// exposes runite's [`AsyncRead`] and [`AsyncWrite`] traits.
+/// exposes runite's [`AsyncRead`] and [`AsyncWrite`] traits. The wrapped value
+/// is still polled on the current runite task and is not buffered or made
+/// `Send` by the adapter.
 ///
 /// # Examples
 ///

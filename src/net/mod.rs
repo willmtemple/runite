@@ -6,6 +6,20 @@
 //! block the caller. Unix domain sockets are available from [`unix`] on Unix
 //! platforms and are re-exported from this module.
 //!
+//! # Network model
+//!
+//! Networking operations are tied to the current runite event loop. `TcpStream`,
+//! split halves, UDP sockets, and their pending I/O futures are effectively
+//! current-thread values; drive them on the runtime thread that owns the
+//! operation, and move work to another thread by sending a macrotask to that
+//! thread rather than by migrating the socket future. Linux x86_64 uses
+//! completion-based `io_uring` operations, while macOS aarch64 waits for
+//! readiness with `kqueue` and then performs nonblocking socket calls.
+//!
+//! This differs from Tokio's default scheduler and async-std: runite has no
+//! work-stealing socket executor, and split TCP halves are intended for separate
+//! runite tasks on the same runtime thread, not cross-thread ownership.
+//!
 //! # Examples
 //!
 //! A TCP listener and client can run on the same local runtime loop:
@@ -86,9 +100,18 @@ type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 /// Async TCP stream connected to a peer.
 ///
 /// `TcpStream` owns a connected stream socket and provides async byte-oriented
-/// reads, writes, shutdown, socket option access, and owned split halves. With
-/// the `hyper` feature enabled, it also implements Hyper's runtime I/O traits
-/// so it can be used directly as an HTTP transport.
+/// reads, writes, shutdown, socket option access, and owned split halves. Reads
+/// and writes may complete partially; use [`read_exact`](Self::read_exact) or
+/// [`write_all`](Self::write_all) when a protocol needs a full buffer.
+///
+/// Pending operations are stored in the stream and are tied to the current
+/// runite event loop. Dropping a pending read, write, timeout, or shutdown
+/// future cancels interest in that operation but cannot roll back bytes already
+/// transferred by the operating system. The type is effectively `!Send`, and
+/// should be driven on its owning runtime thread.
+///
+/// With the `hyper` feature enabled, it also implements Hyper's runtime I/O
+/// traits so it can be used directly as an HTTP transport.
 pub struct TcpStream {
     inner: Arc<TcpStreamInner>,
     pending_read: Option<PendingRead>,
@@ -112,6 +135,12 @@ pub struct TcpListener {
 /// and `SO_REUSEPORT` can be configured before calling [`bind`](Self::bind).
 /// Socket options that affect binding should be set before `bind`; changing
 /// them after binding is platform-specific and may not affect the bound socket.
+/// `SO_REUSEPORT` is platform support dependent: runite exposes the OS error if
+/// the option is unavailable or invalid for the socket. To bind multiple
+/// listeners to the same address, every participating socket must enable
+/// `SO_REUSEPORT` before binding. This is useful for per-core accept loops or
+/// other load-distribution designs where the kernel spreads incoming
+/// connections across multiple listener sockets.
 ///
 /// # Examples
 ///
@@ -219,17 +248,33 @@ impl TcpSocket {
     /// Enables or disables `SO_REUSEPORT`.
     ///
     /// Set this option before [`bind`](Self::bind) on every socket that should
-    /// share the same local address.
+    /// share the same local address. If the platform does not support the option
+    /// for TCP sockets, the OS error is returned.
     ///
     /// # Examples
     ///
-    /// ```
-    /// runite::spawn(async {
-    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
-    ///     socket.set_reuseport(true).unwrap();
-    ///     assert!(socket.reuseport().unwrap());
-    /// });
-    /// runite::run();
+    /// Multiple listener sockets can share one local address when all of them opt
+    /// in before binding. The kernel can then distribute accepts across
+    /// per-thread or per-core listener loops.
+    ///
+    /// ```no_run
+    /// use runite::net::TcpSocket;
+    ///
+    /// let first = TcpSocket::new_v4().unwrap();
+    /// first.set_reuseaddr(true).unwrap();
+    /// first.set_reuseport(true).unwrap();
+    /// first.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    /// let addr = first.local_addr().unwrap();
+    /// let first_listener = first.listen(128).unwrap();
+    ///
+    /// let second = TcpSocket::new_v4().unwrap();
+    /// second.set_reuseaddr(true).unwrap();
+    /// second.set_reuseport(true).unwrap();
+    /// second.bind(addr).unwrap();
+    /// let second_listener = second.listen(128).unwrap();
+    ///
+    /// assert_eq!(first_listener.local_addr().unwrap(), addr);
+    /// assert_eq!(second_listener.local_addr().unwrap(), addr);
     /// ```
     pub fn set_reuseport(&self, enabled: bool) -> io::Result<()> {
         crate::sys::current::net::set_reuse_port(self.raw_fd(), enabled)
@@ -388,7 +433,8 @@ impl TcpStream {
 
     /// Connects to `addr`, failing if the timeout elapses first.
     ///
-    /// A zero timeout is rejected with [`io::ErrorKind::InvalidInput`].
+    /// A zero timeout is rejected with [`io::ErrorKind::InvalidInput`]. If the
+    /// timeout expires, the error kind is [`io::ErrorKind::TimedOut`].
     pub async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<Self> {
         validate_timeout(timeout)?;
         crate::sys::current::net::connect_stream_timeout(*addr, timeout)
@@ -398,8 +444,10 @@ impl TcpStream {
 
     /// Reads bytes from the stream.
     ///
-    /// Returns the number of bytes copied into `buf`. A return value of `0`
-    /// indicates EOF when `buf` is not empty.
+    /// Returns the number of bytes copied into `buf`. This may be fewer bytes
+    /// than requested. A return value of `0` indicates EOF when `buf` is not
+    /// empty. If a configured read timeout expires, the error kind is
+    /// [`io::ErrorKind::TimedOut`].
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let data = match self.read_timeout_value() {
             Some(timeout) => {
@@ -436,7 +484,8 @@ impl TcpStream {
 
     /// Writes bytes to the stream.
     ///
-    /// The operation may write fewer bytes than `buf.len()`; use
+    /// The operation may write fewer bytes than `buf.len()`. If a configured
+    /// write timeout expires, the error kind is [`io::ErrorKind::TimedOut`]; use
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -483,7 +532,8 @@ impl TcpStream {
     /// Splits this stream into independently owned read and write halves.
     ///
     /// The halves share the underlying socket via reference counting, so they
-    /// can be moved into separate tasks to read and write concurrently. Use
+    /// can be moved into separate tasks on the same runite runtime thread to read
+    /// and write concurrently. They are not a cross-thread split. Use
     /// [`OwnedReadHalf`]/[`OwnedWriteHalf`] and recombine them later with
     /// [`TcpStream::reunite`].
     ///
@@ -583,28 +633,36 @@ impl TcpStream {
         crate::sys::current::net::set_ttl(self.raw_fd(), ttl)
     }
 
-    /// Returns the read timeout used by async read operations on this handle.
+    /// Returns the read timeout used by async read operations on this stream.
+    ///
+    /// Split halves share this setting because they share the same stream state.
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
         Ok(self.read_timeout_value())
     }
 
-    /// Sets the read timeout used by async read operations on this handle.
+    /// Sets the read timeout used by async read operations on this stream.
     ///
-    /// Passing `Some(Duration::ZERO)` is rejected.
+    /// Passing `Some(Duration::ZERO)` is rejected. If the timeout expires, read
+    /// operations return [`io::ErrorKind::TimedOut`]. Split halves share this
+    /// setting because they share the same stream state.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         validate_optional_timeout(timeout)?;
         self.inner.timeouts.lock().unwrap().read = timeout;
         Ok(())
     }
 
-    /// Returns the write timeout used by async write operations on this handle.
+    /// Returns the write timeout used by async write operations on this stream.
+    ///
+    /// Split halves share this setting because they share the same stream state.
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         Ok(self.write_timeout_value())
     }
 
-    /// Sets the write timeout used by async write operations on this handle.
+    /// Sets the write timeout used by async write operations on this stream.
     ///
-    /// Passing `Some(Duration::ZERO)` is rejected.
+    /// Passing `Some(Duration::ZERO)` is rejected. If the timeout expires, write
+    /// operations return [`io::ErrorKind::TimedOut`]. Split halves share this
+    /// setting because they share the same stream state.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         validate_optional_timeout(timeout)?;
         self.inner.timeouts.lock().unwrap().write = timeout;
@@ -754,8 +812,9 @@ impl AsyncWrite for TcpStream {
 /// Owned read half of a [`TcpStream`].
 ///
 /// Created by [`TcpStream::into_split`], this half keeps the socket alive and
-/// implements [`AsyncRead`] so it can be moved to a task dedicated to receiving
-/// bytes. Recombine it with the matching [`OwnedWriteHalf`] through
+/// implements [`AsyncRead`] so it can be moved to another runite task on the
+/// same runtime thread dedicated to receiving bytes. Recombine it with the
+/// matching [`OwnedWriteHalf`] through
 /// [`TcpStream::reunite`] when exclusive stream ownership is needed again.
 pub struct OwnedReadHalf {
     stream: TcpStream,
@@ -764,8 +823,9 @@ pub struct OwnedReadHalf {
 /// Owned write half of a [`TcpStream`].
 ///
 /// Created by [`TcpStream::into_split`], this half keeps the socket alive and
-/// implements [`AsyncWrite`] so it can be moved to a task dedicated to sending
-/// bytes. Use [`shutdown`](Self::shutdown) to half-close the write direction
+/// implements [`AsyncWrite`] so it can be moved to another runite task on the
+/// same runtime thread dedicated to sending bytes. Use [`shutdown`](Self::shutdown)
+/// to half-close the write direction with [`std::net::Shutdown::Write`]
 /// without dropping the matching [`OwnedReadHalf`].
 pub struct OwnedWriteHalf {
     stream: TcpStream,
@@ -1083,7 +1143,11 @@ impl UdpSocket {
 
     /// Receives a datagram from the connected peer.
     ///
-    /// The socket must first be connected with [`connect`](Self::connect).
+    /// The socket must first be connected with [`connect`](Self::connect). If
+    /// `buf` is smaller than the datagram, the returned length is capped at
+    /// `buf.len()` and the operating system discards the excess bytes. If a
+    /// configured read timeout expires, the error kind is
+    /// [`io::ErrorKind::TimedOut`].
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         let data = match self.read_timeout_value() {
             Some(timeout) => {
@@ -1104,6 +1168,12 @@ impl UdpSocket {
     }
 
     /// Peeks at the next datagram from the connected peer without consuming it.
+    ///
+    /// If `buf` is smaller than the datagram, the returned view is truncated to
+    /// `buf.len()`. Because this is a peek, the datagram remains queued; a later
+    /// non-peek receive with a too-small buffer consumes it and discards the
+    /// excess bytes. If a configured read timeout expires, the error kind is
+    /// [`io::ErrorKind::TimedOut`].
     pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         let data = match self.read_timeout_value() {
             Some(timeout) => {
@@ -1193,6 +1263,11 @@ impl UdpSocket {
     }
 
     /// Receives a datagram and returns the sender address.
+    ///
+    /// If `buf` is smaller than the datagram, the returned length is capped at
+    /// `buf.len()` and the operating system discards the excess bytes. If a
+    /// configured read timeout expires, the error kind is
+    /// [`io::ErrorKind::TimedOut`].
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let datagram = match self.read_timeout_value() {
             Some(timeout) => {
@@ -1214,6 +1289,12 @@ impl UdpSocket {
     }
 
     /// Peeks at the next datagram and returns the sender address without consuming it.
+    ///
+    /// If `buf` is smaller than the datagram, the returned view is truncated to
+    /// `buf.len()`. Because this is a peek, the datagram remains queued; a later
+    /// non-peek receive with a too-small buffer consumes it and discards the
+    /// excess bytes. If a configured read timeout expires, the error kind is
+    /// [`io::ErrorKind::TimedOut`].
     pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let datagram = match self.read_timeout_value() {
             Some(timeout) => {
@@ -1277,13 +1358,18 @@ impl UdpSocket {
     }
 
     /// Returns the read timeout used by async receive operations on this handle.
+    ///
+    /// A socket created with [`try_clone`](Self::try_clone) has independent
+    /// timeout settings.
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
         Ok(self.read_timeout_value())
     }
 
     /// Sets the read timeout used by async receive operations on this handle.
     ///
-    /// Passing `Some(Duration::ZERO)` is rejected.
+    /// Passing `Some(Duration::ZERO)` is rejected. If the timeout expires,
+    /// receive operations return [`io::ErrorKind::TimedOut`]. A socket created
+    /// with [`try_clone`](Self::try_clone) has independent timeout settings.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         validate_optional_timeout(timeout)?;
         self.inner.timeouts.lock().unwrap().read = timeout;
@@ -1291,13 +1377,18 @@ impl UdpSocket {
     }
 
     /// Returns the write timeout used by async send operations on this handle.
+    ///
+    /// A socket created with [`try_clone`](Self::try_clone) has independent
+    /// timeout settings.
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         Ok(self.write_timeout_value())
     }
 
     /// Sets the write timeout used by async send operations on this handle.
     ///
-    /// Passing `Some(Duration::ZERO)` is rejected.
+    /// Passing `Some(Duration::ZERO)` is rejected. If the timeout expires, send
+    /// operations return [`io::ErrorKind::TimedOut`]. A socket created with
+    /// [`try_clone`](Self::try_clone) has independent timeout settings.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         validate_optional_timeout(timeout)?;
         self.inner.timeouts.lock().unwrap().write = timeout;

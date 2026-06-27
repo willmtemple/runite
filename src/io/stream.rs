@@ -3,6 +3,9 @@
 //! This module defines runite's lightweight [`Stream`] abstraction and
 //! [`StreamExt`] combinators. Streams yield values over time on the current
 //! thread and are used by APIs such as channel receivers and line-oriented I/O.
+//! Combinators are sequential and current-thread: for example,
+//! [`StreamExt::for_each`] does not poll the next item until the future returned
+//! for the previous item has completed.
 //!
 //! # Examples
 //!
@@ -112,7 +115,8 @@ pub trait Stream {
 /// Extension methods for [`Stream`].
 ///
 /// This trait is implemented for all streams and provides futures and stream
-/// combinators similar to those in the broader Rust async ecosystem.
+/// combinators similar to those in the broader Rust async ecosystem. The
+/// combinators run on the polling task and do not introduce parallelism.
 ///
 /// # Examples
 ///

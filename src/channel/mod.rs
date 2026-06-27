@@ -1,9 +1,18 @@
 //! Async channels for task and thread communication.
 //!
-//! The channel types in this module are userspace synchronization primitives. They do not carry
-//! messages through the kernel; instead, channel state lives in shared Rust data structures and
-//! the runtime uses `io_uring` `MSG_RING` notifications only to wake the owning runtime thread
-//! when an async waiter becomes ready.
+//! The channel types in this module are userspace synchronization primitives.
+//! They do not carry messages through the kernel; channel state lives in shared
+//! Rust data structures, and kernel/runtime integration is only used to wake the
+//! task that is waiting for readiness. If a sender completes a waiter on the
+//! waiter's owning runtime thread, runite schedules a microtask. If completion
+//! comes from another thread, runite queues a macrotask onto the owner thread
+//! using the platform-specific remote wake path: `io_uring` `MSG_RING` on Linux
+//! x86_64, and a pipe/eventfd-equivalent wakeup with `kqueue` on macOS aarch64.
+//!
+//! Message values are `T: Send` so producers can be used across threads, but
+//! async waits are registered with a specific runtime thread and must be polled
+//! from a runite event loop. Channels therefore provide communication between
+//! tasks and threads without becoming a work-stealing scheduler.
 //!
 //! Choose a channel by the delivery pattern you need:
 //!

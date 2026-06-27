@@ -2,7 +2,9 @@
 //!
 //! MPSC channels carry a sequence of messages from one or more senders to one
 //! receiver. Use [`channel`] for bounded queues with backpressure or
-//! [`unbounded_channel`] when producers must never await capacity.
+//! [`unbounded_channel`] when producers must never await capacity. State is kept
+//! in userspace; async waiters are completed on the runtime thread that first
+//! polled them.
 //!
 //! # Examples
 //!
@@ -117,7 +119,10 @@ pub struct UnboundedSender<T: Send + 'static> {
 /// Single consumer for both bounded and unbounded MPSC channels.
 ///
 /// The receiver drains messages in FIFO order and returns `None` from
-/// [`recv`](Self::recv) once all senders are gone and the queue is empty.
+/// [`recv`](Self::recv) once all senders are gone and the queue is empty. The
+/// [`Stream`] implementation has the same cancellation behavior as `recv`: a
+/// value already delivered into the runtime completion can be lost if the stream
+/// future is dropped before it yields readiness.
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     stream_wait: Option<CompletionFuture<Option<T>>>,
@@ -164,8 +169,8 @@ pub enum TryRecvError {
 /// A wakeup deferred until the channel mutex has been released.
 ///
 /// Waking a waiter while holding the channel lock can be expensive (cross-thread
-/// wakeups go through the io_uring ring notification path) and risks priority
-/// inversion.  All `State` methods collect these instead of calling
+/// wakeups go through the runtime's remote macrotask path) and risks priority
+/// inversion. All `State` methods collect these instead of calling
 /// `CompletionHandle::complete` directly; the caller fires them after dropping
 /// the `MutexGuard`.
 enum PendingCompletion<T: Send + 'static> {
@@ -339,7 +344,13 @@ impl<T: Send + 'static> Clone for UnboundedSender<T> {
 impl<T: Send + 'static> Sender<T> {
     /// Waits until the message can be queued.
     ///
-    /// When the bounded channel is full, this future waits until the receiver frees capacity.
+    /// When the bounded channel is full, this future waits until the receiver
+    /// frees capacity. Bounded send waiters are served in FIFO order, so
+    /// backpressure is released in the order pending senders registered.
+    ///
+    /// Cancellation is not value-preserving while pending: if this future is
+    /// dropped after its message has been moved into the bounded wait queue, the
+    /// waiter is removed and the message is dropped rather than returned.
     ///
     /// # Examples
     ///
@@ -533,7 +544,13 @@ impl<T: Send + 'static> UnboundedSender<T> {
 impl<T: Send + 'static> Receiver<T> {
     /// Waits for the next message.
     ///
-    /// Returns `None` when the channel is closed and all buffered messages have been drained.
+    /// Returns `None` when the channel is closed and all buffered messages have
+    /// been drained. Receive waiters are single-consumer and FIFO with respect
+    /// to queued messages and pending bounded senders.
+    ///
+    /// Cancellation is not guaranteed to preserve a delivered value: once a
+    /// sender completes the receive waiter's runtime future, dropping `recv`
+    /// before it is polled ready drops that value.
     ///
     /// # Examples
     ///
