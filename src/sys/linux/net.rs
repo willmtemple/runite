@@ -514,6 +514,32 @@ pub async fn bind_datagram(addr: SocketAddr) -> io::Result<OwnedFd> {
     Ok(socket)
 }
 
+pub fn tcp_socket_v4() -> io::Result<OwnedFd> {
+    socket_sync(
+        libc::AF_INET,
+        libc::SOCK_STREAM,
+        0,
+        (libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32,
+    )
+}
+
+pub fn tcp_socket_v6() -> io::Result<OwnedFd> {
+    socket_sync(
+        libc::AF_INET6,
+        libc::SOCK_STREAM,
+        0,
+        (libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32,
+    )
+}
+
+pub fn bind_socket(fd: RawFd, addr: SocketAddr) -> io::Result<()> {
+    bind_sync(fd, RawSocketAddr::from_socket_addr(addr))
+}
+
+pub fn listen_socket(fd: RawFd, backlog: i32) -> io::Result<()> {
+    listen_sync(fd, backlog)
+}
+
 pub async fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
     // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so run it inline rather than on the
     // blocking pool.
@@ -730,6 +756,22 @@ pub fn broadcast(fd: RawFd) -> io::Result<bool> {
     getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_BROADCAST).map(|value| value != 0)
 }
 
+pub fn reuse_addr(fd: RawFd) -> io::Result<bool> {
+    getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map(|value| value != 0)
+}
+
+pub fn set_reuse_addr(fd: RawFd, enabled: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, enabled.into())
+}
+
+pub fn reuse_port(fd: RawFd) -> io::Result<bool> {
+    getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).map(|value| value != 0)
+}
+
+pub fn set_reuse_port(fd: RawFd, enabled: bool) -> io::Result<()> {
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, enabled.into())
+}
+
 pub fn set_broadcast(fd: RawFd, enabled: bool) -> io::Result<()> {
     setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_BROADCAST, enabled.into())
 }
@@ -909,10 +951,6 @@ fn socket_addr_with(
     // zeroed sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
     socket_addr_from_storage(&storage, len)
-}
-
-fn set_reuse_addr(fd: RawFd, enabled: bool) -> io::Result<()> {
-    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, enabled.into())
 }
 
 fn socket_family(fd: RawFd) -> io::Result<i32> {
