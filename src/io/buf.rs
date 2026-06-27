@@ -483,6 +483,7 @@ mod tests {
         data: Rc<RefCell<Vec<u8>>>,
         writes: Rc<RefCell<usize>>,
         closes: Rc<RefCell<usize>>,
+        max_write: usize,
     }
 
     impl AsyncWrite for RecordingWriter {
@@ -492,8 +493,9 @@ mod tests {
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             *self.writes.borrow_mut() += 1;
-            self.data.borrow_mut().extend_from_slice(buf);
-            Poll::Ready(Ok(buf.len()))
+            let written = buf.len().min(self.max_write);
+            self.data.borrow_mut().extend_from_slice(&buf[..written]);
+            Poll::Ready(Ok(written))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -613,6 +615,7 @@ mod tests {
                     data,
                     writes,
                     closes: Rc::new(RefCell::new(0)),
+                    max_write: usize::MAX,
                 };
                 let mut writer = BufWriter::with_capacity(8, inner);
                 writer.write_all(b"ab").await.unwrap();
@@ -641,6 +644,7 @@ mod tests {
                     data,
                     writes,
                     closes,
+                    max_write: usize::MAX,
                 };
                 let mut writer = BufWriter::with_capacity(8, inner);
                 writer.write_all(b"close me").await.unwrap();
@@ -652,5 +656,107 @@ mod tests {
         assert_eq!(&*data.borrow(), b"close me");
         assert_eq!(*writes.borrow(), 1);
         assert_eq!(*closes.borrow(), 1);
+    }
+
+    #[test]
+    fn buf_reader_read_line_rejects_invalid_utf8() {
+        let observed = Rc::new(RefCell::new(None::<io::ErrorKind>));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                let inner = ChunkedReader {
+                    data: b"bad \xff\n".to_vec(),
+                    pos: 0,
+                    max_read: 8,
+                    reads: Rc::new(RefCell::new(0)),
+                };
+                let mut reader = BufReader::with_capacity(8, inner);
+                let mut line = String::new();
+                let error = reader
+                    .read_line(&mut line)
+                    .await
+                    .expect_err("invalid UTF-8 should fail");
+                *observed.borrow_mut() = Some(error.kind());
+            }
+        });
+
+        run();
+        assert_eq!(*observed.borrow(), Some(io::ErrorKind::InvalidData));
+    }
+
+    #[test]
+    fn buf_reader_consume_past_buffer_exhausts_available_bytes() {
+        let observed = Rc::new(RefCell::new(None::<Vec<u8>>));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                let inner = ChunkedReader {
+                    data: b"abcd".to_vec(),
+                    pos: 0,
+                    max_read: 4,
+                    reads: Rc::new(RefCell::new(0)),
+                };
+                let mut reader = BufReader::with_capacity(4, inner);
+                assert_eq!(reader.fill_buf().await.unwrap(), b"abcd");
+                reader.consume(99);
+                observed.borrow_mut().replace(reader.buffer().to_vec());
+            }
+        });
+
+        run();
+        assert_eq!(observed.borrow().as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn buf_writer_flush_handles_partial_inner_writes() {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        let writes = Rc::new(RefCell::new(0));
+
+        spawn({
+            let data = Rc::clone(&data);
+            let writes = Rc::clone(&writes);
+            async move {
+                let inner = RecordingWriter {
+                    data,
+                    writes,
+                    closes: Rc::new(RefCell::new(0)),
+                    max_write: 2,
+                };
+                let mut writer = BufWriter::with_capacity(8, inner);
+                writer.write_all(b"abcdef").await.unwrap();
+                writer.flush().await.unwrap();
+            }
+        });
+
+        run();
+        assert_eq!(&*data.borrow(), b"abcdef");
+        assert_eq!(*writes.borrow(), 3);
+    }
+
+    #[test]
+    fn buf_writer_zero_capacity_delegates_write_all_to_inner() {
+        let data = Rc::new(RefCell::new(Vec::new()));
+        let writes = Rc::new(RefCell::new(0));
+
+        spawn({
+            let data = Rc::clone(&data);
+            let writes = Rc::clone(&writes);
+            async move {
+                let inner = RecordingWriter {
+                    data,
+                    writes,
+                    closes: Rc::new(RefCell::new(0)),
+                    max_write: 2,
+                };
+                let mut writer = BufWriter::with_capacity(0, inner);
+                writer.write_all(b"abcde").await.unwrap();
+            }
+        });
+
+        run();
+        assert_eq!(&*data.borrow(), b"abcde");
+        assert_eq!(*writes.borrow(), 3);
     }
 }
