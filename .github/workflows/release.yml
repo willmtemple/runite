@@ -26,9 +26,10 @@ jobs:
             echo "Tag $tag does not match crate version $crate" >&2
             exit 1
           fi
-      # The proc-macro crate must be published first because runite depends on it.
-      # --no-verify on the umbrella crate avoids a chicken-and-egg failure while the
-      # just-published proc-macro crate propagates through the registry index.
+      # The proc-macro crate must be published first because runite depends on it
+      # by path + version. After it lands we wait for the registry index to
+      # propagate so the umbrella crate's verify build can resolve the just-
+      # published dependency from crates.io.
       - name: Publish runite-proc-macros
         run: cargo publish -p runite-proc-macros
         env:
