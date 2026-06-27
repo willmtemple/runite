@@ -4,7 +4,7 @@
 mod common;
 
 use common::block_on;
-use runite::net::{TcpListener, TcpStream, UdpSocket};
+use runite::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use std::net::Shutdown;
 
 #[test]
@@ -72,6 +72,75 @@ fn tcp_large_transfer_in_chunks() {
 
         let received = server.await.expect("server task should not be aborted");
         assert_eq!(received, expected);
+    });
+}
+
+#[test]
+fn tcp_socket_accept_connect_smoke() {
+    block_on(|| async {
+        let socket = TcpSocket::new_v4().expect("create socket");
+        socket.set_reuseaddr(true).expect("set reuseaddr");
+        assert!(socket.reuseaddr().expect("read reuseaddr"));
+        socket
+            .bind("127.0.0.1:0".parse().expect("parse bind addr"))
+            .expect("bind socket");
+        let listener = socket.listen(128).expect("listen socket");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        let server = runite::queue_future(async move {
+            let (mut stream, _peer) = listener.accept().await.expect("accept connection");
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.expect("server read");
+            stream.write_all(b"pong").await.expect("server write");
+        });
+
+        let client_socket = TcpSocket::new_v4().expect("create client socket");
+        let mut client = client_socket.connect(addr).await.expect("client connect");
+        client.write_all(b"ping").await.expect("client write");
+        let mut got = [0u8; 4];
+        client.read_exact(&mut got).await.expect("client read");
+        assert_eq!(&got, b"pong");
+
+        server.await.expect("server task should not be aborted");
+    });
+}
+
+#[test]
+fn tcp_socket_reuseport_allows_two_listeners_on_same_port() {
+    block_on(|| async {
+        let first = TcpSocket::new_v4().expect("create first socket");
+        first.set_reuseaddr(true).expect("first reuseaddr");
+        first.set_reuseport(true).expect("first reuseport");
+        assert!(first.reuseport().expect("first read reuseport"));
+        first
+            .bind("127.0.0.1:0".parse().expect("parse first bind addr"))
+            .expect("bind first socket");
+        let addr = first.local_addr().expect("first local addr");
+
+        let second = TcpSocket::new_v4().expect("create second socket");
+        second.set_reuseaddr(true).expect("second reuseaddr");
+        second.set_reuseport(true).expect("second reuseport");
+        assert!(second.reuseport().expect("second read reuseport"));
+        second
+            .bind(addr)
+            .expect("bind second socket to shared port");
+
+        let first_listener = first.listen(128).expect("listen first socket");
+        let second_listener = second.listen(128).expect("listen second socket");
+        assert_eq!(
+            first_listener.local_addr().expect("first listener addr"),
+            addr
+        );
+        assert_eq!(
+            second_listener.local_addr().expect("second listener addr"),
+            addr
+        );
+
+        let client_socket = TcpSocket::new_v4().expect("create client socket");
+        let _client = client_socket
+            .connect(addr)
+            .await
+            .expect("connect shared port");
     });
 }
 
