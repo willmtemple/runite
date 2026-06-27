@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TcpStream::reunite`; `ReuniteError` on mismatch) so reads and writes can run in separate tasks.
 - `TcpListener::incoming` and `UnixListener::incoming`, returning a `Stream` of inbound
   connections.
+- `sync::RwLock<T>`: an async reader-writer lock with `RwLockReadGuard`/`RwLockWriteGuard`,
+  `read`/`write`/`try_read`/`try_write`, and FIFO-fair wakeups (queued waiters block the
+  fast path), matching the single-threaded waiter model of the other `sync` primitives.
+- `io::copy` and `io::copy_bidirectional` for streaming between any `AsyncRead`/`AsyncWrite`,
+  with write-half shutdown propagated on EOF in the bidirectional case.
+- Awaitable `time::interval(period) -> Interval` with `tick().await -> Instant` and
+  `MissedTickBehavior` (`Burst`/`Delay`/`Skip`), complementing the callback-style
+  `time::set_interval`.
+- `net::TcpSocket`: a configurable socket builder exposing `SO_REUSEADDR`/`SO_REUSEPORT`
+  (set before `bind`), enabling per-core `SO_REUSEPORT` accept loops.
+- `task::JoinSet<T>`: a collection of spawned local tasks with `join_next().await`,
+  `abort_all`, and `detach_all`; dropping the set aborts its still-running tasks.
 
 ### Changed
 
