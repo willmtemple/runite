@@ -10,7 +10,7 @@
 //! # async fn example() -> std::io::Result<()> {
 //! use runite::process::Command;
 //!
-//! let mut child = Command::new("/bin/true").spawn()?;
+//! let mut child = Command::new("true").spawn()?;
 //! assert!(child.id().is_some());
 //! assert!(child.wait().await?.success());
 //! # Ok(())
@@ -25,8 +25,9 @@ use super::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
 ///
 /// A `Child` owns the operating-system process handle and any async standard
 /// stream pipes requested through [`Command`](super::Command). Drop closes the
-/// Rust-side handle but does not wait for the process; call [`wait`](Self::wait)
-/// to reap it.
+/// Rust-side handle but does not wait for the process or terminate it. The OS
+/// child may keep running, and on Unix a completed child may remain unreaped
+/// until some handle waits for it. Call [`wait`](Self::wait) to reap it.
 pub struct Child {
     inner: crate::sys::current::process::Child,
     /// Handle to child stdin when configured with [`super::Stdio::piped`].
@@ -61,7 +62,7 @@ impl Child {
     /// # fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let child = Command::new("/bin/sleep").arg("1").spawn()?;
+    /// let child = Command::new("sleep").arg("1").spawn()?;
     /// assert!(child.id().is_some());
     /// # Ok(())
     /// # }
@@ -80,7 +81,7 @@ impl Child {
     /// # fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let mut child = Command::new("/bin/true").spawn()?;
+    /// let mut child = Command::new("true").spawn()?;
     /// let _maybe_status = child.try_wait()?;
     /// # Ok(())
     /// # }
@@ -93,13 +94,17 @@ impl Child {
 
     /// Waits asynchronously for the child to exit.
     ///
+    /// Dropping the wait future cancels only that wait operation. It does not
+    /// kill the child and does not reap an already-exited child; call `wait`
+    /// again or use [`try_wait`](Self::try_wait) to collect the status.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let mut child = Command::new("/bin/true").spawn()?;
+    /// let mut child = Command::new("true").spawn()?;
     /// let status = child.wait().await?;
     /// assert!(status.success());
     /// # Ok(())
@@ -111,8 +116,10 @@ impl Child {
 
     /// Sends a forceful termination request to the child.
     ///
-    /// This only asks the operating system to terminate the process; call
-    /// [`wait`](Self::wait) afterward to observe the final status.
+    /// On Unix this sends `SIGKILL`. A successful return means the signal was
+    /// accepted or the process was already gone; it does not mean the final exit
+    /// status has been collected. Call [`wait`](Self::wait) afterward to observe
+    /// and reap the final status.
     ///
     /// # Examples
     ///
@@ -120,7 +127,7 @@ impl Child {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let mut child = Command::new("/bin/sleep").arg("60").spawn()?;
+    /// let mut child = Command::new("sleep").arg("60").spawn()?;
     /// child.kill()?;
     /// let _status = child.wait().await?;
     /// # Ok(())
