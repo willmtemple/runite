@@ -2,7 +2,7 @@
 //!
 //! Each platform's `runtime.rs` defines a marker type that implements
 //! [`Runtime`] and re-exports these functions with the platform type fixed,
-//! so callers continue to write `runite::queue_task(..)` without any
+//! so callers continue to write `runite::queue_macrotask(..)` without any
 //! turbofish.
 
 use std::any::Any;

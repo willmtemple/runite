@@ -19,7 +19,7 @@ where
     std::thread::spawn(move || {
         let slot: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
         let writer = Arc::clone(&slot);
-        runite::queue_future(async move {
+        runite::spawn(async move {
             let start = Instant::now();
             make_future().await;
             *writer.lock().expect("timing slot poisoned") = start.elapsed();

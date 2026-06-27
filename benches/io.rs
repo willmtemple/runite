@@ -22,7 +22,7 @@ fn bench_tcp_echo(c: &mut Criterion) {
                     .expect("bind listener");
                 let addr = listener.local_addr().expect("listener addr");
 
-                let server = runite::queue_future(async move {
+                let server = runite::spawn(async move {
                     let (mut stream, _peer) = listener.accept().await.expect("accept");
                     let mut buf = vec![0u8; TCP_PAYLOAD];
                     for _ in 0..iters {

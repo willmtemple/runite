@@ -42,7 +42,7 @@
 //!
 //! let written = Rc::new(RefCell::new(Vec::new()));
 //! let observed = Rc::clone(&written);
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     let mut writer = BufWriter::with_capacity(8, Sink(written));
 //!     writer.write_all(b"buffered").await.unwrap();
 //!     writer.flush().await.unwrap();
@@ -98,7 +98,7 @@ const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 ///     }
 /// }
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut reader = BufReader::with_capacity(4, Bytes { data: b"hello" });
 ///     let mut out = [0; 5];
 ///     reader.read_exact(&mut out).await.unwrap();
@@ -318,7 +318,7 @@ impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for BufReader<R> {
 ///
 /// let written = Rc::new(RefCell::new(Vec::new()));
 /// let observed = Rc::clone(&written);
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut writer = BufWriter::with_capacity(8, Sink(written));
 ///     writer.write_all(b"hello").await.unwrap();
 ///     writer.flush().await.unwrap();
@@ -444,7 +444,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-    use crate::{queue_future, run};
+    use crate::{run, spawn};
 
     use super::{BufReader, BufWriter};
 
@@ -506,7 +506,7 @@ mod tests {
         let observed_for_task = Rc::clone(&observed);
         let reads_for_task = Rc::clone(&reads);
 
-        queue_future(async move {
+        spawn(async move {
             let inner = ChunkedReader {
                 data: b"abcdef".to_vec(),
                 pos: 0,
@@ -533,7 +533,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(Vec::new()));
         let observed_for_task = Rc::clone(&observed);
 
-        queue_future({
+        spawn({
             let reads = Rc::clone(&reads);
             async move {
                 let inner = ChunkedReader {
@@ -566,7 +566,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(Vec::new()));
         let observed_for_task = Rc::clone(&observed);
 
-        queue_future({
+        spawn({
             let reads = Rc::clone(&reads);
             async move {
                 let inner = ChunkedReader {
@@ -598,7 +598,7 @@ mod tests {
         let data = Rc::new(RefCell::new(Vec::new()));
         let writes = Rc::new(RefCell::new(0));
 
-        queue_future({
+        spawn({
             let data = Rc::clone(&data);
             let writes = Rc::clone(&writes);
             async move {
@@ -625,7 +625,7 @@ mod tests {
         let writes = Rc::new(RefCell::new(0));
         let closes = Rc::new(RefCell::new(0));
 
-        queue_future({
+        spawn({
             let data = Rc::clone(&data);
             let writes = Rc::clone(&writes);
             let closes = Rc::clone(&closes);

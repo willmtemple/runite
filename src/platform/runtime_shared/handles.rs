@@ -63,7 +63,7 @@ pub struct WorkerHandle {
 }
 
 #[derive(Clone)]
-/// Handle returned by [`timeout`](crate::timeout).
+/// Handle returned by [`time::set_timeout`](crate::time::set_timeout).
 ///
 /// Cancelling this handle from a different runtime thread than the one that
 /// created it is a no-op rather than a panic: the `generation` field uniquely
@@ -83,7 +83,7 @@ impl TimeoutHandle {
 }
 
 #[derive(Clone)]
-/// Handle returned by [`interval`](crate::interval).
+/// Handle returned by [`time::set_interval`](crate::time::set_interval).
 ///
 /// Cancelling this handle from a different runtime thread than the one that
 /// created it is a no-op rather than a panic; see [`TimeoutHandle`] for the
@@ -101,7 +101,7 @@ impl IntervalHandle {
     }
 }
 
-/// Handle returned by `queue_future`.
+/// Handle returned by `spawn`.
 ///
 /// Awaiting a join handle yields `Result<T, JoinError>` rather than the queued
 /// future's output directly: `Ok(output)` contains the future's output, while

@@ -15,7 +15,7 @@
 //! # Examples
 //!
 //! ```
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let (tx, mut rx) = runite::channel::mpsc::channel(4);
 //!     tx.send("queued work").await.unwrap();
 //!     assert_eq!(rx.recv().await, Some("queued work"));

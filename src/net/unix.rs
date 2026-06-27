@@ -10,7 +10,7 @@
 //! socket path:
 //!
 //! ```
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let (mut left, mut right) = runite::net::unix::UnixStream::pair().unwrap();
 //!     left.write_all(b"x").await.unwrap();
 //!
@@ -71,7 +71,7 @@ impl UnixStream {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut stream = runite::net::unix::UnixStream::connect("service.sock")
     ///         .await
     ///         .unwrap();
@@ -319,7 +319,7 @@ impl UnixDatagram {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (left, right) = runite::net::unix::UnixDatagram::pair().unwrap();
     ///     left.send(b"x").await.unwrap();
     ///
@@ -689,7 +689,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     use super::{UnixDatagram, UnixListener, UnixStream};
 
@@ -698,9 +698,9 @@ mod tests {
         let received = Arc::new(Mutex::new(None::<Vec<u8>>));
         let received_for_task = Arc::clone(&received);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let received_for_task = Arc::clone(&received_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let (mut left, mut right) = UnixStream::pair().expect("stream pair should open");
                 left.write_all(b"ping")
                     .await
@@ -730,9 +730,9 @@ mod tests {
         let received_for_task = Arc::clone(&received);
         let path_for_task = path.clone();
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let received_for_task = Arc::clone(&received_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let listener = Arc::new(
                     UnixListener::bind(&path_for_task).expect("listener should bind to path"),
                 );
@@ -742,7 +742,7 @@ mod tests {
                 );
 
                 let listener_for_accept = Arc::clone(&listener);
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (mut stream, _peer_addr) = listener_for_accept
                         .accept()
                         .await
@@ -797,9 +797,9 @@ mod tests {
         let server_path_for_task = server_path.clone();
         let client_path_for_task = client_path.clone();
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let received_for_task = Arc::clone(&received_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let server = UnixDatagram::bind(&server_path_for_task).expect("server should bind");
                 let client = UnixDatagram::bind(&client_path_for_task).expect("client should bind");
 

@@ -45,7 +45,7 @@
 //! ```no_run
 //! use runite::process::Command;
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let status = Command::new("/bin/echo")
 //!         .arg("ready")
 //!         .status()
@@ -74,7 +74,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::io::{AsyncReadExt, AsyncWriteExt};
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     use super::{Command, Stdio};
 
@@ -83,8 +83,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<(Option<i32>, Option<i32>)>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let true_status = Command::new("true")
                     .status()
                     .await
@@ -107,8 +107,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let mut child = Command::new("/bin/echo")
                     .arg("hello")
                     .stdout(Stdio::piped())
@@ -139,8 +139,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let mut child = Command::new("/bin/cat")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -178,8 +178,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Option<i32>>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let mut child = Command::new("/bin/sleep")
                     .arg("100")
                     .spawn()

@@ -6,7 +6,7 @@
 //! sequences, and [`BufReader`]/[`BufWriter`] amortize small reads and writes.
 //!
 //! Runite futures are thread-local and are driven by the current thread's event
-//! loop. Doctest examples in this module use [`crate::queue_future`] followed by
+//! loop. Doctest examples in this module use [`crate::spawn`] followed by
 //! [`crate::run`] to execute async work until the loop is idle.
 //!
 //! # Examples
@@ -33,7 +33,7 @@
 //!     }
 //! }
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let mut reader = BufReader::with_capacity(4, Bytes(b"hello"));
 //!     let mut out = Vec::new();
 //!     reader.read_to_end(&mut out).await.unwrap();
@@ -65,7 +65,7 @@ mod tests {
 
     use crate::fs::{self, OpenOptions};
     use crate::net::{TcpListener, TcpStream};
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     use super::{AsyncReadExt, AsyncWriteExt, StreamExt};
 
@@ -95,8 +95,8 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     fs::write(&path, b"trait bytes")
                         .await
                         .expect("fixture write should succeed");
@@ -129,8 +129,8 @@ mod tests {
         let received = Arc::new(Mutex::new(None::<Vec<u8>>));
         let received_for_task = Arc::clone(&received);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let listener = Arc::new(
                     TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
                         .await
@@ -141,7 +141,7 @@ mod tests {
                     .expect("listener address should exist");
                 let listener_for_accept = Arc::clone(&listener);
 
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (mut stream, _) = listener_for_accept
                         .accept()
                         .await
@@ -176,8 +176,8 @@ mod tests {
         let received = Arc::new(Mutex::new(None::<Vec<u8>>));
         let received_for_task = Arc::clone(&received);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let listener = Arc::new(
                     TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
                         .await
@@ -189,7 +189,7 @@ mod tests {
                 let listener_for_accept = Arc::clone(&listener);
                 let expected_len = 64 * 1024;
 
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (mut stream, _) = listener_for_accept
                         .accept()
                         .await
@@ -238,8 +238,8 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     fs::write(&path, b"alpha\nbeta\ngamma")
                         .await
                         .expect("fixture write should succeed");

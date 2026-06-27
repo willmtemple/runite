@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 
 use runite::io::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use runite::net::{TcpListener, TcpStream};
-use runite::queue_future;
+use runite::spawn;
 
 #[runite::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = listener.local_addr()?;
     println!("[server] listening on {address}");
 
-    let server = queue_future(async move {
+    let server = spawn(async move {
         let mut incoming = listener.incoming();
         let stream = incoming.next().await.expect("incoming streams never end")?;
         println!("[server] accepted echo client");

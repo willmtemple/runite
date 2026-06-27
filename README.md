@@ -47,7 +47,7 @@ You can also use a synchronous entry point and drive the loop yourself:
 ```rust
 #[runite::main]
 fn main() {
-    runite::queue_future(async {
+    runite::spawn(async {
         runite::time::sleep(std::time::Duration::from_millis(10)).await;
     });
 }
@@ -56,13 +56,14 @@ fn main() {
 ## What you get
 
 - **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`).
-- **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_task`,
-  `queue_microtask`, `queue_future`, `yield_now`.
+- **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
+  `queue_microtask`, `spawn`, `yield_now`.
 - **Workers:** `spawn_worker` plus the `Send`-only cross-thread `ThreadHandle::queue_task`.
 - **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;
   use `abort`, `abort_handle`, `is_finished`, and cloneable `AbortHandle`s for cancellation.
-- **Timers:** `timeout` and `interval` (each returns a handle with `.cancel()`),
-  and `time::{sleep, deadline}`.
+- **Timers:** `time::set_timeout` and `time::set_interval` (each returns a
+  handle with `.cancel()`), plus `time::{sleep, timeout, interval}` where
+  `time::interval` is the awaitable interval.
 - **I/O:** async `fs`, `net` (TCP/UDP/Unix-domain), `stdio`, and crate-local
   `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters; TCP split/reunite,
   listener `incoming()` streams, async stdin/stdout/stderr, and `BufReader`/`BufWriter`.

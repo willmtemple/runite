@@ -31,7 +31,7 @@
 //!     }
 //! }
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let values = Counter { next: 0, end: 6 }
 //!         .filter(|item| item % 2 == 0)
 //!         .map(|item| item * 10)
@@ -83,7 +83,7 @@ use core::task::{Context, Poll};
 ///     }
 /// }
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let values = Counter { next: 0, end: 3 }.collect::<Vec<_>>().await;
 ///     assert_eq!(values, [0, 1, 2]);
 /// });
@@ -127,7 +127,7 @@ pub trait Stream {
 /// #         if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) }
 /// #     }
 /// # }
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let values = Counter { next: 0, end: 6 }
 ///         .skip(1)
 ///         .take(3)
@@ -149,7 +149,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut stream = Counter { next: 4, end: 6 };
     ///     assert_eq!(stream.next().await, Some(4));
     ///     assert_eq!(stream.next().await, Some(5));
@@ -174,7 +174,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let values = Counter { next: 1, end: 4 }.map(|item| item * 10).collect::<Vec<_>>().await;
     ///     assert_eq!(values, [10, 20, 30]);
     /// });
@@ -198,7 +198,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let values = Counter { next: 0, end: 6 }.filter(|item| item % 2 == 0).collect::<Vec<_>>().await;
     ///     assert_eq!(values, [0, 2, 4]);
     /// });
@@ -227,7 +227,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let values = Counter { next: 2, end: 5 }.collect::<Vec<_>>().await;
     ///     assert_eq!(values, [2, 3, 4]);
     /// });
@@ -260,7 +260,7 @@ pub trait StreamExt: Stream {
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let observed = Rc::clone(&seen);
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     Counter { next: 0, end: 3 }
     ///         .for_each(|item| {
     ///             let seen = Rc::clone(&seen);
@@ -294,7 +294,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let values = Counter { next: 0, end: 10 }.take(2).collect::<Vec<_>>().await;
     ///     assert_eq!(values, [0, 1]);
     /// });
@@ -320,7 +320,7 @@ pub trait StreamExt: Stream {
     /// # use runite::io::{Stream, StreamExt};
     /// # struct Counter { next: u8, end: u8 }
     /// # impl Stream for Counter { type Item = u8; fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<u8>> { if self.next == self.end { Poll::Ready(None) } else { let item = self.next; self.next += 1; Poll::Ready(Some(item)) } } }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let values = Counter { next: 0, end: 5 }.skip(3).collect::<Vec<_>>().await;
     ///     assert_eq!(values, [3, 4]);
     /// });
@@ -570,7 +570,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     struct VecDequeStream<T> {
         items: VecDeque<T>,
@@ -591,8 +591,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Vec<u32>>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let stream = VecDequeStream {
                     items: VecDeque::from(vec![1, 1, 1, 1, 1]),
                 };

@@ -20,7 +20,7 @@
 //!
 //! let shutting_down = Rc::new(Cell::new(false));
 //!
-//! runite::queue_future({
+//! runite::spawn({
 //!     let shutting_down = Rc::clone(&shutting_down);
 //!     async move {
 //!         runite::signal::ctrl_c()
@@ -44,7 +44,7 @@ pub mod unix;
 /// # Examples
 ///
 /// ```no_run
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     runite::signal::ctrl_c()
 ///         .await
 ///         .expect("Ctrl-C handler should install");

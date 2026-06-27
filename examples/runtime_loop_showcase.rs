@@ -1,6 +1,8 @@
 use runite::{
-    IntervalHandle, ThreadHandle, current_thread_handle, interval, queue_future, queue_microtask,
-    queue_task, spawn_worker, timeout, yield_now,
+    IntervalHandle, ThreadHandle, current_thread_handle, queue_macrotask, queue_microtask, spawn,
+    spawn_worker,
+    time::{set_interval, set_timeout},
+    yield_now,
 };
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -62,7 +64,7 @@ fn main() {
 
     queue_microtask(|| log_event!(1, "[main] boot microtask: prime UI state"));
 
-    queue_future(async {
+    spawn(async {
         log_event!(2, "[main] future: fetch scene metadata");
         yield_now().await;
         log_event!(4, "[main] future: scene metadata cached");
@@ -73,7 +75,7 @@ fn main() {
     });
 
     let main_handle = current_thread_handle();
-    queue_task(move || {
+    queue_macrotask(move || {
         log_event!(
             5,
             "[main] boot task: paint first frame and start background worker"
@@ -87,7 +89,7 @@ fn main() {
             set_dashboard_interval(slot, ticks);
         }
 
-        timeout(Duration::from_millis(30), || {
+        set_timeout(Duration::from_millis(30), || {
             log_event!(11, "[main] timeout: network snapshot ready");
         });
 
@@ -113,7 +115,7 @@ fn main() {
 
                 {
                     let main_for_future = main_for_worker.clone();
-                    queue_future(async move {
+                    spawn(async move {
                         queue_log(
                             &main_for_future,
                             8,
@@ -130,7 +132,7 @@ fn main() {
 
                 {
                     let main_for_task = main_for_worker.clone();
-                    queue_task(move || {
+                    queue_macrotask(move || {
                         queue_log(
                             &main_for_task,
                             10,
@@ -145,7 +147,7 @@ fn main() {
                     let slot = Rc::clone(&sample_interval);
                     let count = Rc::clone(&sample_count);
                     let main_for_samples = main_for_worker.clone();
-                    let handle = interval(Duration::from_millis(40), move || {
+                    let handle = set_interval(Duration::from_millis(40), move || {
                         let next = count.get() + 1;
                         count.set(next);
                         queue_log(
@@ -164,7 +166,7 @@ fn main() {
 
                 {
                     let main_for_flush = main_for_worker.clone();
-                    timeout(Duration::from_millis(110), move || {
+                    set_timeout(Duration::from_millis(110), move || {
                         queue_log_microtask(
                             &main_for_flush,
                             20,
@@ -176,7 +178,7 @@ fn main() {
             || log_event!(21, "[main] worker exited"),
         );
 
-        timeout(Duration::from_millis(70), move || {
+        set_timeout(Duration::from_millis(70), move || {
             let queued = worker.queue_task({
                 let main_from_remote_task = main_handle.clone();
                 move || {
@@ -204,7 +206,7 @@ fn main() {
             );
         });
 
-        timeout(Duration::from_millis(140), || {
+        set_timeout(Duration::from_millis(140), || {
             log_event!(22, "[main] final timeout: commit frame statistics");
         });
     });
@@ -212,7 +214,7 @@ fn main() {
 
 fn set_dashboard_interval(slot: Rc<RefCell<Option<IntervalHandle>>>, ticks: Rc<Cell<usize>>) {
     let slot_for_callback = Rc::clone(&slot);
-    let handle = interval(Duration::from_millis(50), move || {
+    let handle = set_interval(Duration::from_millis(50), move || {
         let next = ticks.get() + 1;
         ticks.set(next);
         if next == 1 {

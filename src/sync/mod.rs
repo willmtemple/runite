@@ -18,7 +18,7 @@
 //! let mutex = Rc::new(runite::sync::Mutex::new(0));
 //! let observed = Rc::new(Cell::new(0));
 //!
-//! runite::queue_future({
+//! runite::spawn({
 //!     let mutex = Rc::clone(&mutex);
 //!     let observed = Rc::clone(&observed);
 //!     async move {

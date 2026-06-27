@@ -1,5 +1,5 @@
 //! Local future task plumbing: `FutureTask`, `JoinState`, and the waker
-//! vtable used to schedule `queue_future` continuations.
+//! vtable used to schedule `spawn` continuations.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};

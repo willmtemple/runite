@@ -12,11 +12,11 @@
 //! ```
 //! let (sender, mut receiver) = runite::channel::mpsc::channel(2);
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     sender.send("hello").await.unwrap();
 //! });
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     assert_eq!(receiver.recv().await, Some("hello"));
 //!     assert_eq!(receiver.recv().await, None);
 //! });
@@ -41,7 +41,7 @@ use crate::sys::current::channel::runtime_waiter;
 /// # Examples
 ///
 /// ```
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let (tx, mut rx) = runite::channel::mpsc::channel(1);
 ///     tx.send("message").await.unwrap();
 ///     assert_eq!(rx.recv().await, Some("message"));
@@ -78,7 +78,7 @@ pub fn channel<T: Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// tx.send(1).unwrap();
 /// tx.send(2).unwrap();
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     assert_eq!(rx.recv().await, Some(1));
 ///     assert_eq!(rx.recv().await, Some(2));
 /// });
@@ -344,7 +344,7 @@ impl<T: Send + 'static> Sender<T> {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (tx, mut rx) = runite::channel::mpsc::channel(1);
     ///     tx.send("hello").await.unwrap();
     ///     assert_eq!(rx.recv().await, Some("hello"));
@@ -491,7 +491,7 @@ impl<T: Send + 'static> UnboundedSender<T> {
     /// let (tx, mut rx) = runite::channel::mpsc::unbounded_channel();
     /// tx.send("first").unwrap();
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     assert_eq!(rx.recv().await, Some("first"));
     /// });
     ///
@@ -538,7 +538,7 @@ impl<T: Send + 'static> Receiver<T> {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (tx, mut rx) = runite::channel::mpsc::channel(2);
     ///     tx.send(11).await.unwrap();
     ///     drop(tx);
@@ -742,7 +742,7 @@ mod tests {
 
     use crate::io::StreamExt;
     use crate::time::sleep;
-    use crate::{queue_future, queue_task, run, spawn_worker};
+    use crate::{queue_macrotask, run, spawn, spawn_worker};
 
     use super::{TryRecvError, TrySendError, channel, unbounded_channel};
 
@@ -751,8 +751,8 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<(Vec<i32>, Option<i32>)>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
-            queue_future(async move {
+        queue_macrotask(move || {
+            spawn(async move {
                 let (sender, mut receiver) = channel(5);
                 for value in 0..5 {
                     sender
@@ -778,12 +778,12 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let log_for_task = Arc::clone(&log);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut receiver) = channel(1);
             let log_for_sender = Arc::clone(&log_for_task);
             let log_for_receiver = Arc::clone(&log_for_task);
 
-            queue_future(async move {
+            spawn(async move {
                 sender
                     .send("first")
                     .await
@@ -802,7 +802,7 @@ mod tests {
                     .push("sent second".to_string());
             });
 
-            queue_future(async move {
+            spawn(async move {
                 sleep(Duration::from_millis(5)).await;
                 let first = receiver.recv().await.expect("first recv should succeed");
                 log_for_receiver
@@ -849,14 +849,14 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_for_task = Arc::clone(&log);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut receiver) = unbounded_channel::<String>();
             let worker_sender = sender.clone();
             let log_for_receiver = Arc::clone(&log_for_task);
 
             let _worker = spawn_worker(
                 move || {
-                    queue_task(move || {
+                    queue_macrotask(move || {
                         worker_sender
                             .send("worker boot".into())
                             .expect("worker boot send should succeed");
@@ -869,7 +869,7 @@ mod tests {
             );
             drop(sender);
 
-            queue_future(async move {
+            spawn(async move {
                 while let Some(message) = receiver.recv().await {
                     log_for_receiver.lock().unwrap().push(message);
                 }

@@ -21,7 +21,7 @@
 //! }
 //! ```
 //!
-//! You can also drive the loop yourself. [`queue_future`] schedules async work
+//! You can also drive the loop yourself. [`spawn`] schedules async work
 //! and [`run`] runs the current thread until everything queued is complete —
 //! handy for embedding the runtime or writing tests:
 //!
@@ -33,9 +33,9 @@
 //! let total = Rc::new(Cell::new(0u32));
 //! let result = Rc::clone(&total);
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     let (tx, mut rx) = runite::channel::mpsc::channel(8);
-//!     runite::queue_future(async move {
+//!     runite::spawn(async move {
 //!         for value in 1..=3 {
 //!             runite::time::sleep(Duration::from_millis(1)).await;
 //!             tx.send(value).await.unwrap();
@@ -55,7 +55,7 @@
 //! # Where to look next
 //!
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
-//! - [`run`], [`queue_task`], [`queue_microtask`], and [`queue_future`] for
+//! - [`run`], [`queue_macrotask`], [`queue_microtask`], and [`spawn`] for
 //!   driving and feeding the event loop
 //! - [`spawn_worker`] and [`ThreadHandle`] for multi-threaded work
 //! - [`fs`], [`net`], [`process`], [`time`], [`signal`], and [`stdio`] for async
@@ -150,7 +150,6 @@ pub use runtime_api::*;
 ))]
 mod runtime_api {
     use core::future::Future;
-    use core::time::Duration;
 
     use crate::platform::current::runtime as imp;
 
@@ -165,7 +164,7 @@ mod runtime_api {
     ///
     /// Macrotasks run after the microtask queue has been fully drained, in FIFO
     /// order with respect to other macrotasks (timers, I/O completions, and other
-    /// queued tasks). To run async work instead, use [`queue_future`].
+    /// queued tasks). To run async work instead, use [`spawn`].
     ///
     /// # Examples
     ///
@@ -175,11 +174,11 @@ mod runtime_api {
     ///
     /// let ran = Rc::new(Cell::new(false));
     /// let flag = Rc::clone(&ran);
-    /// runite::queue_task(move || flag.set(true));
+    /// runite::queue_macrotask(move || flag.set(true));
     /// runite::run();
     /// assert!(ran.get());
     /// ```
-    pub fn queue_task<F>(task: F)
+    pub fn queue_macrotask<F>(task: F)
     where
         F: FnOnce() + 'static,
     {
@@ -201,7 +200,7 @@ mod runtime_api {
     /// let order = Rc::new(Cell::new(String::new()));
     /// let a = Rc::clone(&order);
     /// let b = Rc::clone(&order);
-    /// runite::queue_task(move || a.set(a.take() + "task;"));
+    /// runite::queue_macrotask(move || a.set(a.take() + "task;"));
     /// runite::queue_microtask(move || b.set(b.take() + "micro;"));
     /// runite::run();
     /// // The microtask drains before the queued macrotask runs.
@@ -221,7 +220,9 @@ mod runtime_api {
     /// [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was aborted.
     /// Dropping the handle detaches the task; it keeps running to completion.
     ///
-    /// The future is `!Send` and never migrates off this thread.
+    /// The future is `!Send` and never migrates off this thread. It is first
+    /// polled immediately on spawn; subsequent wakeups are scheduled as
+    /// microtasks.
     ///
     /// # Examples
     ///
@@ -231,82 +232,20 @@ mod runtime_api {
     ///
     /// let out = Rc::new(Cell::new(0u32));
     /// let sink = Rc::clone(&out);
-    /// runite::queue_future(async move {
-    ///     let handle = runite::queue_future(async { 21u32 });
+    /// runite::spawn(async move {
+    ///     let handle = runite::spawn(async { 21u32 });
     ///     let value = handle.await.expect("task should not be aborted");
     ///     sink.set(value * 2);
     /// });
     /// runite::run();
     /// assert_eq!(out.get(), 42);
     /// ```
-    pub fn queue_future<F>(future: F) -> JoinHandle<F::Output>
+    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
         imp::queue_future(future)
-    }
-
-    /// Schedules `callback` to run once after at least `delay` has elapsed.
-    ///
-    /// Returns a [`TimeoutHandle`]; call [`TimeoutHandle::cancel`] before it
-    /// fires to cancel it. For async code, prefer
-    /// [`time::sleep`](crate::time::sleep).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::rc::Rc;
-    /// use std::cell::Cell;
-    /// use std::time::Duration;
-    ///
-    /// let fired = Rc::new(Cell::new(false));
-    /// let flag = Rc::clone(&fired);
-    /// runite::timeout(Duration::from_millis(1), move || flag.set(true));
-    /// runite::run();
-    /// assert!(fired.get());
-    /// ```
-    pub fn timeout<F>(delay: Duration, callback: F) -> TimeoutHandle
-    where
-        F: FnOnce() + 'static,
-    {
-        imp::timeout(delay, callback)
-    }
-
-    /// Schedules `callback` to run repeatedly, once per `delay` interval.
-    ///
-    /// Returns an [`IntervalHandle`]; call [`IntervalHandle::cancel`] to stop
-    /// it. The runtime will not exit while an interval is active, so callers
-    /// must cancel it to allow [`run`] to return.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::rc::Rc;
-    /// use std::cell::Cell;
-    /// use std::time::Duration;
-    ///
-    /// let ticks = Rc::new(Cell::new(0u32));
-    /// let counter = Rc::clone(&ticks);
-    /// let slot: Rc<std::cell::RefCell<Option<runite::IntervalHandle>>> =
-    ///     Rc::new(std::cell::RefCell::new(None));
-    /// let slot_in_cb = Rc::clone(&slot);
-    /// let handle = runite::interval(Duration::from_millis(1), move || {
-    ///     let n = counter.get() + 1;
-    ///     counter.set(n);
-    ///     if n == 3 {
-    ///         slot_in_cb.borrow().as_ref().unwrap().cancel();
-    ///     }
-    /// });
-    /// *slot.borrow_mut() = Some(handle);
-    /// runite::run();
-    /// assert_eq!(ticks.get(), 3);
-    /// ```
-    pub fn interval<F>(delay: Duration, callback: F) -> IntervalHandle
-    where
-        F: FnMut() + 'static,
-    {
-        imp::interval(delay, callback)
     }
 
     /// Spawns a new OS thread running its own independent runtime event loop.
@@ -325,7 +264,7 @@ mod runtime_api {
     /// let (tx, rx) = mpsc::channel();
     /// let _worker = runite::spawn_worker(
     ///     move || {
-    ///         runite::queue_future(async move {
+    ///         runite::spawn(async move {
     ///             tx.send(7u32).unwrap();
     ///         });
     ///     },
@@ -353,7 +292,7 @@ mod runtime_api {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let _handle = runite::current_thread_handle();
     /// });
     /// runite::run();
@@ -377,7 +316,7 @@ mod runtime_api {
     ///
     /// let done = Rc::new(Cell::new(false));
     /// let flag = Rc::clone(&done);
-    /// runite::queue_future(async move { flag.set(true); });
+    /// runite::spawn(async move { flag.set(true); });
     /// runite::run();
     /// assert!(done.get());
     /// ```

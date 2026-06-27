@@ -56,7 +56,7 @@
 //!
 //! let written = Rc::new(RefCell::new(Vec::new()));
 //! let observed = Rc::clone(&written);
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     let mut reader = Bytes(b"ping");
 //!     let mut buf = [0; 4];
 //!     reader.read_exact(&mut buf).await.unwrap();
@@ -110,7 +110,7 @@ use std::io;
 ///     }
 /// }
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut reader = Bytes(b"runite");
 ///     let mut out = [0; 6];
 ///     reader.read_exact(&mut out).await.unwrap();
@@ -179,7 +179,7 @@ pub trait AsyncRead {
 ///
 /// let written = Rc::new(RefCell::new(Vec::new()));
 /// let observed = Rc::clone(&written);
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut writer = Sink(written);
 ///     writer.write_all(b"bytes").await.unwrap();
 ///     writer.flush().await.unwrap();

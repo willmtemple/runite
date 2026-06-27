@@ -39,12 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Timer API renamed for ergonomics and to avoid collision with the async deadline
-  combinator: `set_timeout` → `timeout`, `set_interval` → `interval`. The free
-  `clear_timeout`/`clear_interval` functions and the `TimeoutHandle::clear`/
-  `IntervalHandle::clear` methods are removed in favor of `TimeoutHandle::cancel`/
-  `IntervalHandle::cancel`. The async future-combinator `time::timeout` is renamed to
-  `time::deadline` (it bounds how long a future may run, returning `Result<T, Elapsed>`).
+- Breaking scheduling/timer API rename: `queue_future` → `spawn`,
+  `queue_task` → `queue_macrotask`, root `timeout`/`interval` closure timers →
+  `time::set_timeout`/`time::set_interval`, and `time::deadline` →
+  `time::timeout`. `time::interval` is now the awaitable interval.
 - Awaiting a `JoinHandle<T>` now yields `Result<T, JoinError>` instead of `T`, resolving to
   `Err(JoinError::Aborted)` when the task is aborted. `JoinError` gained an `Aborted` variant
   alongside `Cancelled`.

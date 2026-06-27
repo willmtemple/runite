@@ -24,7 +24,7 @@ where
     std::thread::spawn(move || {
         let slot: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
         let writer = Arc::clone(&slot);
-        runite::queue_future(async move {
+        runite::spawn(async move {
             let value = make_future().await;
             *writer.lock().expect("result slot poisoned") = Some(value);
         });

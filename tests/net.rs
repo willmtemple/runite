@@ -15,7 +15,7 @@ fn tcp_echo_roundtrip() {
             .expect("bind listener");
         let addr = listener.local_addr().expect("listener local addr");
 
-        let server = runite::queue_future(async move {
+        let server = runite::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.expect("accept connection");
             let mut buf = [0u8; 32];
             let n = stream.read(&mut buf).await.expect("server read");
@@ -49,7 +49,7 @@ fn tcp_large_transfer_in_chunks() {
             .expect("bind listener");
         let addr = listener.local_addr().expect("listener local addr");
 
-        let server = runite::queue_future(async move {
+        let server = runite::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.expect("accept connection");
             let mut received = Vec::new();
             let mut buf = [0u8; 4096];
@@ -87,7 +87,7 @@ fn tcp_socket_accept_connect_smoke() {
         let listener = socket.listen(128).expect("listen socket");
         let addr = listener.local_addr().expect("listener local addr");
 
-        let server = runite::queue_future(async move {
+        let server = runite::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.expect("accept connection");
             let mut buf = [0u8; 4];
             stream.read_exact(&mut buf).await.expect("server read");

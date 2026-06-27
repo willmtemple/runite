@@ -25,7 +25,7 @@
 //! ```no_run
 //! use runite::io::AsyncWriteExt;
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let mut out = runite::stdout().expect("stdout should open");
 //!     out.write_all(b"hello from runite\n")
 //!         .await
@@ -40,7 +40,7 @@
 //! ```no_run
 //! use runite::io::AsyncReadExt;
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let mut input = runite::stdin().expect("stdin should open");
 //!     let mut byte = [0; 1];
 //!     let read = input
@@ -133,7 +133,7 @@ struct StandardWriter {
 /// ```no_run
 /// use runite::io::AsyncReadExt;
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut input = runite::stdin().expect("stdin should open");
 ///     let mut buffer = [0; 8];
 ///     let _read = input.read(&mut buffer).await.expect("stdin should read");
@@ -158,7 +158,7 @@ pub fn stdin() -> io::Result<Stdin> {
 /// ```no_run
 /// use runite::io::AsyncWriteExt;
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut out = runite::stdout().expect("stdout should open");
 ///     out.write_all(b"rendered frame\n")
 ///         .await
@@ -182,7 +182,7 @@ pub fn stdout() -> io::Result<Stdout> {
 /// ```no_run
 /// use runite::io::AsyncWriteExt;
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut err = runite::stderr().expect("stderr should open");
 ///     err.write_all(b"diagnostic\n")
 ///         .await
@@ -207,7 +207,7 @@ impl Stdin {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut input = runite::stdin().expect("stdin should open");
     ///     if let Some(line) = input.read_line().await.expect("stdin should read") {
     ///         eprintln!("line length: {}", line.len());
@@ -248,7 +248,7 @@ impl Stdin {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut input = runite::stdin().expect("stdin should open");
     ///     let mut byte = [0; 1];
     ///     let _read = input.read(&mut byte).await.expect("stdin should read");
@@ -305,7 +305,7 @@ impl Stdout {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut out = runite::stdout().expect("stdout should open");
     ///     let bytes = out.write(b"partial frame\n").await.expect("stdout should write");
     ///     assert!(bytes > 0);
@@ -327,7 +327,7 @@ impl Stderr {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut err = runite::stderr().expect("stderr should open");
     ///     let bytes = err.write(b"warning\n").await.expect("stderr should write");
     ///     assert!(bytes > 0);
@@ -628,7 +628,7 @@ mod tests {
         {
             let stdout_written = Arc::clone(&stdout_written);
             let stderr_written = Arc::clone(&stderr_written);
-            crate::queue_future(async move {
+            crate::spawn(async move {
                 let mut out = stdout().expect("stdout should open");
                 let mut err = stderr().expect("stderr should open");
 
@@ -671,7 +671,7 @@ mod tests {
 
         {
             let written = Arc::clone(&written);
-            crate::queue_future(async move {
+            crate::spawn(async move {
                 let mut out = Stdout {
                     writer: StandardWriter::new(slave),
                 };
@@ -705,7 +705,7 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
         {
             let observed = Arc::clone(&observed);
-            crate::queue_future(async move {
+            crate::spawn(async move {
                 let mut input = Stdin {
                     fd: slave,
                     buffer: Vec::new(),

@@ -8,7 +8,7 @@
 //! # Examples
 //!
 //! ```
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let (sender, mut receiver) = runite::channel::oneshot::channel();
 //!     sender.send("ready").unwrap();
 //!     assert_eq!(receiver.recv().await.unwrap(), "ready");
@@ -102,7 +102,7 @@ impl<T: Send + 'static> Sender<T> {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (sender, mut receiver) = runite::channel::oneshot::channel();
     ///     sender.send(7).unwrap();
     ///     assert_eq!(receiver.recv().await.unwrap(), 7);
@@ -163,7 +163,7 @@ impl<T: Send + 'static> Receiver<T> {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (sender, mut receiver) = runite::channel::oneshot::channel();
     ///     sender.send("done").unwrap();
     ///     assert_eq!(receiver.recv().await.unwrap(), "done");
@@ -357,7 +357,7 @@ impl<T: Send + 'static> Drop for Receiver<T> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{queue_future, queue_task, run, spawn_worker};
+    use crate::{queue_macrotask, run, spawn, spawn_worker};
 
     use super::{TryRecvError, channel};
 
@@ -366,20 +366,20 @@ mod tests {
         let result = Arc::new(Mutex::new(None::<usize>));
         let result_for_task = Arc::clone(&result);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut receiver) = channel();
             let result_for_task = Arc::clone(&result_for_task);
 
             let _worker = spawn_worker(
                 move || {
-                    queue_task(move || {
+                    queue_macrotask(move || {
                         sender.send(42usize).expect("oneshot send should succeed");
                     });
                 },
                 || {},
             );
 
-            queue_future(async move {
+            spawn(async move {
                 let value = receiver.recv().await.expect("oneshot recv should succeed");
                 *result_for_task.lock().unwrap() = Some(value);
             });

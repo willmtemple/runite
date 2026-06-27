@@ -31,7 +31,7 @@ struct Waiter {
 /// let completed = Rc::new(Cell::new(0));
 ///
 /// for _ in 0..2 {
-///     runite::queue_future({
+///     runite::spawn({
 ///         let semaphore = Rc::clone(&semaphore);
 ///         let active = Rc::clone(&active);
 ///         let max_active = Rc::clone(&max_active);
@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::platform::current::runtime::{queue_future, run, yield_now};
+    use crate::{run, spawn, yield_now};
 
     #[test]
     fn fast_path_acquires_and_releases() {
@@ -242,7 +242,7 @@ mod tests {
         assert!(semaphore.try_acquire().is_some());
 
         let observed = Rc::new(Cell::new(false));
-        queue_future({
+        spawn({
             let semaphore = Rc::clone(&semaphore);
             let observed = Rc::clone(&observed);
             async move {
@@ -261,7 +261,7 @@ mod tests {
         let semaphore = Rc::new(Semaphore::new(1));
         let order = Rc::new(RefCell::new(Vec::new()));
 
-        queue_future({
+        spawn({
             let semaphore = Rc::clone(&semaphore);
             let order = Rc::clone(&order);
             async move {
@@ -272,7 +272,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let semaphore = Rc::clone(&semaphore);
             let order = Rc::clone(&order);
             async move {
