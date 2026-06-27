@@ -21,28 +21,6 @@ type RecvFuture = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type SendFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type ShutdownFuture = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    Kqueue,
-    Offload,
-}
-
-pub fn execution_path(op: &NetOp) -> ExecutionPath {
-    match op {
-        NetOp::Socket { .. }
-        | NetOp::Connect { .. }
-        | NetOp::Bind { .. }
-        | NetOp::Listen { .. }
-        | NetOp::Accept { .. }
-        | NetOp::Send { .. }
-        | NetOp::SendTo { .. }
-        | NetOp::Recv { .. }
-        | NetOp::RecvFrom { .. }
-        | NetOp::Shutdown { .. }
-        | NetOp::Close { .. } => ExecutionPath::Kqueue,
-    }
-}
-
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
@@ -151,14 +129,6 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     };
 
     shutdown_sync(fd, how)
-}
-
-pub async fn close(op: NetOp) -> io::Result<()> {
-    let NetOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    close_sync(fd)
 }
 
 pub async fn connect_stream(addr: SocketAddr) -> io::Result<OwnedFd> {
@@ -754,10 +724,6 @@ fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatag
 
 fn shutdown_sync(fd: RawFd, how: Shutdown) -> io::Result<()> {
     cvt(unsafe { libc::shutdown(fd, shutdown_how(how)) }).map(|_| ())
-}
-
-fn close_sync(fd: RawFd) -> io::Result<()> {
-    cvt(unsafe { libc::close(fd) }).map(|_| ())
 }
 
 fn set_cloexec(fd: RawFd) -> io::Result<()> {

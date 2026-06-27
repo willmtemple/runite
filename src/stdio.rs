@@ -661,6 +661,12 @@ mod tests {
     #[test]
     fn stdout_writes_to_tty_fd() {
         let (master, slave) = open_pty();
+        // macOS (BSD) ptys discard the slave's pending output queue when the
+        // last slave descriptor closes. `Stdout` owns `slave` and drops it when
+        // the task finishes, so hold an extra slave-side descriptor open until
+        // after the master is drained — mirroring real usage where the stdout
+        // descriptor outlives any individual write.
+        let slave_keepalive = duplicate_fd(slave.as_raw_fd()).expect("dup slave fd");
         let written = Arc::new(Mutex::new(None::<usize>));
 
         {
@@ -688,6 +694,7 @@ mod tests {
         let mut buffer = [0u8; 64];
         let read = blocking_read(master.as_raw_fd(), &mut buffer).expect("pty master should read");
         assert_eq!(&buffer[..read], b"tty output\r\n");
+        drop(slave_keepalive);
     }
 
     #[test]
@@ -731,8 +738,8 @@ mod tests {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, 0, "openpty should succeed");

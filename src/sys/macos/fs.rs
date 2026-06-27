@@ -17,15 +17,6 @@ use crate::op::fs::{FileType, FsOp, MetadataTarget, RawDirEntry, RawMetadata};
 use crate::platform::current::runtime::{QueueError, ThreadHandle, current_thread_handle};
 use crate::sys::blocking::spawn_blocking;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    Offload,
-}
-
-pub fn execution_path(_op: &FsOp) -> ExecutionPath {
-    ExecutionPath::Offload
-}
-
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
     let FsOp::Open { path, options } = op else {
         unreachable!("open backend called with non-open op");
@@ -200,14 +191,6 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
     };
 
     offload(move || std::fs::rename(from, to)).await
-}
-
-pub async fn close(op: FsOp) -> io::Result<()> {
-    let FsOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    offload(move || cvt(unsafe { libc::close(fd) }).map(|_| ())).await
 }
 
 pub fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
