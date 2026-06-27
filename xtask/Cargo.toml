@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Repository automation tasks for runite (not published)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
