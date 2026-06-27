@@ -76,13 +76,6 @@ pub struct ThreadNotifier {
     inner: NotifierInner,
 }
 
-impl ThreadNotifier {
-    /// Sends a wake notification to the target runtime thread.
-    pub fn notify(&self) -> io::Result<()> {
-        self.inner.notify()
-    }
-}
-
 impl Notifier for ThreadNotifier {
     fn notify(&self) -> io::Result<()> {
         self.inner.notify()

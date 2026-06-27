@@ -51,6 +51,12 @@ pub enum NetOp {
         fd: RawFd,
         how: Shutdown,
     },
+    /// Explicit asynchronous close of a socket file descriptor.
+    ///
+    /// Reserved for a future explicit async-close API. Today both backends rely
+    /// on synchronous `close(2)` via `OwnedFd`'s `Drop`, so this variant is
+    /// never constructed; see `docs/ROADMAP.md` ("Explicit async close").
+    #[allow(dead_code)]
     Close {
         fd: RawFd,
     },

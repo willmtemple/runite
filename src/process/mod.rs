@@ -85,11 +85,11 @@ mod tests {
 
         queue_task(move || {
             queue_future(async move {
-                let true_status = Command::new("/bin/true")
+                let true_status = Command::new("true")
                     .status()
                     .await
                     .expect("true should run");
-                let false_status = Command::new("/bin/false")
+                let false_status = Command::new("false")
                     .status()
                     .await
                     .expect("false should run");

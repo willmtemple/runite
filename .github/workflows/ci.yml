@@ -74,8 +74,12 @@ jobs:
         uses: jdx/mise-action@v4
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+      - name: Ensure rust components
+        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
       - name: Build
         run: cargo build --workspace --all-targets --all-features
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
 
