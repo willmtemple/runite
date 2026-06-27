@@ -1,8 +1,8 @@
 //! Task spawning primitives.
 //!
-//! Currently exposes a single entry point: [`spawn_blocking`], which moves a
-//! blocking closure onto the shared OS-thread pool and returns a future that
-//! resolves to the closure's return value.
+//! Exposes [`JoinSet`] for owning groups of local tasks and [`spawn_blocking`],
+//! which moves a blocking closure onto the shared OS-thread pool and returns a
+//! future that resolves to the closure's return value.
 //!
 //! In-runtime async work should use [`crate::queue_future`] instead; this
 //! module exists for code that must call blocking syscalls or run CPU-heavy
@@ -30,7 +30,6 @@
 //! assert_eq!(observed.load(Ordering::SeqCst), 42);
 //! ```
 
-use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -39,6 +38,10 @@ use std::io;
 
 use crate::channel::oneshot;
 use crate::sys::blocking;
+
+mod join_set;
+
+pub use join_set::{JoinError, JoinSet};
 
 /// Future returned by [`spawn_blocking`].
 ///
@@ -51,60 +54,6 @@ use crate::sys::blocking;
 pub struct BlockingJoinHandle<R: Send + 'static> {
     inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>>,
 }
-
-/// Error returned by awaiting a join handle.
-///
-/// Produced both by [`BlockingJoinHandle`] (when a blocking-pool worker exits
-/// without delivering a value) and by [`crate::JoinHandle`] (when a queued
-/// future is aborted before it completes). A queued task's join output is
-/// `Result<T, JoinError>`, so callers should handle these errors when awaiting
-/// any join handle.
-///
-/// Use [`JoinError::is_cancelled`] and [`JoinError::is_aborted`] when the caller
-/// only needs to distinguish the category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinError {
-    /// The worker exited without producing a value.
-    ///
-    /// This is used for blocking tasks whose result channel closes before the
-    /// worker delivers a value, such as during runtime shutdown or panic
-    /// unwinding.
-    Cancelled,
-    /// The task was aborted before it completed.
-    ///
-    /// This is returned by [`crate::JoinHandle`] when
-    /// [`JoinHandle::abort`](crate::JoinHandle::abort) or an
-    /// [`AbortHandle`](crate::AbortHandle) cancels the queued future.
-    Aborted,
-}
-
-impl JoinError {
-    /// Returns `true` if the task was aborted before completion.
-    ///
-    /// This is true only for [`JoinError::Aborted`].
-    pub fn is_aborted(&self) -> bool {
-        matches!(self, JoinError::Aborted)
-    }
-
-    /// Returns `true` if a blocking-pool worker was cancelled (e.g. during
-    /// runtime shutdown) without producing a value.
-    ///
-    /// This is true only for [`JoinError::Cancelled`].
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, JoinError::Cancelled)
-    }
-}
-
-impl fmt::Display for JoinError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinError::Cancelled => f.write_str("blocking task was cancelled"),
-            JoinError::Aborted => f.write_str("task was aborted"),
-        }
-    }
-}
-
-impl std::error::Error for JoinError {}
 
 impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
     type Output = Result<R, JoinError>;
