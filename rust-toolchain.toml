@@ -1,8 +1,9 @@
 # Mirrors the Rust version pinned in mise.lock for contributors who use rustup
 # directly instead of mise. mise.lock is the source of truth; when you bump the
 # toolchain (`mise upgrade && mise lock`), update this channel to match.
-# runite is stable-Rust clean (no nightly features); edition 2024 requires
-# Rust >= 1.85.
+# runite is stable-Rust clean (no nightly features). Its MSRV is 1.88 (see
+# Cargo.toml `rust-version`): edition 2024 needs >= 1.85 and the crate also uses
+# let-chains, stabilized in 1.88.
 [toolchain]
 channel = "1.96.0"
 components = ["rustfmt", "clippy", "llvm-tools"]
