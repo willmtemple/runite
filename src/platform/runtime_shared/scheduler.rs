@@ -377,7 +377,6 @@ pub fn run<R: Runtime>() {
         while let Some(task) = pop_microtask() {
             task();
             microtasks_run += 1;
-            drain_all::<R>();
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
             tracing::warn!(
@@ -489,7 +488,6 @@ pub fn run_until_stalled<R: Runtime>() {
         while let Some(task) = pop_microtask() {
             task();
             microtasks_run += 1;
-            drain_all::<R>();
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
             tracing::warn!(
@@ -534,8 +532,6 @@ pub fn run_ready_tasks<R: Runtime>() {
         while let Some(task) = pop_microtask() {
             task();
             microtasks_run += 1;
-            drain_remote_tasks::<R>();
-            drain_completed_workers::<R>();
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
             tracing::warn!(
@@ -567,6 +563,20 @@ pub fn run_ready_tasks<R: Runtime>() {
 
 // -- Internal scheduler primitives ------------------------------------------
 
+/// Reap all external events into the local queues: poll the driver for I/O
+/// completions and expired timers, splice in cross-thread (remote) tasks, and
+/// collect exited workers.
+///
+/// Everything this enqueues is a **macrotask** — an I/O completion (CQE /
+/// readiness) takes a macro turn, as do timers, remote tasks, and worker
+/// exits. None of them can run during a microtask checkpoint. The run loops
+/// therefore call this **once per turn**, before draining microtasks, rather
+/// than after every microtask: re-polling mid-checkpoint cost one syscall per
+/// microtask without changing observable ordering (the reaped macrotasks run
+/// after the checkpoint either way). This mirrors the JS event loop's poll
+/// phase. A runaway microtask chain that never yields the checkpoint will, by
+/// design, starve these events — exactly as `Promise.resolve().then` recursion
+/// starves a browser; the `MICROTASK_STARVATION_THRESHOLD` warning flags it.
 fn drain_all<R: Runtime>() {
     drain_driver_events::<R>();
     drain_remote_tasks::<R>();
