@@ -772,6 +772,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stdin_read_line_drains_buffered_read_ahead_before_reading_fd() {
+        let fd = duplicate_fd(libc::STDIN_FILENO).expect("dup stdin fd");
+        let observed = Arc::new(Mutex::new(None::<Vec<String>>));
+
+        {
+            let observed = Arc::clone(&observed);
+            crate::spawn(async move {
+                let mut input = Stdin {
+                    fd,
+                    buffer: b"first\nsecond\n".to_vec(),
+                    pending_read: None,
+                };
+                let first = input
+                    .read_line()
+                    .await
+                    .expect("first buffered line")
+                    .expect("first line should exist");
+                let second = input
+                    .read_line()
+                    .await
+                    .expect("second buffered line")
+                    .expect("second line should exist");
+                *observed.lock().expect("observed mutex poisoned") = Some(vec![first, second]);
+            });
+        }
+
+        crate::run();
+
+        assert_eq!(
+            *observed.lock().expect("observed mutex poisoned"),
+            Some(vec!["first\n".to_string(), "second\n".to_string()])
+        );
+    }
+
+    #[test]
+    fn stdin_read_line_reports_invalid_buffered_utf8() {
+        let fd = duplicate_fd(libc::STDIN_FILENO).expect("dup stdin fd");
+        let observed = Arc::new(Mutex::new(None::<io::ErrorKind>));
+
+        {
+            let observed = Arc::clone(&observed);
+            crate::spawn(async move {
+                let mut input = Stdin {
+                    fd,
+                    buffer: b"bad \xff\n".to_vec(),
+                    pending_read: None,
+                };
+                let error = input
+                    .read_line()
+                    .await
+                    .expect_err("invalid buffered UTF-8 should fail");
+                *observed.lock().expect("observed mutex poisoned") = Some(error.kind());
+            });
+        }
+
+        crate::run();
+
+        assert_eq!(
+            *observed.lock().expect("observed mutex poisoned"),
+            Some(io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn stdout_and_stderr_flush_and_close_are_noops() {
+        use crate::io::AsyncWrite;
+
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let stdout_fd = duplicate_fd(libc::STDOUT_FILENO).expect("dup stdout fd");
+        let stderr_fd = duplicate_fd(libc::STDERR_FILENO).expect("dup stderr fd");
+        let mut out = Stdout {
+            writer: StandardWriter::new(stdout_fd),
+        };
+        let mut err = Stderr {
+            writer: StandardWriter::new(stderr_fd),
+        };
+
+        assert!(Pin::new(&mut out).poll_flush(&mut cx).is_ready());
+        assert!(Pin::new(&mut out).poll_close(&mut cx).is_ready());
+        assert!(Pin::new(&mut err).poll_flush(&mut cx).is_ready());
+        assert!(Pin::new(&mut err).poll_close(&mut cx).is_ready());
+    }
+
     fn open_pty() -> (OwnedFd, OwnedFd) {
         let mut master = -1;
         let mut slave = -1;

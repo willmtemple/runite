@@ -1007,7 +1007,8 @@ fn string_from_line(line: Vec<u8>) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncRead, AsyncWrite, copy, copy_bidirectional};
+    use super::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy, copy_bidirectional};
+    use crate::io::StreamExt;
     use crate::{run, spawn};
     use core::pin::Pin;
     use core::task::{Context, Poll};
@@ -1133,5 +1134,99 @@ mod tests {
         assert_eq!(&*left_written.borrow(), b"right-to-left");
         assert!(*left_closed.borrow());
         assert!(*right_closed.borrow());
+    }
+
+    #[test]
+    fn read_exact_reports_unexpected_eof_on_short_read() {
+        let observed = Rc::new(RefCell::new(None::<io::ErrorKind>));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                let mut reader = MemoryIo::new(b"abc", 1);
+                let mut buf = [0u8; 4];
+                let error = reader
+                    .read_exact(&mut buf)
+                    .await
+                    .expect_err("short read should fail");
+                *observed.borrow_mut() = Some(error.kind());
+            }
+        });
+
+        run();
+        assert_eq!(*observed.borrow(), Some(io::ErrorKind::UnexpectedEof));
+    }
+
+    #[test]
+    fn write_all_reports_write_zero() {
+        let observed = Rc::new(RefCell::new(None::<io::ErrorKind>));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                let mut writer = MemoryIo::new(b"", 0);
+                let error = writer
+                    .write_all(b"cannot progress")
+                    .await
+                    .expect_err("zero write should fail");
+                *observed.borrow_mut() = Some(error.kind());
+            }
+        });
+
+        run();
+        assert_eq!(*observed.borrow(), Some(io::ErrorKind::WriteZero));
+    }
+
+    #[test]
+    fn lines_strip_lf_but_retain_cr_from_crlf() {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                let reader = MemoryIo::new(b"alpha\r\nbeta\nunterminated", 1);
+                let lines = reader
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<io::Result<Vec<_>>>()
+                    .unwrap();
+                *observed.borrow_mut() = lines;
+            }
+        });
+
+        run();
+        assert_eq!(
+            *observed.borrow(),
+            vec![
+                "alpha\r".to_string(),
+                "beta".to_string(),
+                "unterminated".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_empty_reader_flushes_writer_without_writing() {
+        let flushed = Rc::new(RefCell::new(false));
+        let written = Rc::new(RefCell::new(Vec::new()));
+
+        spawn({
+            let flushed = Rc::clone(&flushed);
+            let written = Rc::clone(&written);
+            async move {
+                let mut reader = MemoryIo::new(b"", 1);
+                let mut writer = MemoryIo::new(b"", 1);
+                writer.flushed = flushed;
+                writer.written = written;
+                let copied = copy(&mut reader, &mut writer).await.unwrap();
+                assert_eq!(copied, 0);
+            }
+        });
+
+        run();
+        assert!(*flushed.borrow());
+        assert!(written.borrow().is_empty());
     }
 }
