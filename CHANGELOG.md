@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Linux + macOS), code-coverage and benchmark jobs, and a tag-triggered crates.io
   release workflow.
 - Integration test suites and criterion benchmarks for the runtime and I/O paths.
+  The benchmark suite covers scheduler scaling (`spawn_many`), bulk channel
+  throughput (`mpsc_throughput`), microtask/macrotask dispatch (`queueable`), and
+  the `RwLock`, `JoinSet`, `broadcast`, and `interval` primitives.
 - Task cancellation: `JoinHandle::abort`, `JoinHandle::is_finished`, and a cloneable
   `AbortHandle` (via `JoinHandle::abort_handle`). Aborting drops the task's future, which
   cancels any in-flight driver operation it is parked on.
