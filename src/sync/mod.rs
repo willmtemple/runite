@@ -4,9 +4,10 @@
 //! thread. They are intentionally `!Send`/`!Sync` and use thread-local wakeups
 //! rather than cross-thread atomics.
 //!
-//! Use [`Mutex`] for exclusive access to shared task-local state, [`Semaphore`]
-//! for limiting concurrent access, [`Notify`] for one-shot task wakeups, and
-//! [`OnceCell`] for asynchronous initialize-once values.
+//! Use [`Mutex`] for exclusive access to shared task-local state, [`RwLock`] for
+//! shared-or-exclusive access, [`Semaphore`] for limiting concurrent access,
+//! [`Notify`] for one-shot task wakeups, and [`OnceCell`] for asynchronous
+//! initialize-once values.
 //!
 //! # Examples
 //!
@@ -35,9 +36,11 @@
 mod mutex;
 mod notify;
 mod once_cell;
+mod rw_lock;
 mod semaphore;
 
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::Notify;
 pub use once_cell::OnceCell;
+pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use semaphore::{Permit, Semaphore};
