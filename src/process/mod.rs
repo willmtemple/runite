@@ -123,7 +123,7 @@ mod tests {
 
         queue_macrotask(move || {
             spawn(async move {
-                let mut child = Command::new("/bin/echo")
+                let mut child = Command::new("echo")
                     .arg("hello")
                     .stdout(Stdio::piped())
                     .spawn()
@@ -155,7 +155,7 @@ mod tests {
 
         queue_macrotask(move || {
             spawn(async move {
-                let mut child = Command::new("/bin/cat")
+                let mut child = Command::new("cat")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .spawn()
@@ -194,12 +194,12 @@ mod tests {
 
         queue_macrotask(move || {
             spawn(async move {
-                let mut child = Command::new("/bin/sleep")
-                    .arg("100")
+                let mut child = Command::new("cat")
+                    .stdin(Stdio::piped())
                     .spawn()
-                    .expect("sleep should spawn");
-                child.kill().expect("sleep should be killed");
-                let status = child.wait().await.expect("killed sleep should wait");
+                    .expect("cat should spawn");
+                child.kill().expect("cat should be killed");
+                let status = child.wait().await.expect("killed cat should wait");
                 #[cfg(unix)]
                 {
                     *observed_for_task.lock().unwrap() = Some(status.signal());
