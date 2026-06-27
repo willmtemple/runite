@@ -2,12 +2,27 @@
 //!
 //! The `io` module defines runite's small current-thread I/O abstraction layer:
 //! [`AsyncRead`] and [`AsyncWrite`] are poll-based byte traits, extension traits
-//! turn those poll methods into futures, [`Stream`] represents asynchronous
-//! sequences, and [`BufReader`]/[`BufWriter`] amortize small reads and writes.
+//! turn those poll methods into futures, [`copy`] and [`copy_bidirectional`] move
+//! bytes between streams, [`Stream`] represents asynchronous sequences, and
+//! [`BufReader`]/[`BufWriter`] amortize small reads and writes.
 //!
-//! Runite futures are thread-local and are driven by the current thread's event
-//! loop. Doctest examples in this module use [`crate::spawn`] followed by
-//! [`crate::run`] to execute async work until the loop is idle.
+//! # Runtime model
+//!
+//! Runite is event-loop-per-thread. Futures and I/O objects are effectively
+//! thread-local: they are driven on the event loop that owns their wakers, tasks
+//! never migrate between runtime threads, and there is no work-stealing
+//! scheduler. Same-thread wakeups are queued as microtasks; cross-thread wakeups,
+//! timers, and I/O driver notifications are macrotasks, and microtasks drain
+//! before the next macrotask.
+//!
+//! The platform backend shapes what an I/O readiness point means. On Linux
+//! x86_64, runite submits completion-based operations to `io_uring`; on macOS
+//! aarch64, it waits for readiness through `kqueue` and then performs the
+//! nonblocking operation. Unlike Tokio's default multi-thread scheduler or
+//! async-std, these traits make the current-thread assumption explicit and keep
+//! the poll surface small rather than requiring `Send` transports. Doctest
+//! examples use [`crate::spawn`] followed by [`crate::run`] to execute async work
+//! until the loop is idle.
 //!
 //! # Examples
 //!

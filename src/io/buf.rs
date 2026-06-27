@@ -7,6 +7,12 @@
 //! the same for writes by collecting small writes and forwarding larger chunks to
 //! the inner writer.
 //!
+//! These adapters inherit runite's current-thread I/O model: they do not make an
+//! inner reader or writer `Send`, and they should be driven on the event loop
+//! that owns the underlying object. [`BufWriter`] has no blocking or best-effort
+//! drop flush; buffered bytes are only forwarded by explicit flush/close calls
+//! or by later writes that force the buffer to drain.
+//!
 //! # Examples
 //!
 //! ```
@@ -190,6 +196,7 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
     ///
     /// The trailing newline is included when present. Returns the number of
     /// bytes appended to `buf`, or `0` on EOF with no buffered bytes remaining.
+    /// Invalid UTF-8 is returned as [`io::ErrorKind::InvalidData`].
     /// This method uses [`fill_buf`](Self::fill_buf) and
     /// [`consume`](Self::consume), so line-oriented reads benefit from this
     /// adapter's larger underlying reads.
@@ -277,11 +284,11 @@ impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for BufReader<R> {
 /// writes many short byte slices, while preserving [`AsyncWrite`]'s poll-based
 /// shape. Buffered bytes are flushed on explicit flush and close operations.
 ///
-/// Dropping a `BufWriter` without flushing or closing it may lose buffered data.
-/// Drop is best-effort only and never blocks; callers should use
-/// [`AsyncWriteExt::flush`](super::AsyncWriteExt::flush) or
+/// Drop does **not** flush. `BufWriter` has no `Drop` implementation, so any
+/// bytes still in the internal buffer are silently discarded when the adapter is
+/// dropped. Call [`AsyncWriteExt::flush`](super::AsyncWriteExt::flush) or
 /// [`AsyncWriteExt::close`](super::AsyncWriteExt::close) before dropping the
-/// adapter.
+/// adapter when buffered data must reach the inner writer.
 ///
 /// # Examples
 ///
