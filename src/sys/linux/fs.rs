@@ -27,6 +27,9 @@ const STATX_BASIC_MASK: u32 =
     libc::STATX_TYPE | libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_NLINK;
 const FILE_CURSOR: u64 = u64::MAX;
 
+// TODO(roadmap): unwired io_uring fs-close / op-classifier scaffolding; a Linux
+// agent will wire or remove it before release. See ROADMAP.md.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionPath {
     IoUring,
@@ -34,6 +37,7 @@ pub enum ExecutionPath {
     Inline,
 }
 
+#[allow(dead_code)]
 pub fn execution_path(op: &FsOp) -> ExecutionPath {
     match op {
         // `getdents`/`std::fs::read_dir` can block on disk and has no io_uring
@@ -291,6 +295,7 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
     .await
 }
 
+#[allow(dead_code)]
 pub async fn close(op: FsOp) -> io::Result<()> {
     let FsOp::Close { fd } = op else {
         unreachable!("close backend called with non-close op");

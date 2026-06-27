@@ -78,7 +78,10 @@ pub struct ThreadNotifier {
 }
 
 impl ThreadNotifier {
+    // TODO(roadmap): duplicate of the `Notifier` trait method (which is what
+    // callers use); a Linux agent will remove it before release. See ROADMAP.md.
     /// Sends a wake notification to the target runtime thread.
+    #[allow(dead_code)]
     pub fn notify(&self) -> io::Result<()> {
         self.inner.notify()
     }

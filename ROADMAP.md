@@ -44,3 +44,24 @@ before committing to either approach.
 - Linux net data-path readiness fallback (epoll/io_uring hybrid for
   connect/accept/send/recv on kernels with limited io_uring opcode support) — needs CI on
   an io_uring-limited kernel to exercise the fallback.
+
+### Linux dead-code cleanup (pre-release, Linux agent)
+
+The earlier "Tighten public API" pass orphaned some Linux-only internals that are
+currently silenced with `#[allow(dead_code)]`. A Linux agent should wire these up or
+remove them before release (the `#[allow]` attributes and `TODO(roadmap)` comments mark
+every site):
+
+- **Unwired io_uring async-close path.** `FsOp::Close` / `NetOp::Close` are never
+  constructed; `sys::linux::{fs,net}::close` (and `close_sync`, `IORING_OP_CLOSE`) are
+  never called. Every fd is closed synchronously via `libc::close` in `Drop`. Decide
+  whether closing through io_uring (ordered relative to in-flight SQEs on the fd) is
+  needed, then either wire it or delete the path. *Consideration:* on io_uring, closing
+  an fd with `libc::close` while operations referencing it are still in flight can race;
+  `IORING_OP_CLOSE` exists to order the close — confirm the ownership model makes the
+  synchronous close safe before deleting.
+- **Unused op classifier.** `sys::linux::{fs,net}::execution_path` / `ExecutionPath`
+  classify ops into io_uring/offload/inline but are never called (routing is inlined at
+  the dispatch sites). Remove, or adopt as the single routing source of truth.
+- **Duplicate notifier method.** `ThreadNotifier::notify` (inherent) duplicates the
+  `Notifier` trait method that all callers use; delete the inherent method.
