@@ -45,7 +45,7 @@ impl std::error::Error for QueueError {}
 /// Obtained from [`current_thread_handle`](crate::current_thread_handle) or
 /// [`WorkerHandle::thread`]. Use [`queue_macrotask`](Self::queue_macrotask) to send work
 /// across threads; the closure runs as a macrotask on the target thread's event
-/// loop.
+/// loop after that thread has drained its microtask queue.
 pub struct ThreadHandle {
     pub(crate) shared: Arc<ThreadShared>,
 }
@@ -56,7 +56,9 @@ pub struct ThreadHandle {
 /// Lets the parent thread queue work onto the worker
 /// ([`queue_macrotask`](Self::queue_macrotask)), observe its lifecycle
 /// ([`is_finished`](Self::is_finished)), and obtain a plain
-/// [`ThreadHandle`] to it ([`thread`](Self::thread)).
+/// [`ThreadHandle`] to it ([`thread`](Self::thread)). Queued work enters the
+/// worker's macrotask queue and runs only after the worker drains its
+/// microtasks.
 pub struct WorkerHandle {
     pub(crate) thread: ThreadHandle,
     pub(crate) completion: Arc<WorkerCompletion>,
@@ -118,9 +120,10 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     /// Aborts the task.
     ///
-    /// The task's future is dropped at its next suspension point (it is not
-    /// polled again), which cancels any in-flight driver operation it is parked
-    /// on. A subsequent await of this handle resolves to
+    /// Once the abort is observed, the task's future is dropped without being
+    /// polled again. Dropping the future may cancel runtime interest in driver
+    /// operations it was awaiting, but underlying OS work may still complete.
+    /// A subsequent await of this handle resolves to
     /// [`Err(JoinError::Aborted)`](crate::task::JoinError). Aborting a task that
     /// has already completed is a no-op.
     pub fn abort(&self) {
@@ -154,7 +157,10 @@ impl<T> Future for JoinHandle<T> {
 ///
 /// Obtained from [`JoinHandle::abort_handle`]. Like the runtime's futures, this
 /// handle is `!Send` and only valid on the runtime thread that created the
-/// task.
+/// task. This differs from Tokio's `Send` abort handles: runite tasks are local
+/// and the handle is backed by `Rc`, so abort requests cannot be sent directly
+/// across threads. From another thread, use [`ThreadHandle::queue_macrotask`] to
+/// schedule a closure on the owning runtime thread and abort from there.
 #[derive(Clone)]
 pub struct AbortHandle {
     shared: Rc<TaskShared>,
@@ -202,6 +208,10 @@ impl Future for YieldNow {
 
 impl ThreadHandle {
     /// Queues a macrotask onto this runtime thread.
+    ///
+    /// Remote tasks are first drained into the target thread's local macrotask
+    /// queue. They run in that queue only after the target thread drains all
+    /// ready microtasks.
     ///
     /// Returns [`QueueError::Closed`] if the target thread is already closed, or
     /// [`QueueError::Full`] if the cross-thread macrotask queue is at capacity.
@@ -257,6 +267,9 @@ impl ThreadHandle {
 
 impl WorkerHandle {
     /// Queues a macrotask onto the worker thread.
+    ///
+    /// The closure is sent through the worker's remote queue, then runs as a
+    /// macrotask after the worker drains its microtasks.
     ///
     /// Returns [`QueueError::Closed`] if the worker has already shut down, or
     /// [`QueueError::Full`] if its cross-thread macrotask queue is at capacity.

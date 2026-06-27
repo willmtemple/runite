@@ -1,12 +1,13 @@
-//! Task spawning primitives.
+//! Task ownership and blocking-offload primitives.
 //!
-//! Exposes [`JoinSet`] for owning groups of local tasks and [`spawn_blocking`],
-//! which moves a blocking closure onto the shared OS-thread pool and returns a
-//! future that resolves to the closure's return value.
+//! [`JoinSet`] provides structured ownership of tasks spawned on the current
+//! runtime thread. It uses the root [`crate::spawn`] API, so child futures may be
+//! `!Send`, never migrate to another runtime thread, and are aborted when the
+//! set is dropped unless they are detached.
 //!
-//! In-runtime async work should use [`crate::spawn`] instead; this
-//! module exists for code that must call blocking syscalls or run CPU-heavy
-//! computations without stalling the event loop.
+//! [`spawn_blocking`] is separate: it moves a `Send` closure onto the shared
+//! OS-thread pool for blocking syscalls or CPU-heavy work that would otherwise
+//! stall an event loop.
 //!
 //! # Examples
 //!
@@ -28,6 +29,35 @@
 //! runite::run();
 //!
 //! assert_eq!(observed.load(Ordering::SeqCst), 42);
+//! ```
+//!
+//! Local `JoinSet` tasks can capture non-`Send` state:
+//!
+//! ```
+//! use std::cell::RefCell;
+//! use std::rc::Rc;
+//!
+//! let values = Rc::new(RefCell::new(Vec::new()));
+//! let values_task = Rc::clone(&values);
+//!
+//! runite::spawn(async move {
+//!     let mut set = runite::task::JoinSet::new();
+//!     for value in [1, 2, 3] {
+//!         let values = Rc::clone(&values_task);
+//!         set.spawn(async move {
+//!             values.borrow_mut().push(value);
+//!             value
+//!         });
+//!     }
+//!
+//!     while let Some(result) = set.join_next().await {
+//!         result.expect("local task should finish");
+//!     }
+//! });
+//!
+//! runite::run();
+//! values.borrow_mut().sort_unstable();
+//! assert_eq!(&*values.borrow(), &[1, 2, 3]);
 //! ```
 
 use core::future::Future;
