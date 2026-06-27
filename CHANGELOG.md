@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `task::JoinSet<T>`: a collection of spawned local tasks with `join_next().await`,
   `abort_all`, and `detach_all`; dropping the set aborts its still-running tasks.
 
+### Fixed
+
+- `fs::create_dir_all` no longer returns `Ok(())` when the destination path already
+  exists as a non-directory (e.g. a regular file); it now reports `AlreadyExists`,
+  matching `std::fs::create_dir_all`.
+- `process::Command::output` now concurrently drains a caller-piped stderr, preventing a
+  deadlock where a child that fills the stderr pipe buffer would block while the runtime
+  waited to read stdout.
+- `sync::OnceCell::get_or_init` no longer becomes permanently stuck if the initializer
+  future is cancelled (dropped) or panics; the cell resets and a waiting caller retries
+  initialization.
+- `sync::Notify` no longer loses a `notify_one` notification when the selected waiter's
+  future is dropped before completing; the notification is forwarded to the next waiter
+  (or stored as a permit). Broadcast wakes from `notify_waiters` are unaffected.
+
 ### Changed
 
 - Breaking scheduling/timer API rename: `queue_future` → `spawn`,

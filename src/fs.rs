@@ -652,7 +652,10 @@ pub async fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Creates a directory and any missing parent directories.
 ///
-/// Existing directories along the path are accepted.
+/// Existing **directories** along the path are accepted and treated as success.
+/// If any component already exists as a non-directory (for example, the final
+/// component is a regular file), this returns an [`io::ErrorKind::AlreadyExists`]
+/// error, matching [`std::fs::create_dir_all`].
 pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     let mut current = PathBuf::new();
@@ -665,7 +668,22 @@ pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
         match create_dir(&current).await {
             Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // An existing component is only acceptable if it is itself a
+                // directory. Matching `std::fs::create_dir_all`, a path whose
+                // final component is an existing file (or other non-directory)
+                // must surface an error rather than silently succeed.
+                match metadata(&current).await {
+                    Ok(existing) if existing.is_dir() => {}
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("{} exists and is not a directory", current.display()),
+                        ));
+                    }
+                    Err(metadata_error) => return Err(metadata_error),
+                }
+            }
             Err(error) => return Err(error),
         }
     }

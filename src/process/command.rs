@@ -359,6 +359,12 @@ impl Command {
     /// bytes contain stdout only; a non-success exit status is reported as an
     /// [`io::Error`].
     ///
+    /// If you configure [`stderr`](Self::stderr) as [`Stdio::piped`] before
+    /// calling this, its output is drained and discarded concurrently so the
+    /// child cannot deadlock by filling the stderr pipe buffer. To capture
+    /// stderr yourself, spawn the child with [`spawn`](Self::spawn) and read the
+    /// streams directly instead.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -373,9 +379,24 @@ impl Command {
     pub async fn output(&mut self) -> io::Result<Vec<u8>> {
         self.stdout(Stdio::piped());
         let mut child = self.spawn()?;
+
+        // If the caller pre-configured a piped stderr, drain it concurrently.
+        // A child that writes enough to fill the stderr pipe buffer would
+        // otherwise block on `write`, while we block reading stdout, deadlocking
+        // the runtime thread. Reading both streams concurrently avoids this.
+        let stderr_drain = child.stderr.take().map(|mut stderr| {
+            crate::spawn(async move {
+                let mut sink = Vec::new();
+                let _ = stderr.read_to_end(&mut sink).await;
+            })
+        });
+
         let mut output = Vec::new();
         if let Some(stdout) = child.stdout.as_mut() {
             stdout.read_to_end(&mut output).await?;
+        }
+        if let Some(drain) = stderr_drain {
+            let _ = drain.await;
         }
         let status = child.wait().await?;
         if status.success() {

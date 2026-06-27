@@ -88,3 +88,34 @@ fn read_and_write_free_functions() {
     });
     assert_eq!(text, "top-level helpers");
 }
+
+#[test]
+fn create_dir_all_accepts_existing_directory() {
+    let path = temp_path("mkdirp-existing");
+    let work_path = path.clone();
+    let ok = block_on(move || async move {
+        fs::create_dir_all(&work_path).await.expect("first create");
+        // Re-creating an existing directory must succeed.
+        let result = fs::create_dir_all(&work_path).await;
+        let _ = fs::remove_dir(&work_path).await;
+        result.is_ok()
+    });
+    assert!(ok);
+}
+
+#[test]
+fn create_dir_all_rejects_existing_file() {
+    let path = temp_path("mkdirp-file");
+    let work_path = path.clone();
+    let kind = block_on(move || async move {
+        fs::write(&work_path, b"i am a file")
+            .await
+            .expect("write file");
+        // The leaf path already exists as a regular file; this must error
+        // rather than silently succeed.
+        let result = fs::create_dir_all(&work_path).await;
+        let _ = fs::remove_file(&work_path).await;
+        result.err().map(|error| error.kind())
+    });
+    assert_eq!(kind, Some(std::io::ErrorKind::AlreadyExists));
+}
