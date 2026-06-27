@@ -3,6 +3,9 @@
 //! The types in this module coordinate futures that stay on one runite runtime
 //! thread. They are intentionally `!Send`/`!Sync` and use thread-local wakeups
 //! rather than cross-thread atomics.
+//! They do not provide cross-thread fairness or synchronization: use channels,
+//! [`crate::ThreadHandle`], or [`crate::WorkerHandle`] to coordinate between
+//! runtime threads.
 //!
 //! Use [`Mutex`] for exclusive access to shared task-local state, [`RwLock`] for
 //! shared-or-exclusive access, [`Semaphore`] for limiting concurrent access,
@@ -31,6 +34,33 @@
 //! runite::run();
 //!
 //! assert_eq!(observed.get(), 42);
+//! ```
+//!
+//! `Notify` is useful for local one-shot wakeups:
+//!
+//! ```
+//! use std::cell::Cell;
+//! use std::rc::Rc;
+//!
+//! let notify = Rc::new(runite::sync::Notify::new());
+//! let woke = Rc::new(Cell::new(false));
+//!
+//! runite::spawn({
+//!     let notify = Rc::clone(&notify);
+//!     let woke = Rc::clone(&woke);
+//!     async move {
+//!         notify.notified().await;
+//!         woke.set(true);
+//!     }
+//! });
+//!
+//! runite::queue_macrotask({
+//!     let notify = Rc::clone(&notify);
+//!     move || notify.notify_one()
+//! });
+//!
+//! runite::run();
+//! assert!(woke.get());
 //! ```
 
 mod mutex;

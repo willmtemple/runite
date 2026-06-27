@@ -18,6 +18,13 @@ struct Waiter {
 /// This mutex is intentionally `!Send` and `!Sync`: it is only for tasks that
 /// remain on one runite runtime thread.
 ///
+/// # Differences from blocking and multithreaded mutexes
+///
+/// This mutex never blocks an OS thread and does not poison when a holder
+/// panics. Unlike `std::sync::Mutex` or Tokio's multithreaded mutex, it has no
+/// `Send`/owned guard form: guards and wait futures are local to one runtime
+/// thread. Contended waiters are queued FIFO.
+///
 /// # Examples
 ///
 /// ```
@@ -79,6 +86,13 @@ impl<T: ?Sized> Mutex<T> {
     ///
     /// Waiters are woken in FIFO order. Dropping the returned [`MutexGuard`]
     /// releases the mutex to the next waiter, if any.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the `lock()` future before it is selected removes it from the
+    /// waiter queue. If it has already been selected but is dropped before
+    /// returning a guard, the lock is passed to the next waiter instead of being
+    /// leaked.
     pub async fn lock(&self) -> MutexGuard<'_, T> {
         LockFuture::new(self).await
     }

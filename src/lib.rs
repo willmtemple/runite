@@ -8,6 +8,12 @@
 //! provide parallelism and communicate through [channels](channel) and
 //! [`ThreadHandle`]s.
 //!
+//! Unlike Tokio's default runtime or async-std, there is no work-stealing
+//! multithreaded scheduler. Continuations and wakeups are queued as microtasks
+//! on the same runtime thread, while timers, I/O callbacks, cross-thread wakes,
+//! and [`queue_macrotask`] work run as macrotasks after the microtask queue has
+//! drained.
+//!
 //! # Getting started
 //!
 //! The usual entry point is the [`#[runite::main]`](macro@main) attribute, which
@@ -62,9 +68,11 @@
 //!   runtime services
 //! - [`channel`] for `mpsc`/`oneshot`/`broadcast`/`watch` channels
 //! - [`sync`] for [`Mutex`](sync::Mutex), [`Semaphore`](sync::Semaphore),
-//!   [`Notify`](sync::Notify), and [`OnceCell`](sync::OnceCell)
+//!   [`RwLock`](sync::RwLock), [`Notify`](sync::Notify), and
+//!   [`OnceCell`](sync::OnceCell)
 //! - [`io`] for the crate's `AsyncRead`/`AsyncWrite`/`Stream` traits and
 //!   [`BufReader`](io::BufReader)/[`BufWriter`](io::BufWriter)
+//! - [`task::JoinSet`] for structured ownership of local child tasks
 //! - [`task::spawn_blocking`] for offloading blocking work to a thread pool
 //!
 //! # Cargo features
@@ -166,6 +174,11 @@ mod runtime_api {
     /// order with respect to other macrotasks (timers, I/O completions, and other
     /// queued tasks). To run async work instead, use [`spawn`].
     ///
+    /// # Panics
+    ///
+    /// Panics if the current thread's runtime state or driver cannot be
+    /// initialized.
+    ///
     /// # Examples
     ///
     /// ```
@@ -190,6 +203,11 @@ mod runtime_api {
     /// Microtasks run ahead of macrotasks: the runtime fully drains the microtask
     /// queue before servicing the next macrotask or polling the I/O driver. Use
     /// this for work that must complete before the loop yields to I/O again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current thread's runtime state or driver cannot be
+    /// initialized.
     ///
     /// # Examples
     ///
@@ -221,8 +239,13 @@ mod runtime_api {
     /// Dropping the handle detaches the task; it keeps running to completion.
     ///
     /// The future is `!Send` and never migrates off this thread. It is first
-    /// polled immediately on spawn; subsequent wakeups are scheduled as
-    /// microtasks.
+    /// scheduled as a microtask; its first poll happens when the runtime drains
+    /// the microtask queue. Subsequent wakeups are also scheduled as microtasks.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current thread's runtime state or driver cannot be
+    /// initialized.
     ///
     /// # Examples
     ///
@@ -251,10 +274,17 @@ mod runtime_api {
     /// Spawns a new OS thread running its own independent runtime event loop.
     ///
     /// `initial_task` (which must be `Send`, since it crosses to the new thread)
-    /// runs first on the worker; `on_exit` runs on the worker as it shuts down.
+    /// runs first on the worker. After the worker completes, `on_exit` is queued
+    /// as a macrotask on the parent runtime thread, so its captured state does
+    /// not need to be `Send`.
     /// Returns a [`WorkerHandle`] for joining or queueing further work via
     /// [`ThreadHandle::queue_macrotask`]. This is the building block for scaling across
     /// cores: start one worker per core. See the crate's architecture guide.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the parent runtime state cannot be initialized, the worker
+    /// runtime driver cannot be created, or the OS thread cannot be spawned.
     ///
     /// # Examples
     ///
@@ -308,6 +338,11 @@ mod runtime_api {
     /// then returns. This is what [`main`](crate::main) calls after queueing the
     /// entry point.
     ///
+    /// # Panics
+    ///
+    /// Panics if runtime or driver initialization fails, or if the platform
+    /// driver returns an unexpected error while polling or waiting.
+    ///
     /// # Examples
     ///
     /// ```
@@ -329,6 +364,11 @@ mod runtime_api {
     /// Runs all currently ready tasks, microtasks, and expired timers, then
     /// returns without sleeping for I/O — useful for embedding the runtime inside
     /// another event loop. Unlike [`run`], it does not wait for pending I/O.
+    ///
+    /// # Panics
+    ///
+    /// Panics if runtime or driver initialization fails, or if the platform
+    /// driver returns an unexpected error while polling ready events.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
     }
@@ -337,6 +377,11 @@ mod runtime_api {
     ///
     /// Does not arm timers or poll the I/O driver. Intended for fine-grained
     /// manual driving of the loop when embedding the runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current thread's runtime state or driver cannot be
+    /// initialized.
     pub fn run_ready_tasks() {
         imp::run_ready_tasks()
     }

@@ -17,6 +17,13 @@ struct Waiter {
 /// A semaphore holds a number of permits. Each successful acquire removes one
 /// permit, and dropping the returned [`Permit`] releases it.
 ///
+/// # Differences from Tokio
+///
+/// This semaphore is local to one runtime thread. It is `!Send`/`!Sync`, uses a
+/// single-thread-local FIFO waiter queue, and returns borrowed permit guards
+/// rather than owned permits. It does not wake or coordinate waiters across
+/// runtime threads.
+///
 /// # Examples
 ///
 /// ```
@@ -87,6 +94,13 @@ impl Semaphore {
     ///
     /// Waiters are woken in FIFO order. Dropping the returned [`Permit`]
     /// releases it.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the acquire future before it is selected removes it from the
+    /// waiter queue. If it has already been selected but is dropped before
+    /// returning a [`Permit`], the permit is passed to the next waiter or
+    /// returned to the semaphore.
     pub async fn acquire(&self) -> Permit<'_> {
         AcquireFuture::new(self).await
     }
