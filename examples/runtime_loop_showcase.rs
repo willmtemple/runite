@@ -43,7 +43,7 @@ fn unix_timestamp_millis() -> String {
 fn queue_log(handle: &ThreadHandle, expected: usize, message: impl Into<String>) {
     let message = message.into();
     handle
-        .queue_task(move || {
+        .queue_macrotask(move || {
             log_event_impl(expected, format_args!("{message}"));
         })
         .unwrap_or_else(|err| panic!("main thread should accept log task {expected}: {err}"));
@@ -52,7 +52,7 @@ fn queue_log(handle: &ThreadHandle, expected: usize, message: impl Into<String>)
 fn queue_log_microtask(handle: &ThreadHandle, expected: usize, message: impl Into<String>) {
     let message = message.into();
     handle
-        .queue_task(move || {
+        .queue_macrotask(move || {
             log_event_impl(expected, format_args!("{message}"));
         })
         .unwrap_or_else(|err| panic!("main thread should accept log microtask {expected}: {err}"));
@@ -179,7 +179,7 @@ fn main() {
         );
 
         set_timeout(Duration::from_millis(70), move || {
-            let queued = worker.queue_task({
+            let queued = worker.queue_macrotask({
                 let main_from_remote_task = main_handle.clone();
                 move || {
                     queue_log(

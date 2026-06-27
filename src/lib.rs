@@ -253,7 +253,7 @@ mod runtime_api {
     /// `initial_task` (which must be `Send`, since it crosses to the new thread)
     /// runs first on the worker; `on_exit` runs on the worker as it shuts down.
     /// Returns a [`WorkerHandle`] for joining or queueing further work via
-    /// [`ThreadHandle::queue_task`]. This is the building block for scaling across
+    /// [`ThreadHandle::queue_macrotask`]. This is the building block for scaling across
     /// cores: start one worker per core. See the crate's architecture guide.
     ///
     /// # Examples
@@ -283,7 +283,7 @@ mod runtime_api {
     /// Returns a [`ThreadHandle`] to the current runtime thread.
     ///
     /// The handle is `Send` and can be moved to other threads to queue work back
-    /// onto this one with [`ThreadHandle::queue_task`].
+    /// onto this one with [`ThreadHandle::queue_macrotask`].
     ///
     /// # Panics
     ///

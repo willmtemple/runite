@@ -16,7 +16,7 @@ use super::future_task::{JoinState, TaskShared};
 use super::state::{ThreadShared, WorkerCompletion};
 use crate::trace_targets;
 
-/// Returned by [`ThreadHandle::queue_task`] when the target runtime is shutting
+/// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime is shutting
 /// down or its cross-thread macrotask queue is full.
 #[derive(Debug)]
 pub enum QueueError {
@@ -43,7 +43,7 @@ impl std::error::Error for QueueError {}
 /// thread from any thread.
 ///
 /// Obtained from [`current_thread_handle`](crate::current_thread_handle) or
-/// [`WorkerHandle::thread`]. Use [`queue_task`](Self::queue_task) to send work
+/// [`WorkerHandle::thread`]. Use [`queue_macrotask`](Self::queue_macrotask) to send work
 /// across threads; the closure runs as a macrotask on the target thread's event
 /// loop.
 pub struct ThreadHandle {
@@ -54,7 +54,7 @@ pub struct ThreadHandle {
 /// [`spawn_worker`](crate::spawn_worker).
 ///
 /// Lets the parent thread queue work onto the worker
-/// ([`queue_task`](Self::queue_task)), observe its lifecycle
+/// ([`queue_macrotask`](Self::queue_macrotask)), observe its lifecycle
 /// ([`is_finished`](Self::is_finished)), and obtain a plain
 /// [`ThreadHandle`] to it ([`thread`](Self::thread)).
 pub struct WorkerHandle {
@@ -205,7 +205,7 @@ impl ThreadHandle {
     ///
     /// Returns [`QueueError::Closed`] if the target thread is already closed, or
     /// [`QueueError::Full`] if the cross-thread macrotask queue is at capacity.
-    pub fn queue_task<F>(&self, task: F) -> Result<(), QueueError>
+    pub fn queue_macrotask<F>(&self, task: F) -> Result<(), QueueError>
     where
         F: FnOnce() + Send + 'static,
     {
@@ -260,11 +260,11 @@ impl WorkerHandle {
     ///
     /// Returns [`QueueError::Closed`] if the worker has already shut down, or
     /// [`QueueError::Full`] if its cross-thread macrotask queue is at capacity.
-    pub fn queue_task<F>(&self, task: F) -> Result<(), QueueError>
+    pub fn queue_macrotask<F>(&self, task: F) -> Result<(), QueueError>
     where
         F: FnOnce() + Send + 'static,
     {
-        self.thread.queue_task(task)
+        self.thread.queue_macrotask(task)
     }
 
     /// Returns `true` once the worker thread has fully exited.

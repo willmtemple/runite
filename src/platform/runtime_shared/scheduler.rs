@@ -888,10 +888,13 @@ mod tests {
         let handle = handle_with_capacity(4);
 
         for _ in 0..4 {
-            assert!(handle.queue_task(|| {}).is_ok());
+            assert!(handle.queue_macrotask(|| {}).is_ok());
         }
 
-        assert!(matches!(handle.queue_task(|| {}), Err(QueueError::Full)));
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Full)
+        ));
     }
 
     #[test]
@@ -899,6 +902,9 @@ mod tests {
         let handle = handle_with_capacity(4);
         handle.shared.closed.store(true, Ordering::Release);
 
-        assert!(matches!(handle.queue_task(|| {}), Err(QueueError::Closed)));
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Closed)
+        ));
     }
 }

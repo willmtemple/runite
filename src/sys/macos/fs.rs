@@ -268,7 +268,7 @@ impl ReadDirState {
         }
 
         let state = Arc::clone(self);
-        match self.owner.queue_task(move || {
+        match self.owner.queue_macrotask(move || {
             state.wake_queued.store(false, Ordering::Release);
             if let Some(waker) = state.waker.lock().unwrap().take() {
                 waker.wake();
