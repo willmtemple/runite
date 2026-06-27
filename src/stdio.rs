@@ -6,6 +6,21 @@
 //! duplicates the process stdio descriptor, so dropping it does not close the
 //! process-wide standard stream.
 //!
+//! The handles are thread-affine like other runite I/O objects: create and poll
+//! them on the runtime thread that owns them. Tasks do not migrate between
+//! threads.
+//!
+//! `Stdout` and `Stderr` perform write-through async writes via the active
+//! backend: Linux x86_64 uses `io_uring`, while macOS aarch64 offloads blocking
+//! writes to the blocking pool. runite does not add userspace buffering for
+//! these writers. Their `poll_flush` and `poll_close` methods are no-ops;
+//! `flush()` only observes that previously awaited writes have completed and
+//! does not call libc `fflush`, a terminal flush, or `fsync`.
+//!
+//! `Stdin` uses the platform backend for reads. macOS always offloads a blocking
+//! `read`; Linux first tries `io_uring` and falls back to the blocking pool when
+//! the descriptor does not support runtime-native reads.
+//!
 //! # Terminal UIs
 //!
 //! Terminal applications can use [`stdin`] for async reads from the TTY,
@@ -92,7 +107,11 @@ type PendingStandardWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'st
 /// implements [`AsyncRead`] for byte-oriented reads. It also provides
 /// [`read_line`](Self::read_line) for simple line-oriented input. On Linux, the
 /// reader tries `io_uring` first and falls back to a helper-thread blocking read
-/// if the active descriptor does not support runtime-native reads.
+/// if the active descriptor does not support runtime-native reads. On macOS,
+/// reads are always offloaded to the blocking pool.
+///
+/// `read_line` keeps an internal buffer and may read beyond the returned line;
+/// bytes after the newline are saved for the next call.
 ///
 /// Create one with [`stdin`].
 pub struct Stdin {
@@ -104,8 +123,13 @@ pub struct Stdin {
 /// Async writer for standard output.
 ///
 /// Created by [`stdout`], this handle duplicates file descriptor 1 and
-/// implements [`AsyncWrite`] for runtime-driven writes. Dropping it does not
-/// close the process-wide stdout stream.
+/// implements [`AsyncWrite`] for runtime-driven write-through writes. A single
+/// write may complete after writing fewer bytes than requested; use
+/// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
+/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops, and
+/// `flush()` does not call libc `fflush` or `fsync`.
+///
+/// Dropping it does not close the process-wide stdout stream.
 pub struct Stdout {
     writer: StandardWriter,
 }
@@ -113,8 +137,13 @@ pub struct Stdout {
 /// Async writer for standard error.
 ///
 /// Created by [`stderr`], this handle duplicates file descriptor 2 and
-/// implements [`AsyncWrite`] for runtime-driven writes. Dropping it does not
-/// close the process-wide stderr stream.
+/// implements [`AsyncWrite`] for runtime-driven write-through writes. A single
+/// write may complete after writing fewer bytes than requested; use
+/// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
+/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops, and
+/// `flush()` does not call libc `fflush` or `fsync`.
+///
+/// Dropping it does not close the process-wide stderr stream.
 pub struct Stderr {
     writer: StandardWriter,
 }
@@ -203,6 +232,9 @@ impl Stdin {
     /// Returns `Ok(None)` on EOF.
     ///
     /// Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
+    ///
+    /// This method reads chunks into an internal buffer, so it may read beyond
+    /// the line it returns. Buffered bytes are preserved for subsequent calls.
     ///
     /// # Examples
     ///
@@ -299,6 +331,12 @@ impl Stdin {
 impl Stdout {
     /// Writes bytes to standard output.
     ///
+    /// The write is sent through the platform backend immediately and may write
+    /// fewer bytes than `buf.len()`. Use
+    /// [`write_all`](crate::io::AsyncWriteExt::write_all) to retry until the
+    /// full buffer is written. `flush()` is a no-op for durability and libc
+    /// buffering; it does not call `fflush` or `fsync`.
+    ///
     /// For extension methods such as `write_all` and `flush`, use the
     /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
     ///
@@ -320,6 +358,12 @@ impl Stdout {
 
 impl Stderr {
     /// Writes bytes to standard error.
+    ///
+    /// The write is sent through the platform backend immediately and may write
+    /// fewer bytes than `buf.len()`. Use
+    /// [`write_all`](crate::io::AsyncWriteExt::write_all) to retry until the
+    /// full buffer is written. `flush()` is a no-op for durability and libc
+    /// buffering; it does not call `fflush` or `fsync`.
     ///
     /// For extension methods such as `write_all` and `flush`, use the
     /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.

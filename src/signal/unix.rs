@@ -8,9 +8,11 @@
 //! This implementation deliberately uses a dedicated blocking-pool reader task
 //! instead of a per-runtime-thread microtask drain. Signals are process-global,
 //! so one async-signal-safe handler writes to one process-wide wake fd, and the
-//! reader forwards observed signal kinds to all runtime threads that have
-//! constructed a [`Signal`]. Repeated calls to [`signal`] share the same
-//! process-wide signal handler and create independent per-thread stream
+//! reader forwards observed signal kinds on a best-effort basis to live runtime
+//! threads that have constructed a [`Signal`]. Forwarding uses
+//! [`crate::ThreadHandle::queue_macrotask`]; if a target thread is closed or its
+//! queue is full, that wake is dropped. Repeated calls to [`signal`] share the
+//! same process-wide signal handler and create independent per-thread stream
 //! handles.
 //!
 //! Existing non-default, non-ignored process handlers are not overwritten:
@@ -94,7 +96,9 @@ pub enum SignalKind {
 ///
 /// Each [`Signal`] is tied to the runtime thread on which it was created and is
 /// intentionally `!Send`. Dropping it unregisters that stream and lets the
-/// runtime exit if no other async operations are live.
+/// runtime exit if no other async operations are live. Dropping the last stream
+/// does not restore the previous process-wide `sigaction`; the runite handler
+/// remains installed for the process.
 pub struct Signal {
     last_seen: u64,
     state: Arc<SignalState>,
@@ -106,6 +110,10 @@ pub struct Signal {
 ///
 /// Repeated calls for the same kind share the process-wide `sigaction`
 /// registration and return independent stream handles.
+///
+/// Successful installation changes signal handling for the whole process and
+/// all runtime threads. The previous default or ignored disposition is not
+/// restored when a [`Signal`] is dropped.
 ///
 /// Returns an error if another non-default, non-ignored handler is already
 /// installed for the requested signal.
@@ -149,6 +157,10 @@ impl Signal {
     /// Signals are coalesced by kind; if several identical signals arrive before
     /// the stream is polled again, one wake may represent multiple process
     /// signal deliveries.
+    ///
+    /// The current implementation returns `Some(())` when an event is observed
+    /// and never produces `None`. The `Option` leaves room for a future closed
+    /// stream state without changing the method signature.
     ///
     /// # Examples
     ///
