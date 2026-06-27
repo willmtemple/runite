@@ -5,10 +5,32 @@
 //! mirrors [`std::fs`] where that shape makes sense, while using async methods
 //! for operations that may block the caller.
 //!
+//! runite futures and handles are thread-affine: create and poll filesystem
+//! futures on the runtime thread that owns them. Tasks do not migrate between
+//! runtime threads, and there is no work-stealing scheduler. Same-thread wakeups
+//! resume as microtasks, while backend completions and blocking-pool callbacks
+//! re-enter the runtime as macrotasks.
+//!
+//! # Backend model
+//!
+//! On Linux x86_64, regular filesystem operations use the runtime's `io_uring`
+//! completion backend where an opcode exists. On macOS aarch64, filesystem work
+//! is offloaded to runite's blocking thread pool so slow disk or metadata calls
+//! do not block the event-loop thread. Directory iteration is also
+//! blocking-pool-backed on Linux because `std::fs::read_dir`/directory scanning
+//! can block and is not modeled as an `io_uring` operation here.
+//!
+//! This differs from Tokio's default multi-threaded scheduler and async-std:
+//! runite keeps tasks on a JavaScript-style, thread-local event loop and mixes
+//! completion-based filesystem I/O with blocking-pool offload only where the
+//! platform requires it.
+//!
 //! Cancellation semantics:
 //! - Dropping an I/O future cancels interest in the result.
 //! - The runtime issues best-effort kernel cancellation where supported.
 //! - The underlying OS operation may still complete after the future is dropped.
+//! - Dropping a [`ReadDir`] releases the runtime's pending operation state, but
+//!   it does not stop an already-running `std::fs::read_dir` producer.
 //!
 //! # Examples
 //!
@@ -51,9 +73,13 @@ type PendingFileWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static
 
 /// Async file handle.
 ///
-/// `File` is cheap to clone internally and supports both cursor-based sequential I/O and
-/// offset-based positioned I/O. Use [`File::open`] and [`File::create`] for common
-/// cases or [`OpenOptions`] for detailed access-mode control.
+/// `File` supports both cursor-based sequential I/O and offset-based positioned
+/// I/O. It is not [`Clone`]; use [`try_clone`](Self::try_clone) to duplicate the
+/// underlying file descriptor asynchronously. As with [`std::fs::File::try_clone`],
+/// duplicated handles share the kernel-managed file cursor.
+///
+/// Use [`File::open`] and [`File::create`] for common cases or [`OpenOptions`]
+/// for detailed access-mode control.
 pub struct File {
     inner: Arc<FileInner>,
     pending_read: Option<PendingFileRead>,
@@ -82,6 +108,11 @@ pub struct Metadata {
 ///
 /// Call [`next_entry`](Self::next_entry) to pull entries one at a time, or use
 /// the [`Stream`] implementation with the runtime's stream extension traits.
+///
+/// The stream starts an eager blocking-pool producer when it is created. Entries
+/// are queued back to the creating runtime thread as macrotasks. Dropping the
+/// stream releases runite's pending operation state, but it does not cancel an
+/// already-running `std::fs::read_dir` call in the producer.
 pub struct ReadDir {
     inner: sys_fs::ReadDirStream,
 }
@@ -202,8 +233,9 @@ impl File {
 
     /// Flushes any userspace buffering associated with this handle.
     ///
-    /// The current implementation does not add additional buffering beyond the kernel file
-    /// description, so this is effectively a no-op.
+    /// runite does not add userspace buffering for [`File`], so this is a
+    /// no-op. It does not call `fsync` or make data durable; use
+    /// [`sync_all`](Self::sync_all) or [`sync_data`](Self::sync_data) for that.
     pub async fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -290,7 +322,9 @@ impl File {
 
     /// Duplicates the underlying file description.
     ///
-    /// As with `std::fs::File::try_clone`, the cloned handle shares kernel-managed cursor state.
+    /// As with [`std::fs::File::try_clone`], the cloned handle shares
+    /// kernel-managed cursor state with this handle. Positioned I/O methods such
+    /// as [`read_at`](Self::read_at) avoid that shared cursor.
     pub async fn try_clone(&self) -> io::Result<Self> {
         sys_fs::try_clone(FsOp::Duplicate { fd: self.raw_fd() })
             .await

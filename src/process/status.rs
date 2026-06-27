@@ -10,7 +10,7 @@
 //! use runite::process::Command;
 //!
 //! runite::spawn(async {
-//!     let status = Command::new("/bin/true")
+//!     let status = Command::new("true")
 //!         .status()
 //!         .await
 //!         .expect("process should run");
@@ -45,7 +45,7 @@ impl ExitStatus {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let status = Command::new("/bin/true").status().await?;
+    /// let status = Command::new("true").status().await?;
     /// assert!(status.success());
     /// # Ok(())
     /// # }
@@ -65,7 +65,7 @@ impl ExitStatus {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let status = Command::new("/bin/true").status().await?;
+    /// let status = Command::new("true").status().await?;
     /// assert_eq!(status.code(), Some(0));
     /// # Ok(())
     /// # }
@@ -84,7 +84,7 @@ impl ExitStatus {
     /// # async fn example() -> std::io::Result<()> {
     /// use runite::process::Command;
     ///
-    /// let mut child = Command::new("/bin/sleep").arg("60").spawn()?;
+    /// let mut child = Command::new("sleep").arg("60").spawn()?;
     /// child.kill()?;
     /// let status = child.wait().await?;
     /// #[cfg(unix)]

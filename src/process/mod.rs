@@ -11,6 +11,20 @@
 //! programs are marked `no_run` because available commands and paths vary across
 //! environments.
 //!
+//! # Runtime and platform model
+//!
+//! Spawning is synchronous: [`Command::spawn`] delegates to
+//! [`std::process::Command::spawn`] on the calling runtime thread. Async behavior
+//! begins after spawn, when [`Child::wait`] observes process exit and child pipe
+//! handles use fd readiness for I/O.
+//!
+//! On Linux x86_64, child-exit waits use pidfd readability followed by
+//! `waitpid`; runite does not rely on `SIGCHLD` for this path. On macOS aarch64,
+//! waits register `EVFILT_PROC` with kqueue and poll it after a 1ms runtime
+//! sleep. Both approaches fit runite's event-loop-per-thread model: futures and
+//! handles remain on their creating runtime thread, and completions wake that
+//! same thread rather than moving tasks to a work-stealing scheduler.
+//!
 //! # Examples
 //!
 //! ```no_run
@@ -18,7 +32,7 @@
 //! use runite::io::{AsyncReadExt, AsyncWriteExt};
 //! use runite::process::{Command, Stdio};
 //!
-//! let mut child = Command::new("/bin/cat")
+//! let mut child = Command::new("cat")
 //!     .stdin(Stdio::piped())
 //!     .stdout(Stdio::piped())
 //!     .spawn()?;
@@ -46,7 +60,7 @@
 //! use runite::process::Command;
 //!
 //! runite::spawn(async {
-//!     let status = Command::new("/bin/echo")
+//!     let status = Command::new("echo")
 //!         .arg("ready")
 //!         .status()
 //!         .await
