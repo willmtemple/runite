@@ -3,7 +3,9 @@
 //! Use a oneshot channel when one task needs to complete a single request, reply
 //! to another task, or transfer ownership of one value exactly once. The sender
 //! is consumed by [`Sender::send`], and the receiver resolves to an error if the
-//! sender is dropped before sending.
+//! sender is dropped before sending. Async receives register a waiter with the
+//! current runite event loop; completing the channel wakes that owning loop by a
+//! local microtask or a platform-specific remote wake as needed.
 //!
 //! # Examples
 //!
@@ -96,8 +98,10 @@ pub enum TryRecvError {
 impl<T: Send + 'static> Sender<T> {
     /// Sends `value` into the channel.
     ///
-    /// This consumes the sender. If the receiver is already waiting on a runtime thread, the
-    /// receive future is woken through the runtime's cross-thread notifier path.
+    /// This consumes the sender. If the receiver is already waiting, `send`
+    /// completes that registered runtime waiter. The wake is a local microtask
+    /// when `send` runs on the receiver's runtime thread, or a platform-specific
+    /// remote wake when it runs from another thread.
     ///
     /// # Examples
     ///
@@ -160,6 +164,10 @@ impl<T: Send + 'static> Sender<T> {
 impl<T: Send + 'static> Receiver<T> {
     /// Waits for the channel's value.
     ///
+    /// Cancellation is not guaranteed to preserve the value: once the sender has
+    /// delivered a value into this receive future's runtime completion, dropping
+    /// the future before it is polled ready drops that value.
+    ///
     /// # Examples
     ///
     /// ```
@@ -174,9 +182,9 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// # Panics
     ///
-    /// Panics if this future is first polled outside a runtime-managed thread. Async channel
-    /// waiting registers with the current runtime thread so it can be woken through the driver's
-    /// notification path.
+    /// Panics if this future is first polled outside a runtime-managed thread.
+    /// Async channel waiting registers with the current runtime thread so it can
+    /// be woken by a local microtask or the platform-specific remote wake path.
     pub async fn recv(&mut self) -> Result<T, RecvError> {
         let mut wait = None;
         poll_fn(|cx| self.poll_recv(cx, &mut wait)).await
