@@ -30,7 +30,7 @@
 //!     }
 //! }
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let mut reader = FuturesCompat::new(FuturesBytes(b"compat"));
 //!     let mut out = Vec::new();
 //!     reader.read_to_end(&mut out).await.unwrap();

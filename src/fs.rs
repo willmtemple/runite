@@ -16,7 +16,7 @@
 //! but not run by doctests:
 //!
 //! ```no_run
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     runite::fs::write("runite-example.txt", b"hello").await.unwrap();
 //!     let contents = runite::fs::read_to_string("runite-example.txt").await.unwrap();
 //!     assert_eq!(contents, "hello");
@@ -103,7 +103,7 @@ impl File {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut file = runite::fs::File::open("input.txt").await.unwrap();
     ///     let mut contents = String::new();
     ///     file.read_to_string(&mut contents).await.unwrap();
@@ -478,7 +478,7 @@ impl OpenOptions {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut options = runite::fs::OpenOptions::new();
     ///     let file = options
     ///         .read(true)
@@ -597,7 +597,7 @@ impl DirEntry {
 /// # Examples
 ///
 /// ```no_run
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let bytes = runite::fs::read("input.bin").await.unwrap();
 ///     assert!(!bytes.is_empty());
 /// });
@@ -706,7 +706,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 /// # Examples
 ///
 /// ```
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut entries = runite::fs::read_dir(".").await.unwrap();
 ///     let _ = entries.next_entry().await.unwrap();
 /// });
@@ -726,8 +726,8 @@ mod tests {
         remove_file, rename, write,
     };
     use crate::io::StreamExt;
-    use crate::queue_future;
-    use crate::{queue_task, run};
+    use crate::spawn;
+    use crate::{queue_macrotask, run};
     use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::future::{Future, poll_fn};
@@ -764,8 +764,8 @@ mod tests {
 
         {
             let output = Arc::clone(&output);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     create_dir_all(&nested)
                         .await
                         .expect("dir creation should succeed");
@@ -843,8 +843,8 @@ mod tests {
 
         {
             let seen = Arc::clone(&seen);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     create_dir_all(&root)
                         .await
                         .expect("dir creation should succeed");
@@ -881,8 +881,8 @@ mod tests {
 
         {
             let seen = Arc::clone(&seen);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     create_dir_all(&root)
                         .await
                         .expect("dir creation should succeed");
@@ -932,8 +932,8 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     write(&path, b"borrowed buffer")
                         .await
                         .expect("fixture write should succeed");
@@ -966,8 +966,8 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     write(&path, b"full file contents")
                         .await
                         .expect("fixture write should succeed");
@@ -1003,8 +1003,8 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
-                queue_future(async move {
+            queue_macrotask(move || {
+                spawn(async move {
                     write(&path, b"cancel smoke test")
                         .await
                         .expect("fixture write should succeed");

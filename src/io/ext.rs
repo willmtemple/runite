@@ -29,7 +29,7 @@
 //!     }
 //! }
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let lines = Bytes(b"alpha\nbeta")
 //!         .lines()
 //!         .collect::<Vec<_>>()
@@ -83,7 +83,7 @@ const COPY_BUF_SIZE: usize = 8192;
 ///     }
 /// }
 ///
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut reader = Bytes(b"alpha\nbeta");
 ///     let mut out = Vec::new();
 ///     let read = reader.read_to_end(&mut out).await.unwrap();
@@ -114,7 +114,7 @@ pub trait AsyncReadExt: AsyncRead {
     /// #         Poll::Ready(Ok(read))
     /// #     }
     /// # }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut reader = Bytes(b"abc");
     ///     let mut buf = [0; 2];
     ///     let read = reader.read(&mut buf).await.unwrap();
@@ -151,7 +151,7 @@ pub trait AsyncReadExt: AsyncRead {
     /// #         Poll::Ready(Ok(read))
     /// #     }
     /// # }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut reader = Bytes(b"abcd");
     ///     let mut buf = [0; 4];
     ///     reader.read_exact(&mut buf).await.unwrap();
@@ -191,7 +191,7 @@ pub trait AsyncReadExt: AsyncRead {
     /// #         Poll::Ready(Ok(read))
     /// #     }
     /// # }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut reader = Bytes(b"tail");
     ///     let mut buf = b"head".to_vec();
     ///     let read = reader.read_to_end(&mut buf).await.unwrap();
@@ -234,7 +234,7 @@ pub trait AsyncReadExt: AsyncRead {
     /// #         Poll::Ready(Ok(read))
     /// #     }
     /// # }
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let lines = Bytes(b"one\ntwo").lines().collect::<Vec<_>>().await;
     ///     let lines = lines.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
     ///     assert_eq!(lines, ["one", "two"]);
@@ -293,7 +293,7 @@ impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
 ///
 /// let written = Rc::new(RefCell::new(Vec::new()));
 /// let observed = Rc::clone(&written);
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut writer = Sink(written);
 ///     writer.write_all(b"hello").await.unwrap();
 ///     writer.close().await.unwrap();
@@ -322,7 +322,7 @@ pub trait AsyncWriteExt: AsyncWrite {
     /// # }
     /// let written = Rc::new(RefCell::new(Vec::new()));
     /// let observed = Rc::clone(&written);
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut writer = Sink(written);
     ///     assert_eq!(writer.write(b"hi").await.unwrap(), 2);
     /// });
@@ -357,7 +357,7 @@ pub trait AsyncWriteExt: AsyncWrite {
     /// # }
     /// let written = Rc::new(RefCell::new(Vec::new()));
     /// let observed = Rc::clone(&written);
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut writer = Sink(written);
     ///     writer.write_all(b"all").await.unwrap();
     /// });
@@ -433,7 +433,7 @@ impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 /// # }
 /// let written = Rc::new(RefCell::new(Vec::new()));
 /// let observed = Rc::clone(&written);
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut reader = Bytes(b"copy me");
 ///     let mut writer = Sink(written);
 ///     let copied = runite::io::copy(&mut reader, &mut writer).await.unwrap();
@@ -496,7 +496,7 @@ where
 /// let right_written = Rc::new(RefCell::new(Vec::new()));
 /// let left_observed = Rc::clone(&left_written);
 /// let right_observed = Rc::clone(&right_written);
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut left = Endpoint { read: b"left", written: left_written };
 ///     let mut right = Endpoint { read: b"right", written: right_written };
 ///     let copied = runite::io::copy_bidirectional(&mut left, &mut right).await.unwrap();
@@ -674,7 +674,7 @@ enum CopyState {
 /// #     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 /// #     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 /// # }
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut reader = Bytes(b"bytes");
 ///     let out = Rc::new(RefCell::new(Vec::new()));
 ///     let mut writer = Sink(Rc::clone(&out));
@@ -853,7 +853,7 @@ where
 /// #     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 /// #     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 /// # }
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let left_out = Rc::new(RefCell::new(Vec::new()));
 ///     let right_out = Rc::new(RefCell::new(Vec::new()));
 ///     let mut left = Endpoint { read: b"abc", written: Rc::clone(&left_out) };
@@ -983,7 +983,7 @@ fn string_from_line(line: Vec<u8>) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{AsyncRead, AsyncWrite, copy, copy_bidirectional};
-    use crate::{queue_future, run};
+    use crate::{run, spawn};
     use core::pin::Pin;
     use core::task::{Context, Poll};
     use std::cell::RefCell;
@@ -1073,7 +1073,7 @@ mod tests {
         {
             let written = Rc::clone(&written);
             let flushed = Rc::clone(&flushed);
-            queue_future(async move {
+            spawn(async move {
                 let mut reader = MemoryIo::new(b"abcdefghi", 2);
                 let mut writer = MemoryIo::new(b"", 2);
                 writer.written = written;
@@ -1098,7 +1098,7 @@ mod tests {
         let left_closed = left.closed();
         let right_closed = right.closed();
 
-        queue_future(async move {
+        spawn(async move {
             let copied = copy_bidirectional(&mut left, &mut right).await.unwrap();
             assert_eq!(copied, (13, 13));
         });

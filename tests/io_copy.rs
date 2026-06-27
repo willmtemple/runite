@@ -14,7 +14,7 @@ fn copy_bidirectional_proxies_tcp_roundtrip() {
             .expect("bind proxy listener");
         let addr = listener.local_addr().expect("proxy listener address");
 
-        let proxy = runite::queue_future(async move {
+        let proxy = runite::spawn(async move {
             let (mut left, _) = listener.accept().await.expect("accept left client");
             let (mut right, _) = listener.accept().await.expect("accept right client");
             runite::io::copy_bidirectional(&mut left, &mut right)

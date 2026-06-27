@@ -29,7 +29,7 @@ struct Waiter {
 /// let notify = Rc::new(Notify::new());
 /// let woke = Rc::new(Cell::new(false));
 ///
-/// runite::queue_future({
+/// runite::spawn({
 ///     let notify = Rc::clone(&notify);
 ///     let woke = Rc::clone(&woke);
 ///     async move {
@@ -38,7 +38,7 @@ struct Waiter {
 ///     }
 /// });
 ///
-/// runite::queue_future({
+/// runite::spawn({
 ///     let notify = Rc::clone(&notify);
 ///     async move {
 ///         runite::yield_now().await;
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::platform::current::runtime::{queue_future, run, yield_now};
+    use crate::{run, spawn, yield_now};
 
     #[test]
     fn fast_path_consumes_stored_permit() {
@@ -206,7 +206,7 @@ mod tests {
         let observed = Rc::new(Cell::new(false));
 
         notify.notify_one();
-        queue_future({
+        spawn({
             let notify = Rc::clone(&notify);
             let observed = Rc::clone(&observed);
             async move {
@@ -226,7 +226,7 @@ mod tests {
         let order = Rc::new(RefCell::new(Vec::new()));
 
         for id in [1, 2] {
-            queue_future({
+            spawn({
                 let notify = Rc::clone(&notify);
                 let order = Rc::clone(&order);
                 async move {
@@ -236,7 +236,7 @@ mod tests {
             });
         }
 
-        queue_future({
+        spawn({
             let notify = Rc::clone(&notify);
             async move {
                 yield_now().await;

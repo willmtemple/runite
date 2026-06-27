@@ -19,7 +19,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let mut resize = runite::signal::unix::signal(
 //!         runite::signal::unix::SignalKind::WindowChange,
 //!     )
@@ -113,7 +113,7 @@ pub struct Signal {
 /// # Examples
 ///
 /// ```no_run
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let mut sigterm = runite::signal::unix::signal(
 ///         runite::signal::unix::SignalKind::Terminate,
 ///     )
@@ -665,7 +665,7 @@ mod tests {
         let received_task = Arc::clone(&received);
         let mut sigusr1 = signal(SignalKind::User1).expect("SIGUSR1 stream should construct");
 
-        crate::queue_future(async move {
+        crate::spawn(async move {
             sigusr1.recv().await;
             *received_task.lock().expect("received mutex poisoned") = true;
         });
@@ -693,7 +693,7 @@ mod tests {
         let mut sigwinch =
             signal(SignalKind::WindowChange).expect("SIGWINCH stream should construct");
 
-        crate::queue_future(async move {
+        crate::spawn(async move {
             sigwinch.recv().await;
             *received_task.lock().expect("received mutex poisoned") = true;
         });

@@ -13,7 +13,7 @@
 //! let (reader, mut writer) = UnixStream::pair()?;
 //! let read_fd = reader.as_raw_fd();
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     runite::fd::wait_readable(read_fd)
 //!         .await
 //!         .expect("reader should become readable");
@@ -46,7 +46,7 @@ use std::os::fd::RawFd;
 /// let (reader, mut writer) = UnixStream::pair()?;
 /// let read_fd = reader.as_raw_fd();
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     runite::fd::wait_readable(read_fd)
 ///         .await
 ///         .expect("reader should become readable");
@@ -66,7 +66,7 @@ pub async fn wait_readable(fd: RawFd) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::wait_readable;
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -81,10 +81,10 @@ mod tests {
         let write_fd = fds[1];
 
         let observed = Arc::new(AtomicBool::new(false));
-        queue_task({
+        queue_macrotask({
             let observed = Arc::clone(&observed);
             move || {
-                queue_future(async move {
+                spawn(async move {
                     wait_readable(read_fd)
                         .await
                         .expect("pipe read end should become readable");

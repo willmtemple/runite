@@ -82,7 +82,7 @@ Microtasks:
 
 Macrotasks:
 
-- May be local (`queue_task`) or remote (`ThreadHandle::queue_task`).
+- May be local (`queue_macrotask`) or remote (`ThreadHandle::queue_task`).
 - Carry I/O completion callbacks, timer expirations, worker-exit callbacks, and host/event callbacks.
 - Remote macrotasks are swapped into the local macrotask queue during `drain_remote_tasks`
   (`src/platform/linux_x86_64/runtime.rs`).
@@ -386,7 +386,7 @@ Same-thread completions short-circuit this path: `CompletionState::queue_wake` c
 `Arc::ptr_eq`s the handle's `ThreadShared` against the current thread's installed state — and on a
 match enqueues a microtask via `queue_microtask` directly. `is_current` returns `false` when the
 caller has no runtime state installed (e.g. a blocking-pool worker), so non-runtime threads safely
-fall through to the macrotask path. Only true cross-thread completions use `queue_task` and
+fall through to the macrotask path. Only true cross-thread completions use `queue_macrotask` and
 `MSG_RING`.
 
 # Safety invariants
@@ -425,7 +425,7 @@ Current, precarious invariants:
   - Cross-thread work is explicit through `ThreadHandle::queue_task`.
   - This preserves deterministic UI/reactive ordering.
 - Not `Send`-future friendly.
-  - Futures queued with `queue_future` only need `Future + 'static`, not `Send`.
+  - Futures queued with `spawn` only need `Future + 'static`, not `Send`.
   - Handles such as `JoinHandle`, `TimeoutHandle`, and `IntervalHandle` are `!Send` by design.
 - Nightly-toolchain-free in `runite` itself.
   - The runtime crate compiles on stable Rust with no `#![feature(...)]`.
@@ -457,7 +457,7 @@ ThreadHandle
   thread.
 
 JoinHandle
-: The `!Send` future returned by `queue_future`; awaiting it yields `Result<T, JoinError>`, with
+: The `!Send` future returned by `spawn`; awaiting it yields `Result<T, JoinError>`, with
   `Err(JoinError::Aborted)` after `abort`.
 
 completion

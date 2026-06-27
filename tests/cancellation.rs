@@ -15,7 +15,7 @@ use runite::time::sleep;
 #[test]
 fn abort_before_first_poll_yields_aborted() {
     let result = block_on(|| async {
-        let handle = runite::queue_future(async {
+        let handle = runite::spawn(async {
             sleep(Duration::from_secs(3600)).await;
             42usize
         });
@@ -33,7 +33,7 @@ fn abort_while_parked_on_timer_cancels_without_completing() {
         let ran_body = Rc::new(Cell::new(false));
         let flag = Rc::clone(&ran_body);
 
-        let handle = runite::queue_future(async move {
+        let handle = runite::spawn(async move {
             // Park on a long timer; the abort must drop this future before it
             // ever observes the sleep completing.
             sleep(Duration::from_secs(3600)).await;
@@ -59,7 +59,7 @@ fn abort_while_parked_on_timer_cancels_without_completing() {
 #[test]
 fn abort_handle_cancels_from_elsewhere() {
     let result = block_on(|| async {
-        let handle = runite::queue_future(async {
+        let handle = runite::spawn(async {
             sleep(Duration::from_secs(3600)).await;
             1usize
         });
@@ -79,7 +79,7 @@ fn abort_handle_cancels_from_elsewhere() {
 #[test]
 fn completed_task_reports_finished_and_abort_is_noop() {
     let value = block_on(|| async {
-        let handle = runite::queue_future(async { 99usize });
+        let handle = runite::spawn(async { 99usize });
 
         // Drive the task to completion before joining.
         sleep(Duration::from_millis(10)).await;
@@ -97,7 +97,7 @@ fn completed_task_reports_finished_and_abort_is_noop() {
 #[test]
 fn join_handle_resolves_to_output_when_not_aborted() {
     let value = block_on(|| async {
-        let handle = runite::queue_future(async {
+        let handle = runite::spawn(async {
             sleep(Duration::from_millis(5)).await;
             "done"
         });

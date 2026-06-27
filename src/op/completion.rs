@@ -224,7 +224,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use crate::platform::current::runtime::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     /// Same-thread completion must take the microtask fast path and resolve.
     /// We use thread-local counters so this test does not race against any
@@ -238,10 +238,10 @@ mod tests {
 
         {
             let observed = Arc::clone(&observed);
-            queue_task(move || {
+            queue_macrotask(move || {
                 let (future, handle) = completion_for_current_thread::<i32>();
 
-                queue_future(async move {
+                spawn(async move {
                     let value = future.await;
                     *observed.lock().unwrap() = Some(value);
                 });
@@ -284,7 +284,7 @@ mod tests {
             let observed = Arc::clone(&observed);
             let worker_local = Arc::clone(&worker_local);
             let worker_remote = Arc::clone(&worker_remote);
-            queue_task(move || {
+            queue_macrotask(move || {
                 let (future, handle) = completion_for_current_thread::<i32>();
 
                 std::thread::spawn(move || {
@@ -305,7 +305,7 @@ mod tests {
                     );
                 });
 
-                queue_future(async move {
+                spawn(async move {
                     let value = future.await;
                     *observed.lock().unwrap() = Some(value);
                 });

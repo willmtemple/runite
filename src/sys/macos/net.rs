@@ -404,7 +404,7 @@ async fn io_timeout<T>(
     timeout: Duration,
     future: impl Future<Output = io::Result<T>>,
 ) -> io::Result<T> {
-    crate::time::deadline(timeout, future)
+    crate::time::timeout(timeout, future)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "operation timed out"))?
 }

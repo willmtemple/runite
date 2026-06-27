@@ -31,7 +31,7 @@ enum State {
 /// let observed = Rc::new(RefCell::new(Vec::new()));
 ///
 /// for _ in 0..2 {
-///     runite::queue_future({
+///     runite::spawn({
 ///         let cell = Rc::clone(&cell);
 ///         let init_count = Rc::clone(&init_count);
 ///         let observed = Rc::clone(&observed);
@@ -144,14 +144,14 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    use crate::platform::current::runtime::{queue_future, run, yield_now};
+    use crate::{run, spawn, yield_now};
 
     #[test]
     fn fast_path_initializes_and_returns_value() {
         let cell = Rc::new(OnceCell::new());
         let observed = Rc::new(Cell::new(0));
 
-        queue_future({
+        spawn({
             let cell = Rc::clone(&cell);
             let observed = Rc::clone(&observed);
             async move {
@@ -173,7 +173,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(Vec::new()));
 
         for _ in 0..2 {
-            queue_future({
+            spawn({
                 let cell = Rc::clone(&cell);
                 let init_count = Rc::clone(&init_count);
                 let observed = Rc::clone(&observed);

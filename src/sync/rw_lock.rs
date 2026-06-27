@@ -40,7 +40,7 @@ struct Waiter {
 /// let lock = Rc::new(RwLock::new(1));
 /// let observed = Rc::new(Cell::new(0));
 ///
-/// runite::queue_future({
+/// runite::spawn({
 ///     let lock = Rc::clone(&lock);
 ///     let observed = Rc::clone(&observed);
 ///     async move {
@@ -444,7 +444,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::platform::current::runtime::{queue_future, run, yield_now};
+    use crate::{run, spawn, yield_now};
 
     #[test]
     fn multiple_concurrent_readers_are_allowed() {
@@ -454,7 +454,7 @@ mod tests {
         let observed = Rc::new(Cell::new(0));
 
         for _ in 0..2 {
-            queue_future({
+            spawn({
                 let lock = Rc::clone(&lock);
                 let active = Rc::clone(&active);
                 let max_active = Rc::clone(&max_active);
@@ -481,7 +481,7 @@ mod tests {
         let lock = Rc::new(RwLock::new(0));
         let order = Rc::new(RefCell::new(Vec::new()));
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let order = Rc::clone(&order);
             async move {
@@ -493,7 +493,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let order = Rc::clone(&order);
             async move {
@@ -512,7 +512,7 @@ mod tests {
         let lock = Rc::new(RwLock::new(()));
         let order = Rc::new(RefCell::new(Vec::new()));
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let order = Rc::clone(&order);
             async move {
@@ -523,7 +523,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let order = Rc::clone(&order);
             async move {
@@ -534,7 +534,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let order = Rc::clone(&order);
             async move {
@@ -578,7 +578,7 @@ mod tests {
         let lock = Rc::new(RwLock::new(0));
         let observed = Rc::new(Cell::new(0));
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             async move {
                 let mut guard = lock.write().await;
@@ -587,7 +587,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let observed = Rc::clone(&observed);
             async move {
@@ -607,7 +607,7 @@ mod tests {
         let active = Rc::new(Cell::new(0));
         let max_active = Rc::new(Cell::new(0));
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             async move {
                 let _guard = lock.write().await;
@@ -616,7 +616,7 @@ mod tests {
         });
 
         for _ in 0..2 {
-            queue_future({
+            spawn({
                 let lock = Rc::clone(&lock);
                 let active = Rc::clone(&active);
                 let max_active = Rc::clone(&max_active);
@@ -640,12 +640,12 @@ mod tests {
         let lock = Rc::new(RwLock::new(()));
         let try_read_failed = Rc::new(Cell::new(false));
 
-        queue_future({
+        spawn({
             let lock = Rc::clone(&lock);
             let try_read_failed = Rc::clone(&try_read_failed);
             async move {
                 let _guard = lock.read().await;
-                queue_future({
+                spawn({
                     let lock = Rc::clone(&lock);
                     async move {
                         let _guard = lock.write().await;

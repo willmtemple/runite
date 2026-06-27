@@ -13,7 +13,7 @@
 //! let (sender, mut first) = runite::channel::broadcast::channel(8);
 //! let mut second = sender.subscribe();
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     assert_eq!(sender.send("one"), Ok(2));
 //!     assert_eq!(sender.send("two"), Ok(2));
 //!
@@ -34,7 +34,7 @@
 //!
 //! let (sender, mut receiver) = broadcast::channel(2);
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     sender.send(1).unwrap();
 //!     sender.send(2).unwrap();
 //!     sender.send(3).unwrap();
@@ -70,7 +70,7 @@ use crate::sys::current::channel::runtime_waiter;
 /// # Examples
 ///
 /// ```
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let (tx, mut rx) = runite::channel::broadcast::channel(4);
 ///     assert_eq!(tx.send("event"), Ok(1));
 ///     assert_eq!(rx.recv().await.unwrap(), "event");
@@ -279,7 +279,7 @@ impl<T: Clone + Send + 'static> Sender<T> {
     /// let mut second = tx.subscribe();
     /// assert_eq!(tx.send("update"), Ok(2));
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     assert_eq!(first.recv().await.unwrap(), "update");
     ///     assert_eq!(second.recv().await.unwrap(), "update");
     /// });
@@ -365,7 +365,7 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let (tx, mut rx) = runite::channel::broadcast::channel(2);
     ///     tx.send("a").unwrap();
     ///     assert_eq!(rx.recv().await.unwrap(), "a");
@@ -566,7 +566,7 @@ impl std::error::Error for RecvError {}
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     use super::{RecvError, channel};
 
@@ -575,10 +575,10 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<(Vec<i32>, Vec<i32>)>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut first) = channel(8);
             let mut second = sender.subscribe();
-            queue_future(async move {
+            spawn(async move {
                 assert_eq!(sender.send(1), Ok(2));
                 assert_eq!(sender.send(2), Ok(2));
                 let first_values = vec![first.recv().await.unwrap(), first.recv().await.unwrap()];
@@ -597,9 +597,9 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<(RecvError, i32)>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut receiver) = channel(2);
-            queue_future(async move {
+            spawn(async move {
                 sender.send(1).unwrap();
                 sender.send(2).unwrap();
                 sender.send(3).unwrap();
@@ -618,9 +618,9 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<(i32, RecvError)>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, mut receiver) = channel(2);
-            queue_future(async move {
+            spawn(async move {
                 sender.send(7).unwrap();
                 drop(sender);
                 let value = receiver.recv().await.unwrap();
@@ -638,9 +638,9 @@ mod tests {
         let observed = Arc::new(Mutex::new(None::<Vec<i32>>));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let (sender, original) = channel(4);
-            queue_future(async move {
+            spawn(async move {
                 sender.send(1).unwrap();
                 let mut receiver = sender.subscribe();
                 sender.send(2).unwrap();

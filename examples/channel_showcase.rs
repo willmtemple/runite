@@ -1,5 +1,5 @@
 use runite::channel::{mpsc, oneshot};
-use runite::{queue_future, spawn_worker, time::sleep};
+use runite::{spawn, spawn_worker, time::sleep};
 use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let worker = spawn_worker(
         move || {
-            queue_future(async move {
+            spawn(async move {
                 while let Some(job) = job_rx.recv().await {
                     event_tx
                         .send(WorkerEvent::Log(format!(
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || log_event!(12, "[main] worker exited"),
     );
 
-    queue_future(async move {
+    spawn(async move {
         log_event!(1, "[main] bounded mpsc send: enqueue `prepare-scene`");
         job_tx
             .send("prepare-scene")

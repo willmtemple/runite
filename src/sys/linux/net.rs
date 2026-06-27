@@ -1408,7 +1408,7 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
-    use crate::platform::current::runtime::{queue_future, run};
+    use crate::{run, spawn};
 
     /// Exercises the readiness-based fallback helpers (`connect_ready`,
     /// `accept_ready`, `send_ready`, `recv_ready`) directly, bypassing io_uring.
@@ -1420,7 +1420,7 @@ mod tests {
         let done = Arc::new(Mutex::new(None));
         let done_for_task = Arc::clone(&done);
 
-        queue_future(async move {
+        spawn(async move {
             let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
                 .expect("listener socket should be created");
             let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);

@@ -1,10 +1,10 @@
 //! Runtime time primitives.
 //!
 //! These helpers integrate with the runtime's timer queue. Use [`sleep`] to
-//! delay an async task, [`interval`] to await repeated ticks, and [`deadline`]
-//! to bound how long another future may run. Callback-style timers live at the
-//! crate root as [`crate::timeout`] and [`crate::interval`]; both return handles
-//! with `cancel()` methods.
+//! delay an async task, [`interval`] to await repeated ticks, and [`timeout`]
+//! to bound how long another future may run. Callback-style timers are
+//! [`set_timeout`] and [`set_interval`]; both return handles with `cancel()`
+//! methods.
 //!
 //! # Examples
 //!
@@ -17,7 +17,7 @@
 //! let completed = Arc::new(AtomicBool::new(false));
 //! let completed_task = Arc::clone(&completed);
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     runite::time::sleep(std::time::Duration::from_millis(1)).await;
 //!     completed_task.store(true, Ordering::SeqCst);
 //! });
@@ -37,7 +37,7 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 use std::time::Instant;
 
-use crate::timeout as schedule_timeout;
+use crate::platform::current::runtime as imp;
 
 /// Future returned by [`sleep`] that completes after a runtime timer fires.
 ///
@@ -71,7 +71,7 @@ pub struct Sleep {
 /// let ticks = Arc::new(AtomicUsize::new(0));
 /// let ticks_task = Arc::clone(&ticks);
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut interval = runite::time::interval(Duration::from_millis(1));
 ///     interval.tick().await;
 ///     interval.tick().await;
@@ -104,7 +104,7 @@ pub enum MissedTickBehavior {
     Skip,
 }
 
-/// Error returned by [`deadline`] when the deadline expires first.
+/// Error returned by [`timeout`] when the timeout expires first.
 ///
 /// This value means the timer completed before the wrapped future returned, and
 /// the wrapped future was dropped.
@@ -124,7 +124,7 @@ pub struct Elapsed;
 /// let completed = Arc::new(AtomicBool::new(false));
 /// let completed_task = Arc::clone(&completed);
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     runite::time::sleep(std::time::Duration::from_millis(1)).await;
 ///     completed_task.store(true, Ordering::SeqCst);
 /// });
@@ -160,9 +160,70 @@ pub fn interval(period: Duration) -> Interval {
     }
 }
 
+/// Schedules `callback` to run once after at least `delay` has elapsed.
+///
+/// Returns a [`crate::TimeoutHandle`]; call [`crate::TimeoutHandle::cancel`]
+/// before it fires to cancel it. For async code, prefer [`sleep`].
+///
+/// # Examples
+///
+/// ```
+/// use std::rc::Rc;
+/// use std::cell::Cell;
+/// use std::time::Duration;
+///
+/// let fired = Rc::new(Cell::new(false));
+/// let flag = Rc::clone(&fired);
+/// runite::time::set_timeout(Duration::from_millis(1), move || flag.set(true));
+/// runite::run();
+/// assert!(fired.get());
+/// ```
+pub fn set_timeout<F>(delay: Duration, callback: F) -> crate::TimeoutHandle
+where
+    F: FnOnce() + 'static,
+{
+    imp::timeout(delay, callback)
+}
+
+/// Schedules `callback` to run repeatedly, once per `delay` interval.
+///
+/// Returns an [`crate::IntervalHandle`]; call [`crate::IntervalHandle::cancel`]
+/// to stop it. The runtime will not exit while an interval is active, so
+/// callers must cancel it to allow [`crate::run`] to return.
+///
+/// # Examples
+///
+/// ```
+/// use std::rc::Rc;
+/// use std::cell::Cell;
+/// use std::time::Duration;
+///
+/// let ticks = Rc::new(Cell::new(0u32));
+/// let counter = Rc::clone(&ticks);
+/// let slot: Rc<std::cell::RefCell<Option<runite::IntervalHandle>>> =
+///     Rc::new(std::cell::RefCell::new(None));
+/// let slot_in_cb = Rc::clone(&slot);
+/// let handle = runite::time::set_interval(Duration::from_millis(1), move || {
+///     let n = counter.get() + 1;
+///     counter.set(n);
+///     if n == 3 {
+///         slot_in_cb.borrow().as_ref().unwrap().cancel();
+///     }
+/// });
+/// *slot.borrow_mut() = Some(handle);
+/// runite::run();
+/// assert_eq!(ticks.get(), 3);
+/// ```
+pub fn set_interval<F>(delay: Duration, callback: F) -> crate::IntervalHandle
+where
+    F: FnMut() + 'static,
+{
+    imp::interval(delay, callback)
+}
+
 /// Runs `future` until it completes or `duration` elapses, whichever happens first.
 ///
-/// The wrapped future is dropped when the deadline fires. As with other runtime operations, dropping
+/// The wrapped future is dropped when the timeout fires. As with other runtime operations, dropping
 /// a future cancels interest in the result but does not guarantee cancellation of any underlying
 /// OS work that future may have started.
 ///
@@ -177,13 +238,13 @@ pub fn interval(period: Duration) -> Interval {
 /// let observed = Arc::new(AtomicUsize::new(0));
 /// let observed_task = Arc::clone(&observed);
 ///
-/// runite::queue_future(async move {
-///     let value = runite::time::deadline(
+/// runite::spawn(async move {
+///     let value = runite::time::timeout(
 ///         std::time::Duration::from_millis(5),
 ///         async { 42usize },
 ///     )
 ///     .await
-///     .expect("future should complete before the deadline");
+///     .expect("future should complete before the timeout");
 ///     observed_task.store(value, Ordering::SeqCst);
 /// });
 ///
@@ -191,7 +252,7 @@ pub fn interval(period: Duration) -> Interval {
 ///
 /// assert_eq!(observed.load(Ordering::SeqCst), 42);
 /// ```
-pub async fn deadline<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
+pub async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
 where
     F: Future,
 {
@@ -347,7 +408,7 @@ impl Future for Sleep {
             let delay = self.delay.take().unwrap_or(Duration::ZERO);
             let state = Rc::new(SleepState::default());
             let state_for_callback = Rc::clone(&state);
-            let timeout_handle = schedule_timeout(delay, move || state_for_callback.complete());
+            let timeout_handle = set_timeout(delay, move || state_for_callback.complete());
             self.state = Some(state);
             self.handle = Some(timeout_handle);
         }
@@ -404,7 +465,7 @@ impl SleepState {
 
 impl fmt::Display for Elapsed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("deadline elapsed")
+        f.write_str("timeout elapsed")
     }
 }
 
@@ -417,9 +478,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
-    use super::{MissedTickBehavior, deadline, interval, sleep};
+    use super::{MissedTickBehavior, interval, sleep, timeout};
 
     #[test]
     fn sleep_and_timeout_work() {
@@ -427,19 +488,19 @@ mod tests {
             let log = Arc::new(Mutex::new(Vec::new()));
             let log_for_task = Arc::clone(&log);
 
-            queue_task(move || {
+            queue_macrotask(move || {
                 let log_for_task = Arc::clone(&log_for_task);
-                queue_future(async move {
+                spawn(async move {
                     log_for_task.lock().unwrap().push("started");
                     sleep(Duration::from_millis(5)).await;
                     log_for_task.lock().unwrap().push("slept");
 
-                    let result = deadline(Duration::from_millis(5), async {
+                    let result = timeout(Duration::from_millis(5), async {
                         sleep(Duration::from_millis(20)).await;
                         42usize
                     })
                     .await;
-                    assert!(result.is_err(), "deadline should fire first");
+                    assert!(result.is_err(), "timeout should fire first");
                     log_for_task.lock().unwrap().push("timed out");
                 });
             });
@@ -465,13 +526,13 @@ mod tests {
             // Macrotask queued before the sleep.
             {
                 let order = Rc::clone(&order);
-                queue_task(move || order.borrow_mut().push("macrotask"));
+                queue_macrotask(move || order.borrow_mut().push("macrotask"));
             }
 
             // Future that awaits sleep(ZERO) and then records its continuation.
             {
                 let order = Rc::clone(&order);
-                queue_future(async move {
+                spawn(async move {
                     sleep(Duration::ZERO).await;
                     order.borrow_mut().push("after_sleep");
                 });
@@ -495,7 +556,7 @@ mod tests {
             let elapsed = Arc::new(Mutex::new(None::<Duration>));
             let elapsed_for_task = Arc::clone(&elapsed);
 
-            queue_future(async move {
+            spawn(async move {
                 let start = Instant::now();
                 let mut interval = interval(Duration::from_millis(50));
                 assert_eq!(interval.period(), Duration::from_millis(50));
@@ -523,13 +584,13 @@ mod tests {
             let order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
             let order_for_task = Rc::clone(&order);
 
-            queue_future(async move {
+            spawn(async move {
                 let mut interval = interval(Duration::ZERO);
                 interval.tick().await;
                 order_for_task.borrow_mut().push("first");
 
                 let order_for_macrotask = Rc::clone(&order_for_task);
-                queue_task(move || order_for_macrotask.borrow_mut().push("macrotask"));
+                queue_macrotask(move || order_for_macrotask.borrow_mut().push("macrotask"));
 
                 interval.tick().await;
                 order_for_task.borrow_mut().push("second");
@@ -550,7 +611,7 @@ mod tests {
             let output = Arc::new(Mutex::new(None::<(Vec<Instant>, Duration)>));
             let output_for_task = Arc::clone(&output);
 
-            queue_future(async move {
+            spawn(async move {
                 let start = Instant::now();
                 let mut interval = interval(Duration::from_millis(25));
                 let first = interval.tick().await;
@@ -630,7 +691,7 @@ mod tests {
             let output = Arc::new(Mutex::new(None::<(Vec<Instant>, Duration)>));
             let output_for_task = Arc::clone(&output);
 
-            queue_future(async move {
+            spawn(async move {
                 let mut interval = interval(Duration::from_millis(20));
                 interval.set_missed_tick_behavior(behavior);
 

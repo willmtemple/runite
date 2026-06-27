@@ -15,7 +15,7 @@ fn worker_streams_messages_to_parent() {
 
         let _worker = runite::spawn_worker(
             move || {
-                runite::queue_task(move || {
+                runite::queue_macrotask(move || {
                     for value in 0..5u64 {
                         sender.send(value).expect("worker send should succeed");
                     }
@@ -39,7 +39,7 @@ fn oneshot_resolves_across_local_tasks() {
     let answer = block_on(|| async {
         let (sender, mut receiver) = oneshot::channel::<u32>();
 
-        runite::queue_future(async move {
+        runite::spawn(async move {
             sleep(Duration::from_millis(2)).await;
             let _ = sender.send(42);
         });
@@ -57,7 +57,7 @@ fn bounded_channel_preserves_order_under_backpressure() {
         // consumer drains the previous value.
         let (sender, mut receiver) = mpsc::channel::<usize>(8);
 
-        let producer = runite::queue_future(async move {
+        let producer = runite::spawn(async move {
             for value in 0..16usize {
                 sender.send(value).await.expect("send should succeed");
             }

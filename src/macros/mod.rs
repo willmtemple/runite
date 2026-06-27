@@ -269,7 +269,7 @@ mod tests {
     use std::rc::Rc;
     use std::task::{Context, Poll};
 
-    use crate::{queue_future, run};
+    use crate::{run, spawn};
 
     struct PendingOnce {
         label: &'static str,
@@ -307,7 +307,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(None));
         let observed_for_future = Rc::clone(&observed);
 
-        queue_future(async move {
+        spawn(async move {
             let value = crate::join!(async { 1 }, async { 2 });
             *observed_for_future.borrow_mut() = Some(value);
         });
@@ -323,7 +323,7 @@ mod tests {
         let observed_for_future = Rc::clone(&observed);
         let log_for_future = Rc::clone(&log);
 
-        queue_future(async move {
+        spawn(async move {
             let value = crate::join!(
                 PendingOnce::new("left", Rc::clone(&log_for_future)),
                 PendingOnce::new("right", Rc::clone(&log_for_future)),
@@ -345,7 +345,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(None));
         let observed_for_future = Rc::clone(&observed);
 
-        queue_future(async move {
+        spawn(async move {
             let value = crate::try_join!(async { Ok::<i32, &'static str>(1) }, async {
                 Err::<i32, &'static str>("boom")
             },);
@@ -361,7 +361,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(None));
         let observed_for_future = Rc::clone(&observed);
 
-        queue_future(async move {
+        spawn(async move {
             let value = crate::select! {
                 _v = ::core::future::pending::<i32>() => "pending",
                 v = async { 7 } => {

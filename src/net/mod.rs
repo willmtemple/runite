@@ -13,11 +13,11 @@
 //! ```
 //! use runite::net::{TcpListener, TcpStream};
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 //!     let address = listener.local_addr().unwrap();
 //!
-//!     let server = runite::queue_future(async move {
+//!     let server = runite::spawn(async move {
 //!         let (mut stream, _) = listener.accept().await.unwrap();
 //!         let mut byte = [0];
 //!         stream.read_exact(&mut byte).await.unwrap();
@@ -116,7 +116,7 @@ pub struct TcpListener {
 /// # Examples
 ///
 /// ```
-/// runite::queue_future(async {
+/// runite::spawn(async {
 ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
 ///     socket.set_reuseaddr(true).unwrap();
 ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -150,7 +150,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     ///     let listener = socket.listen(128).unwrap();
@@ -170,7 +170,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v6().unwrap();
     ///     socket.bind("[::1]:0".parse().unwrap()).unwrap();
     ///     let listener = socket.listen(128).unwrap();
@@ -190,7 +190,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.set_reuseaddr(true).unwrap();
     ///     assert!(socket.reuseaddr().unwrap());
@@ -206,7 +206,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     let _ = socket.reuseaddr().unwrap();
     /// });
@@ -224,7 +224,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.set_reuseport(true).unwrap();
     ///     assert!(socket.reuseport().unwrap());
@@ -240,7 +240,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     let _ = socket.reuseport().unwrap();
     /// });
@@ -258,7 +258,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     ///     assert!(socket.local_addr().unwrap().port() != 0);
@@ -277,7 +277,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     ///     let listener = socket.listen(128).unwrap();
@@ -301,10 +301,10 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let listener = runite::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     ///     let addr = listener.local_addr().unwrap();
-    ///     let server = runite::queue_future(async move {
+    ///     let server = runite::spawn(async move {
     ///         let (_stream, _peer) = listener.accept().await.unwrap();
     ///     });
     ///
@@ -328,7 +328,7 @@ impl TcpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
     ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     ///     assert!(socket.local_addr().unwrap().port() != 0);
@@ -357,7 +357,7 @@ impl TcpStream {
     /// # Examples
     ///
     /// ```no_run
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let mut stream = runite::net::TcpStream::connect("127.0.0.1:8080")
     ///         .await
     ///         .unwrap();
@@ -496,7 +496,7 @@ impl TcpStream {
     /// # async fn example(stream: TcpStream) -> std::io::Result<()> {
     /// let (mut reader, mut writer) = stream.into_split();
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut buf = [0; 1024];
     ///     let _ = reader.read(&mut buf).await;
     /// });
@@ -872,7 +872,7 @@ impl TcpListener {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let listener = runite::net::TcpListener::bind("127.0.0.1:0")
     ///         .await
     ///         .unwrap();
@@ -1002,7 +1002,7 @@ impl UdpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let socket = runite::net::UdpSocket::bind("127.0.0.1:0")
     ///         .await
     ///         .unwrap();
@@ -1137,7 +1137,7 @@ impl UdpSocket {
     /// # Examples
     ///
     /// ```
-    /// runite::queue_future(async {
+    /// runite::spawn(async {
     ///     let receiver = runite::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     ///     let sender = runite::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     ///     let receiver_addr = receiver.local_addr().unwrap();
@@ -1348,7 +1348,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::{queue_future, queue_task, run};
+    use crate::{queue_macrotask, run, spawn};
 
     use super::{TcpListener, TcpStream, UdpSocket};
     use std::io::ErrorKind;
@@ -1359,9 +1359,9 @@ mod tests {
         let received = Arc::new(Mutex::new(None::<Vec<u8>>));
         let received_for_task = Arc::clone(&received);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let received_for_task = Arc::clone(&received_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let listener = Arc::new(
                     TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                         .await
@@ -1372,7 +1372,7 @@ mod tests {
                     .expect("listener should expose address");
 
                 let listener_for_accept = Arc::clone(&listener);
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (mut stream, peer_addr) = listener_for_accept
                         .accept()
                         .await
@@ -1433,9 +1433,9 @@ mod tests {
         let peer = Arc::new(Mutex::new(None::<String>));
         let peer_for_task = Arc::clone(&peer);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let peer_for_task = Arc::clone(&peer_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let listener = Arc::new(
                     TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                         .await
@@ -1447,7 +1447,7 @@ mod tests {
                     .port();
 
                 let listener_for_accept = Arc::clone(&listener);
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (stream, peer_addr) = listener_for_accept
                         .accept()
                         .await
@@ -1477,9 +1477,9 @@ mod tests {
         let server_received = Arc::new(Mutex::new(None::<Vec<u8>>));
         let server_received_for_task = Arc::clone(&server_received);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let server_received_for_task = Arc::clone(&server_received_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let server = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
                     .expect("server udp socket should bind");
@@ -1502,7 +1502,7 @@ mod tests {
                 let server_addr = server.local_addr().expect("server should expose address");
                 let client_addr = client.local_addr().expect("client should expose address");
 
-                let server_task = queue_future(async move {
+                let server_task = spawn(async move {
                     let mut peek_buffer = [0; 32];
                     let (peeked, peek_peer) = server
                         .peek_from(&mut peek_buffer)
@@ -1553,9 +1553,9 @@ mod tests {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_for_task = Arc::clone(&observed);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let observed_for_task = Arc::clone(&observed_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let server = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
                     .expect("server udp socket should bind");
@@ -1625,9 +1625,9 @@ mod tests {
         let ok = Arc::new(Mutex::new(false));
         let ok_for_task = Arc::clone(&ok);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let ok_for_task = Arc::clone(&ok_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let listener = Arc::new(
                     TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                         .await
@@ -1636,7 +1636,7 @@ mod tests {
                 let local_addr = listener.local_addr().expect("address");
 
                 let listener_for_accept = Arc::clone(&listener);
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let (mut stream, _) = listener_for_accept.accept().await.expect("accept");
                     let mut buffer = [0; 4];
                     stream.read_exact(&mut buffer).await.expect("server read");
@@ -1648,7 +1648,7 @@ mod tests {
                 let (mut read_half, mut write_half) = client.into_split();
 
                 // Write from one task while reading in this one.
-                let writer = queue_future(async move {
+                let writer = spawn(async move {
                     write_half.write_all(b"ping").await.expect("split write");
                     write_half
                 });
@@ -1682,15 +1682,15 @@ mod tests {
         let count = Arc::new(Mutex::new(0usize));
         let count_for_task = Arc::clone(&count);
 
-        queue_task(move || {
+        queue_macrotask(move || {
             let count_for_task = Arc::clone(&count_for_task);
-            queue_future(async move {
+            spawn(async move {
                 let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
                     .expect("listener should bind");
                 let local_addr = listener.local_addr().expect("address");
 
-                let server = queue_future(async move {
+                let server = spawn(async move {
                     let mut incoming = listener.incoming();
                     let mut accepted = 0;
                     while accepted < 3 {

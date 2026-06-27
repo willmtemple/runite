@@ -3,7 +3,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::Poll;
 
-use crate::{JoinHandle, queue_future};
+use crate::{JoinHandle, spawn};
 
 /// Error returned by awaiting a join handle or [`JoinSet`] task.
 ///
@@ -25,7 +25,7 @@ use crate::{JoinHandle, queue_future};
 /// let saw_abort = Rc::new(Cell::new(false));
 /// let saw_abort_task = Rc::clone(&saw_abort);
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut set = runite::task::JoinSet::<()>::new();
 ///     set.spawn(async { std::future::pending::<()>().await });
 ///     set.abort_all();
@@ -67,7 +67,7 @@ impl JoinError {
     /// let observed = Rc::new(Cell::new(false));
     /// let observed_task = Rc::clone(&observed);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::<()>::new();
     ///     set.spawn(async { std::future::pending::<()>().await });
     ///     set.abort_all();
@@ -96,7 +96,7 @@ impl JoinError {
     /// let observed = Rc::new(Cell::new(false));
     /// let observed_task = Rc::clone(&observed);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::new();
     ///     set.spawn(async { runite::task::JoinError::Cancelled });
     ///     let err = set.join_next().await.unwrap().unwrap();
@@ -141,7 +141,7 @@ impl std::error::Error for JoinError {}
 /// let results = Rc::new(RefCell::new(Vec::new()));
 /// let results_task = Rc::clone(&results);
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let mut set = runite::task::JoinSet::new();
 ///     set.spawn(async { 1usize });
 ///     set.spawn(async { 2usize });
@@ -171,7 +171,7 @@ impl<T> JoinSet<T> {
     /// let was_empty = Rc::new(Cell::new(false));
     /// let was_empty_task = Rc::clone(&was_empty);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let set = runite::task::JoinSet::<usize>::new();
     ///     was_empty_task.set(set.is_empty());
     /// });
@@ -199,7 +199,7 @@ impl<T> JoinSet<T> {
     /// let result = Rc::new(Cell::new(0));
     /// let result_task = Rc::clone(&result);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::new();
     ///     set.spawn(async { 42 });
     ///     result_task.set(set.join_next().await.unwrap().unwrap());
@@ -213,7 +213,7 @@ impl<T> JoinSet<T> {
         F: Future<Output = T> + 'static,
         T: 'static,
     {
-        self.handles.push(queue_future(future));
+        self.handles.push(spawn(future));
     }
 
     /// Waits for the next task in the set to complete.
@@ -237,7 +237,7 @@ impl<T> JoinSet<T> {
     /// let result = Rc::new(Cell::new(None));
     /// let result_task = Rc::clone(&result);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::new();
     ///     set.spawn(async { "done" });
     ///     result_task.set(Some(set.join_next().await.unwrap().unwrap()));
@@ -284,7 +284,7 @@ impl<T> JoinSet<T> {
     /// let aborted = Rc::new(Cell::new(false));
     /// let aborted_task = Rc::clone(&aborted);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::<()>::new();
     ///     set.spawn(async { std::future::pending::<()>().await });
     ///     set.abort_all();
@@ -316,7 +316,7 @@ impl<T> JoinSet<T> {
     /// let completed = Rc::new(Cell::new(false));
     /// let completed_task = Rc::clone(&completed);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::new();
     ///     set.spawn(async move { completed_task.set(true); });
     ///     set.detach_all();
@@ -340,7 +340,7 @@ impl<T> JoinSet<T> {
     /// let len = Rc::new(Cell::new(0));
     /// let len_task = Rc::clone(&len);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let mut set = runite::task::JoinSet::new();
     ///     set.spawn(async { 1 });
     ///     len_task.set(set.len());
@@ -364,7 +364,7 @@ impl<T> JoinSet<T> {
     /// let empty = Rc::new(Cell::new(false));
     /// let empty_task = Rc::clone(&empty);
     ///
-    /// runite::queue_future(async move {
+    /// runite::spawn(async move {
     ///     let set = runite::task::JoinSet::<usize>::new();
     ///     empty_task.set(set.is_empty());
     /// });
@@ -392,7 +392,7 @@ impl<T> Drop for JoinSet<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{queue_future, run};
+    use crate::{run, spawn};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -401,7 +401,7 @@ mod tests {
         let results = Rc::new(RefCell::new(Vec::new()));
         let results_task = Rc::clone(&results);
 
-        queue_future(async move {
+        spawn(async move {
             let mut set = JoinSet::new();
             set.spawn(async { 3 });
             set.spawn(async { 1 });
@@ -425,7 +425,7 @@ mod tests {
         let observed = Rc::new(Cell::new(false));
         let observed_task = Rc::clone(&observed);
 
-        queue_future(async move {
+        spawn(async move {
             let mut set = JoinSet::<usize>::new();
             observed_task.set(set.join_next().await.is_none());
         });
@@ -440,7 +440,7 @@ mod tests {
         let aborted = Rc::new(Cell::new(0));
         let aborted_task = Rc::clone(&aborted);
 
-        queue_future(async move {
+        spawn(async move {
             let mut set = JoinSet::<usize>::new();
             set.spawn(async { std::future::pending::<usize>().await });
             set.spawn(async { std::future::pending::<usize>().await });
@@ -465,7 +465,7 @@ mod tests {
         let completed = Rc::new(Cell::new(false));
         let completed_task = Rc::clone(&completed);
 
-        queue_future(async move {
+        spawn(async move {
             let mut set = JoinSet::new();
             set.spawn(async move {
                 completed_task.set(true);

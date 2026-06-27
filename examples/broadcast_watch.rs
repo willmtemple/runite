@@ -5,21 +5,21 @@
 //! borrowing the new state.
 
 use runite::channel::{broadcast, watch};
-use runite::{queue_future, yield_now};
+use runite::{spawn, yield_now};
 
 #[runite::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (broadcast_tx, mut first_rx) = broadcast::channel(8);
     let mut second_rx = broadcast_tx.subscribe();
 
-    let first_task = queue_future(async move {
+    let first_task = spawn(async move {
         let mut seen = Vec::new();
         for _ in 0..3 {
             seen.push(first_rx.recv().await?);
         }
         Ok::<Vec<&'static str>, broadcast::RecvError>(seen)
     });
-    let second_task = queue_future(async move {
+    let second_task = spawn(async move {
         let mut seen = Vec::new();
         for _ in 0..3 {
             seen.push(second_rx.recv().await?);
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first_seen, second_seen);
 
     let (watch_tx, mut watch_rx) = watch::channel(String::from("booting"));
-    let watcher = queue_future(async move {
+    let watcher = spawn(async move {
         println!("[watch rx] initial value: {}", *watch_rx.borrow());
         watch_rx.changed().await?;
         Ok::<String, watch::RecvError>(watch_rx.borrow_and_update().clone())

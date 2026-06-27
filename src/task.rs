@@ -4,7 +4,7 @@
 //! which moves a blocking closure onto the shared OS-thread pool and returns a
 //! future that resolves to the closure's return value.
 //!
-//! In-runtime async work should use [`crate::queue_future`] instead; this
+//! In-runtime async work should use [`crate::spawn`] instead; this
 //! module exists for code that must call blocking syscalls or run CPU-heavy
 //! computations without stalling the event loop.
 //!
@@ -19,7 +19,7 @@
 //! let observed = Arc::new(AtomicUsize::new(0));
 //! let observed_task = Arc::clone(&observed);
 //!
-//! runite::queue_future(async move {
+//! runite::spawn(async move {
 //!     let handle = runite::task::spawn_blocking(|| 42usize)
 //!         .expect("blocking task should queue");
 //!     observed_task.store(handle.await.expect("blocking task should finish"), Ordering::SeqCst);
@@ -88,7 +88,7 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
 /// let observed = Arc::new(AtomicUsize::new(0));
 /// let observed_task = Arc::clone(&observed);
 ///
-/// runite::queue_future(async move {
+/// runite::spawn(async move {
 ///     let handle = runite::spawn_blocking(|| 40usize + 2).expect("blocking task should queue");
 ///     let value = handle.await.expect("blocking task should complete");
 ///     observed_task.store(value, Ordering::SeqCst);
@@ -116,7 +116,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{queue_future, run, run_until_stalled};
+    use crate::{run, run_until_stalled, spawn};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -130,7 +130,7 @@ mod tests {
         // wake lands. This is deterministic, unlike polling `run_until_stalled`
         // with a timed retry loop (which was flaky under parallel test load).
         std::thread::spawn(move || {
-            queue_future(async move {
+            spawn(async move {
                 let handle = spawn_blocking(|| 7usize + 35).expect("spawn_blocking");
                 let value = handle.await.expect("join");
                 result_clone.store(value, Ordering::SeqCst);
@@ -148,7 +148,7 @@ mod tests {
         let result = Arc::new(std::sync::Mutex::new(String::new()));
         let result_clone = Arc::clone(&result);
 
-        queue_future(async move {
+        spawn(async move {
             let handle =
                 spawn_blocking(|| "hello blocking world".to_string()).expect("spawn_blocking");
             let value = handle.await.expect("join");

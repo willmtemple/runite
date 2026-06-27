@@ -19,7 +19,7 @@ fn bench_spawn_join(c: &mut Criterion) {
         b.iter_custom(|iters| {
             time_on_runtime(move || async move {
                 for _ in 0..iters {
-                    let handle = runite::queue_future(async { 1u64 });
+                    let handle = runite::spawn(async { 1u64 });
                     let _ = handle.await;
                 }
             })
@@ -61,7 +61,7 @@ fn bench_mpsc_pingpong(c: &mut Criterion) {
         b.iter_custom(|iters| {
             time_on_runtime(move || async move {
                 let (tx, mut rx) = mpsc::channel::<u64>(16);
-                let producer = runite::queue_future(async move {
+                let producer = runite::spawn(async move {
                     for i in 0..iters {
                         if tx.send(i).await.is_err() {
                             break;

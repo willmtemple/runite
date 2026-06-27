@@ -104,11 +104,11 @@ fn generate_entry(mut function: ItemFn) -> proc_macro2::TokenStream {
 
     let entry_call = if is_async {
         quote! {
-            let _ = ::runite::queue_future(#implementation_name());
+            let _ = ::runite::spawn(#implementation_name());
         }
     } else {
         quote! {
-            ::runite::queue_task(|| {
+            ::runite::queue_macrotask(|| {
                 let _ = #implementation_name();
             });
         }

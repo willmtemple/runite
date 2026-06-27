@@ -29,7 +29,7 @@ struct Waiter {
 /// let mutex = Rc::new(Mutex::new(1));
 /// let observed = Rc::new(Cell::new(0));
 ///
-/// runite::queue_future({
+/// runite::spawn({
 ///     let mutex = Rc::clone(&mutex);
 ///     let observed = Rc::clone(&observed);
 ///     async move {
@@ -242,14 +242,14 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::platform::current::runtime::{queue_future, run, yield_now};
+    use crate::{run, spawn, yield_now};
 
     #[test]
     fn fast_path_acquires_and_releases() {
         let mutex = Rc::new(Mutex::new(1));
         let observed = Rc::new(Cell::new(0));
 
-        queue_future({
+        spawn({
             let mutex = Rc::clone(&mutex);
             let observed = Rc::clone(&observed);
             async move {
@@ -270,7 +270,7 @@ mod tests {
         let mutex = Rc::new(Mutex::new(()));
         let order = Rc::new(RefCell::new(Vec::new()));
 
-        queue_future({
+        spawn({
             let mutex = Rc::clone(&mutex);
             let order = Rc::clone(&order);
             async move {
@@ -281,7 +281,7 @@ mod tests {
             }
         });
 
-        queue_future({
+        spawn({
             let mutex = Rc::clone(&mutex);
             let order = Rc::clone(&order);
             async move {

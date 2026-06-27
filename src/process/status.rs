@@ -9,7 +9,7 @@
 //! ```no_run
 //! use runite::process::Command;
 //!
-//! runite::queue_future(async {
+//! runite::spawn(async {
 //!     let status = Command::new("/bin/true")
 //!         .status()
 //!         .await
