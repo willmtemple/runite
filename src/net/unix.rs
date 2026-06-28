@@ -629,40 +629,6 @@ fn socket_error(fd: RawFd) -> io::Result<()> {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-async fn wait_writable(fd: RawFd) -> io::Result<()> {
-    use crate::op::completion::completion_for_current_thread;
-    use crate::platform::linux_x86_64::runtime::with_current_driver;
-    use crate::platform::linux_x86_64::uring::{IORING_OP_POLL_ADD, IoUringCqe};
-
-    let (future, handle) = completion_for_current_thread::<io::Result<()>>();
-    let callback_handle = handle.clone();
-    let token = with_current_driver(|driver| {
-        driver.submit_operation(
-            move |sqe| {
-                sqe.opcode = IORING_OP_POLL_ADD;
-                sqe.fd = fd;
-                sqe.len = 0;
-                sqe.op_flags = (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) as u32;
-            },
-            move |cqe: IoUringCqe| {
-                if cqe.res < 0 {
-                    callback_handle.complete(Err(io::Error::from_raw_os_error(-cqe.res)));
-                } else {
-                    callback_handle.complete(Ok(()));
-                }
-            },
-        )
-    })?;
-
-    handle.set_cancel(move || {
-        let _ = with_current_driver(|driver| driver.cancel_operation(token));
-    });
-
-    future.await
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 async fn wait_writable(fd: RawFd) -> io::Result<()> {
     crate::sys::current::fd::wait_writable(fd).await
 }
