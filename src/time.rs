@@ -538,7 +538,7 @@ mod tests {
 
     use crate::{queue_macrotask, run, spawn};
 
-    use super::{MissedTickBehavior, interval, sleep, timeout};
+    use super::{MissedTickBehavior, interval, next_deadline, sleep, timeout};
 
     #[test]
     fn sleep_and_timeout_work() {
@@ -703,50 +703,112 @@ mod tests {
 
     #[test]
     fn interval_missed_tick_behavior_bursts_to_catch_up() {
-        let (ticks, elapsed_after_delay) = delayed_interval_ticks(MissedTickBehavior::Burst, 4);
+        let (ticks, after_delay) = delayed_interval_ticks(MissedTickBehavior::Burst, 4);
 
         assert_eq!(ticks[1].duration_since(ticks[0]), Duration::from_millis(20));
         assert_eq!(ticks[2].duration_since(ticks[1]), Duration::from_millis(20));
         assert_eq!(ticks[3].duration_since(ticks[2]), Duration::from_millis(20));
+        // Every catch-up deadline lies on the original grid, and the 65ms delay
+        // already overran all of them, so they were due before the late
+        // observation and fired immediately instead of re-waiting a period.
         assert!(
-            elapsed_after_delay < Duration::from_millis(20),
-            "burst catch-up ticks should be immediate, elapsed {elapsed_after_delay:?}"
+            ticks[3] <= after_delay,
+            "burst catch-up ticks should be overdue (fired immediately)"
         );
     }
 
     #[test]
     fn interval_missed_tick_behavior_delays_after_late_tick() {
-        let (ticks, elapsed_after_delay) = delayed_interval_ticks(MissedTickBehavior::Delay, 3);
+        let (ticks, after_delay) = delayed_interval_ticks(MissedTickBehavior::Delay, 3);
 
         assert_eq!(ticks[1].duration_since(ticks[0]), Duration::from_millis(20));
+        // Delay drifts: the deadline after a missed tick is one full period past
+        // the late observation, so the gap absorbs the whole delayed span and the
+        // deadline sits in the future rather than firing immediately.
         assert!(
-            ticks[2].duration_since(ticks[1]) >= Duration::from_millis(55),
-            "delay should drift after a missed tick"
+            ticks[2].duration_since(ticks[1]) >= Duration::from_millis(65),
+            "delay should drift past the missed span"
         );
         assert!(
-            elapsed_after_delay >= Duration::from_millis(15),
-            "next delayed tick should wait about one period, elapsed {elapsed_after_delay:?}"
+            ticks[2] > after_delay,
+            "delayed tick must wait into the future, not fire immediately"
         );
     }
 
     #[test]
     fn interval_missed_tick_behavior_skips_missed_grid_ticks() {
-        let (ticks, elapsed_after_delay) = delayed_interval_ticks(MissedTickBehavior::Skip, 3);
+        let (ticks, after_delay) = delayed_interval_ticks(MissedTickBehavior::Skip, 3);
 
         assert_eq!(ticks[1].duration_since(ticks[0]), Duration::from_millis(20));
-        assert_eq!(ticks[2].duration_since(ticks[1]), Duration::from_millis(60));
+        // Skip stays grid-aligned: the recovered deadline is an exact multiple of
+        // the period from the first tick, advances by at least one period, and is
+        // the first grid instant strictly after the late observation (so the
+        // runtime waits for it instead of firing a stale tick like Burst would).
+        let skip_gap = ticks[2].duration_since(ticks[0]);
+        assert_eq!(
+            skip_gap.as_nanos() % Duration::from_millis(20).as_nanos(),
+            0,
+            "skip deadline must remain on the original grid, gap {skip_gap:?}"
+        );
         assert!(
-            elapsed_after_delay >= Duration::from_millis(5),
-            "skip should wait for the next schedule-grid tick, elapsed {elapsed_after_delay:?}"
+            ticks[2].duration_since(ticks[1]) >= Duration::from_millis(20),
+            "skip should advance at least one period"
+        );
+        assert!(
+            ticks[2] > after_delay,
+            "skip should wait for the next grid tick, not fire immediately"
+        );
+    }
+
+    #[test]
+    fn next_deadline_matches_missed_tick_contract() {
+        // Deterministic coverage of the pure deadline math using synthetic
+        // instants, so it never depends on real sleep landing on a grid cell.
+        let period = Duration::from_millis(20);
+        let base = Instant::now();
+        let scheduled = base + Duration::from_millis(20);
+
+        // On-time observation (before scheduled + period): every behavior advances
+        // to the next grid instant.
+        let on_time = base + Duration::from_millis(25);
+        let next_grid = base + Duration::from_millis(40);
+        for behavior in [
+            MissedTickBehavior::Burst,
+            MissedTickBehavior::Delay,
+            MissedTickBehavior::Skip,
+        ] {
+            assert_eq!(
+                next_deadline(scheduled, on_time, period, behavior),
+                next_grid,
+                "on-time {behavior:?} should advance one grid step"
+            );
+        }
+
+        // Late observation (scheduled was missed by ~two periods).
+        let late = base + Duration::from_millis(65);
+        assert_eq!(
+            next_deadline(scheduled, late, period, MissedTickBehavior::Burst),
+            base + Duration::from_millis(40),
+            "burst replays the next grid deadline regardless of lateness"
+        );
+        assert_eq!(
+            next_deadline(scheduled, late, period, MissedTickBehavior::Delay),
+            base + Duration::from_millis(85),
+            "delay drifts to one period past the observation"
+        );
+        assert_eq!(
+            next_deadline(scheduled, late, period, MissedTickBehavior::Skip),
+            base + Duration::from_millis(80),
+            "skip jumps to the first grid instant after the observation"
         );
     }
 
     fn delayed_interval_ticks(
         behavior: MissedTickBehavior,
         tick_count: usize,
-    ) -> (Vec<Instant>, Duration) {
+    ) -> (Vec<Instant>, Instant) {
         std::thread::spawn(move || {
-            let output = Arc::new(Mutex::new(None::<(Vec<Instant>, Duration)>));
+            let output = Arc::new(Mutex::new(None::<(Vec<Instant>, Instant)>));
             let output_for_task = Arc::clone(&output);
 
             spawn(async move {
@@ -760,7 +822,7 @@ mod tests {
                 while ticks.len() < tick_count {
                     ticks.push(interval.tick().await);
                 }
-                *output_for_task.lock().unwrap() = Some((ticks, after_delay.elapsed()));
+                *output_for_task.lock().unwrap() = Some((ticks, after_delay));
             });
 
             run();
