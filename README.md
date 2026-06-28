@@ -17,6 +17,7 @@ ergonomics, and maximum I/O throughput.
 | Platform        | Backend            | Status    |
 | --------------- | ------------------ | --------- |
 | Linux `x86_64`  | `io_uring`         | Primary   |
+| Linux `aarch64` | `io_uring`         | Supported |
 | macOS `aarch64` | `kqueue` + offload | Supported |
 | Windows `x86_64`| IOCP + offload     | In progress (not yet available) |
 

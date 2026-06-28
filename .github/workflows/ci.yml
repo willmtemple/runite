@@ -65,6 +65,22 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  test-linux-arm64:
+    name: Test (Linux aarch64, io_uring)
+    # Native arm64 runner (free for public repos) so the io_uring backend is
+    # exercised on a real aarch64 kernel rather than under emulation.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test
+        run: cargo test --workspace --all-features
+
   test-macos:
     name: Test (macOS aarch64, kqueue)
     runs-on: macos-14
