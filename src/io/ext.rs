@@ -742,11 +742,12 @@ where
                     this.copied += written as u64;
                 }
                 CopyState::Copying => {
-                    this.pos = 0;
-                    this.filled = match Pin::new(&mut *this.reader).poll_read(cx, &mut this.buf) {
+                    let read = match Pin::new(&mut *this.reader).poll_read(cx, &mut this.buf) {
                         Poll::Ready(result) => result?,
                         Poll::Pending => return Poll::Pending,
                     };
+                    this.pos = 0;
+                    this.filled = read;
                     if this.filled == 0 {
                         this.state = CopyState::Flushing;
                     }
@@ -822,11 +823,12 @@ where
                 half.copied += written as u64;
             }
             CopyHalfState::Copying => {
-                half.pos = 0;
-                half.filled = match Pin::new(&mut *reader).poll_read(cx, &mut half.buf) {
+                let read = match Pin::new(&mut *reader).poll_read(cx, &mut half.buf) {
                     Poll::Ready(result) => result?,
                     Poll::Pending => return Poll::Pending,
                 };
+                half.pos = 0;
+                half.filled = read;
                 if half.filled == 0 {
                     half.state = CopyHalfState::Closing;
                 }
@@ -1228,5 +1230,123 @@ mod tests {
         run();
         assert!(*flushed.borrow());
         assert!(written.borrow().is_empty());
+    }
+
+    /// Reader/writer whose reads park (`Poll::Pending`) between data chunks, the
+    /// way a real socket read does when the kernel completion is still in
+    /// flight. It hands out `read` one chunk at a time and returns `Pending`
+    /// (after self-waking) before each chunk and before reporting EOF.
+    ///
+    /// This models the async path that synchronous mock readers (which always
+    /// return `Ready`) never exercise. The copy state machines reset their
+    /// buffer cursor only after a read resolves; a reader that parses mid-stream
+    /// catches any premature cursor reset that would re-emit an already-copied
+    /// chunk (a regression that doubled bytes over io_uring sockets).
+    struct ParkingIo {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+        park_before_next_read: bool,
+        written: Rc<RefCell<Vec<u8>>>,
+        closed: Rc<RefCell<bool>>,
+    }
+
+    impl ParkingIo {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Self {
+                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+                park_before_next_read: true,
+                written: Rc::new(RefCell::new(Vec::new())),
+                closed: Rc::new(RefCell::new(false)),
+            }
+        }
+
+        fn written(&self) -> Rc<RefCell<Vec<u8>>> {
+            Rc::clone(&self.written)
+        }
+    }
+
+    impl AsyncRead for ParkingIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.park_before_next_read {
+                self.park_before_next_read = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.park_before_next_read = true;
+            match self.chunks.pop_front() {
+                Some(chunk) => {
+                    let read = chunk.len().min(buf.len());
+                    buf[..read].copy_from_slice(&chunk[..read]);
+                    Poll::Ready(Ok(read))
+                }
+                None => Poll::Ready(Ok(0)),
+            }
+        }
+    }
+
+    impl AsyncWrite for ParkingIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.borrow_mut().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            *self.closed.borrow_mut() = true;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn copy_does_not_re_emit_chunks_when_reads_park() {
+        let observed = Rc::new(RefCell::new(0u64));
+        let written = Rc::new(RefCell::new(Vec::new()));
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            let written = Rc::clone(&written);
+            async move {
+                let mut reader = ParkingIo::new(&[b"hello"]);
+                let mut writer = ParkingIo::new(&[]);
+                writer.written = Rc::clone(&written);
+                *observed.borrow_mut() = copy(&mut reader, &mut writer).await.unwrap();
+            }
+        });
+
+        run();
+        assert_eq!(*observed.borrow(), 5);
+        assert_eq!(&*written.borrow(), b"hello");
+    }
+
+    #[test]
+    fn copy_bidirectional_does_not_re_emit_chunks_when_reads_park() {
+        let observed = Rc::new(RefCell::new((0u64, 0u64)));
+
+        let mut left = ParkingIo::new(&[b"to-right"]);
+        let mut right = ParkingIo::new(&[b"to-left"]);
+        let left_written = left.written();
+        let right_written = right.written();
+
+        spawn({
+            let observed = Rc::clone(&observed);
+            async move {
+                *observed.borrow_mut() = copy_bidirectional(&mut left, &mut right).await.unwrap();
+            }
+        });
+
+        run();
+        assert_eq!(*observed.borrow(), (8, 7));
+        assert_eq!(&*right_written.borrow(), b"to-right");
+        assert_eq!(&*left_written.borrow(), b"to-left");
     }
 }
