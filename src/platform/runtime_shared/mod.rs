@@ -1,6 +1,6 @@
 //! Backend-independent runtime scheduler.
 //!
-//! Both `platform/linux_x86_64/runtime.rs` and `platform/macos_aarch64/runtime.rs`
+//! Both `platform/linux/runtime.rs` and `platform/macos_aarch64/runtime.rs`
 //! used to carry near-identical copies of the scheduler, timer heap, future
 //! task plumbing, join handles, and worker-thread bookkeeping. All of that
 //! shared code now lives here; each platform `runtime.rs` is a thin shim

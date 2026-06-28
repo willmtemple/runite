@@ -6,8 +6,8 @@
 //! with other tasks without blocking the event loop.
 //!
 //! Child pipes are set nonblocking when the process is spawned. Reads and writes
-//! retry the OS call after one-shot fd readiness (`io_uring` poll on Linux
-//! x86_64, kqueue on macOS aarch64); they do not use the blocking thread pool.
+//! retry the OS call after one-shot fd readiness (`io_uring` poll on Linux,
+//! kqueue on macOS aarch64); they do not use the blocking thread pool.
 //! Like other runite handles, pipe futures should be polled on their creating
 //! runtime thread.
 //!

@@ -18,7 +18,7 @@
 //! begins after spawn, when [`Child::wait`] observes process exit and child pipe
 //! handles use fd readiness for I/O.
 //!
-//! On Linux x86_64, child-exit waits use pidfd readability followed by
+//! On Linux, child-exit waits use pidfd readability followed by
 //! `waitpid`; runite does not rely on `SIGCHLD` for this path. On macOS aarch64,
 //! waits register `EVFILT_PROC` with kqueue and poll it after a 1ms runtime
 //! sleep. Both approaches fit runite's event-loop-per-thread model: futures and

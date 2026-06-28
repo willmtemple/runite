@@ -6,8 +6,8 @@
 //! task that is waiting for readiness. If a sender completes a waiter on the
 //! waiter's owning runtime thread, runite schedules a microtask. If completion
 //! comes from another thread, runite queues a macrotask onto the owner thread
-//! using the platform-specific remote wake path: `io_uring` `MSG_RING` on Linux
-//! x86_64, and a pipe/eventfd-equivalent wakeup with `kqueue` on macOS aarch64.
+//! using the platform-specific remote wake path: `io_uring` `MSG_RING` on Linux,
+//! and a pipe/eventfd-equivalent wakeup with `kqueue` on macOS aarch64.
 //!
 //! Message values are `T: Send` so producers can be used across threads, but
 //! async waits are registered with a specific runtime thread and must be polled

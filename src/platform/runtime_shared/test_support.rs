@@ -1,6 +1,6 @@
 //! Shared test bodies parameterised over a per-platform `Runtime`.
 //!
-//! Both `platform/linux_x86_64/runtime.rs` and `platform/macos_aarch64/runtime.rs`
+//! Both `platform/linux/runtime.rs` and `platform/macos_aarch64/runtime.rs`
 //! ship a small `mod tests` that pins these helpers to their concrete
 //! marker type. Keeping the bodies here means the integration scenarios stay
 //! in lockstep across platforms.

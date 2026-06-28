@@ -12,7 +12,7 @@
 //! split halves, UDP sockets, and their pending I/O futures are effectively
 //! current-thread values; drive them on the runtime thread that owns the
 //! operation, and move work to another thread by sending a macrotask to that
-//! thread rather than by migrating the socket future. Linux x86_64 uses
+//! thread rather than by migrating the socket future. Linux uses
 //! completion-based `io_uring` operations, while macOS aarch64 waits for
 //! readiness with `kqueue` and then performs nonblocking socket calls.
 //!

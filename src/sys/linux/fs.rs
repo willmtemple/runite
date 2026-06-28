@@ -14,10 +14,10 @@ use std::task::{Context, Poll, Waker};
 
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, OpenOptions, RawDirEntry, RawMetadata};
-use crate::platform::linux_x86_64::runtime::{
+use crate::platform::linux::runtime::{
     QueueError, ThreadHandle, current_thread_handle, with_current_driver,
 };
-use crate::platform::linux_x86_64::uring::{
+use crate::platform::linux::uring::{
     IORING_FSYNC_DATASYNC, IORING_OP_CLOSE, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
     IORING_OP_MKDIRAT, IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX,
     IORING_OP_UNLINKAT, IORING_OP_WRITE, IoUringCqe,
@@ -497,7 +497,7 @@ async fn submit_unlink(path: PathBuf, flags: i32) -> io::Result<()> {
 }
 
 async fn submit_uring<T: Send + 'static, M>(
-    fill: impl FnOnce(&mut crate::platform::linux_x86_64::uring::IoUringSqe),
+    fill: impl FnOnce(&mut crate::platform::linux::uring::IoUringSqe),
     map: M,
 ) -> io::Result<T>
 where
@@ -507,7 +507,7 @@ where
 }
 
 async fn submit_uring_guarded<T: Send + 'static, M>(
-    fill: impl FnOnce(&mut crate::platform::linux_x86_64::uring::IoUringSqe),
+    fill: impl FnOnce(&mut crate::platform::linux::uring::IoUringSqe),
     guard: Box<dyn std::any::Any + Send + 'static>,
     map: M,
 ) -> io::Result<T>

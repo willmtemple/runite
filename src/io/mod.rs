@@ -15,8 +15,8 @@
 //! timers, and I/O driver notifications are macrotasks, and microtasks drain
 //! before the next macrotask.
 //!
-//! The platform backend shapes what an I/O readiness point means. On Linux
-//! x86_64, runite submits completion-based operations to `io_uring`; on macOS
+//! The platform backend shapes what an I/O readiness point means. On Linux,
+//! runite submits completion-based operations to `io_uring`; on macOS
 //! aarch64, it waits for readiness through `kqueue` and then performs the
 //! nonblocking operation. Unlike Tokio's default multi-thread scheduler or
 //! async-std, these traits make the current-thread assumption explicit and keep
