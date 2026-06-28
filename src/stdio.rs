@@ -11,7 +11,7 @@
 //! threads.
 //!
 //! `Stdout` and `Stderr` perform write-through async writes via the active
-//! backend: Linux x86_64 uses `io_uring`, while macOS aarch64 offloads blocking
+//! backend: Linux uses `io_uring`, while macOS aarch64 offloads blocking
 //! writes to the blocking pool. runite does not add userspace buffering for
 //! these writers. Their `poll_flush` and `poll_close` methods are no-ops;
 //! `flush()` only observes that previously awaited writes have completed and
@@ -75,26 +75,26 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
 use crate::io::{AsyncRead, AsyncWrite};
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::FsOp;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::platform::linux_x86_64::runtime::with_current_driver;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::platform::linux_x86_64::uring::{IORING_OP_READ, IoUringCqe, IoUringSqe};
+#[cfg(target_os = "linux")]
+use crate::platform::linux::runtime::with_current_driver;
+#[cfg(target_os = "linux")]
+use crate::platform::linux::uring::{IORING_OP_READ, IoUringCqe, IoUringSqe};
 use crate::sys::current::fs as sys_fs;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 use std::cell::Cell;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 thread_local! {
     static STDIN_URING_SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 const FILE_CURSOR: u64 = u64::MAX;
 const READ_CHUNK_BYTES: usize = 1024;
 
@@ -293,7 +293,7 @@ impl Stdin {
             return Ok(0);
         }
         let fd = self.fd.as_raw_fd();
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(target_os = "linux")]
         {
             let support = STDIN_URING_SUPPORTED.with(Cell::get);
             if support != Some(false) {
@@ -502,7 +502,7 @@ impl AsyncWrite for Stderr {
 
 fn stdin_read_future(fd: RawFd, len: usize) -> PendingStdinRead {
     Box::pin(async move {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(target_os = "linux")]
         {
             let support = STDIN_URING_SUPPORTED.with(Cell::get);
             if support != Some(false) {
@@ -550,7 +550,7 @@ async fn offload<T: Send + 'static>(
     future.await
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 async fn submit_uring_read(fd: RawFd, len: usize) -> io::Result<Vec<u8>> {
     let buffer = Arc::new(Mutex::new(vec![0; len].into_boxed_slice()));
     let ptr = buffer.lock().unwrap().as_mut_ptr();
@@ -573,7 +573,7 @@ async fn submit_uring_read(fd: RawFd, len: usize) -> io::Result<Vec<u8>> {
     .await
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 async fn submit_uring_guarded<T: Send + 'static, M>(
     fill: impl FnOnce(&mut IoUringSqe),
     guard: Box<dyn std::any::Any + Send + 'static>,
@@ -630,7 +630,7 @@ fn decode_line(bytes: Vec<u8>) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 fn cqe_to_result(cqe: IoUringCqe) -> io::Result<i32> {
     if cqe.res < 0 {
         Err(io::Error::from_raw_os_error(-cqe.res))
@@ -639,7 +639,7 @@ fn cqe_to_result(cqe: IoUringCqe) -> io::Result<i32> {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(target_os = "linux")]
 fn should_fallback_to_offload(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),

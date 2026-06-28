@@ -30,7 +30,7 @@ use crate::trace_targets;
 
 /// Per-platform glue trait.
 ///
-/// Each platform (Linux x86_64, macOS aarch64) implements this on a private
+/// Each platform (Linux, macOS aarch64) implements this on a private
 /// marker type and uses it to monomorphize the public scheduler functions.
 ///
 /// The trait surface is intentionally tiny: shared state is fully

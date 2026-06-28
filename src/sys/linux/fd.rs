@@ -5,7 +5,7 @@ use std::os::fd::RawFd;
 
 use crate::op::completion::completion_for_current_thread;
 use crate::platform::current::runtime::with_current_driver;
-use crate::platform::linux_x86_64::uring::{IORING_OP_POLL_ADD, IoUringCqe};
+use crate::platform::linux::uring::{IORING_OP_POLL_ADD, IoUringCqe};
 
 /// Waits until `fd` becomes readable or reports an error/hangup condition.
 pub async fn wait_readable(fd: RawFd) -> io::Result<()> {

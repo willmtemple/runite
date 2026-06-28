@@ -13,7 +13,7 @@
 //!
 //! # Backend model
 //!
-//! On Linux x86_64, regular filesystem operations use the runtime's `io_uring`
+//! On Linux, regular filesystem operations use the runtime's `io_uring`
 //! completion backend where an opcode exists. On macOS aarch64, filesystem work
 //! is offloaded to runite's blocking thread pool so slow disk or metadata calls
 //! do not block the event-loop thread. Directory iteration is also

@@ -87,7 +87,7 @@
 //! # Platform support
 //!
 //! `runite` currently targets:
-//! - Linux `x86_64` (io_uring)
+//! - Linux (io_uring) on `x86_64` and `aarch64`
 //! - macOS `aarch64` (kqueue)
 //!
 //! A Windows port (IOCP) is in progress. Building for any other target raises a
@@ -95,11 +95,8 @@
 
 #![deny(missing_docs)]
 
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-)))]
-compile_error!("runite currently supports Linux x86_64 and macOS aarch64.");
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+compile_error!("runite currently supports Linux (x86_64, aarch64) and macOS aarch64.");
 
 extern crate alloc;
 
@@ -140,10 +137,7 @@ pub mod macros;
 /// runtime thread before calling [`run`].
 pub use runite_proc_macros::main;
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 pub use runtime_api::*;
 
 /// The crate's core event-loop API.
@@ -152,10 +146,7 @@ pub use runtime_api::*;
 /// inheriting a single blanket summary from a grouped re-export) and so the
 /// per-platform `runtime.rs` shims stay free of duplicated doc comments. The
 /// items are glob-re-exported at the crate root, which is their public path.
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 mod runtime_api {
     use core::future::Future;
 

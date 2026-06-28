@@ -1,4 +1,4 @@
-//! Linux x86_64 runtime shim.
+//! Linux runtime shim.
 //!
 //! All scheduler, timer-heap, future-task, and worker bookkeeping lives in
 //! [`crate::platform::runtime_shared`]. This file just:

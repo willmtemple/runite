@@ -1,12 +1,12 @@
 #[doc(hidden)]
 pub mod runtime_shared;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub mod linux_x86_64;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod macos_aarch64;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub use linux_x86_64 as current;
+#[cfg(target_os = "linux")]
+pub use linux as current;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use macos_aarch64 as current;

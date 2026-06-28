@@ -22,8 +22,8 @@ thread_local! {
 
 use crate::op::completion::completion_for_current_thread;
 use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
-use crate::platform::linux_x86_64::runtime::with_current_driver;
-use crate::platform::linux_x86_64::uring::{
+use crate::platform::linux::runtime::with_current_driver;
+use crate::platform::linux::uring::{
     IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CLOSE, IORING_OP_CONNECT, IORING_OP_LISTEN,
     IORING_OP_RECV, IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN,
     IORING_OP_SOCKET, IoUringCqe, IoUringSqe,

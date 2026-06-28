@@ -18,7 +18,7 @@
 //!
 //! # Platform behavior
 //!
-//! On Linux x86_64, readiness uses one-shot `io_uring` poll operations with
+//! On Linux, readiness uses one-shot `io_uring` poll operations with
 //! best-effort kernel cancellation when the future is dropped. On macOS aarch64,
 //! readiness is registered with kqueue; cancellation is queued back to the owner
 //! thread with [`crate::ThreadHandle::queue_macrotask`]. If that queue is full or
