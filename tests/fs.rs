@@ -42,6 +42,40 @@ fn write_then_read_roundtrip() {
 }
 
 #[test]
+fn read_only_open_with_truncate_is_rejected_and_preserves_contents() {
+    let path = temp_path("read-truncate");
+    let (errored, contents) = block_on(move || async move {
+        let mut file = File::create(&path).await.expect("create file");
+        file.write_all(b"keep me").await.expect("write initial");
+        file.sync_all().await.expect("sync all");
+        drop(file);
+
+        // `read(true).truncate(true)` is an invalid combination: it must be
+        // rejected rather than silently opening O_RDONLY | O_TRUNC (which would
+        // truncate the file). Matches std and the macOS backend.
+        let errored = OpenOptions::new()
+            .read(true)
+            .truncate(true)
+            .open(&path)
+            .await
+            .is_err();
+
+        let mut buf = Vec::new();
+        File::open(&path)
+            .await
+            .expect("reopen file")
+            .read_to_end(&mut buf)
+            .await
+            .expect("read to end");
+        let _ = fs::remove_file(&path).await;
+        (errored, buf)
+    });
+
+    assert!(errored, "read+truncate must be rejected");
+    assert_eq!(contents, b"keep me", "file must not have been truncated");
+}
+
+#[test]
 fn positional_read_and_metadata() {
     let path = temp_path("positional");
     let work_path = path.clone();

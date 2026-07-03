@@ -48,8 +48,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `net/mod.rs:731-780`, `fs.rs:400-404`, `stdio.rs:453-457`, `hyper_impl.rs:48-51`.
   Smaller re-poll buffer destroys received bytes; changed write buffer misreports;
   hyper adapter panics. Stash surplus in a per-object overflow buffer / clamp writes.
-- [ ] **1.3 `read(true).truncate(true)` truncates on Linux.**
-  `sys/linux/fs.rs:542-573`. Replicate std's `get_creation_mode` access validation.
+- [x] **1.3 `read(true).truncate(true)` truncates on Linux.**
+  `sys/linux/fs.rs:542-573`. **Done:** split `open_flags` into std-mirroring
+  `access_mode` + `creation_mode`; invalid access combinations (truncate/create
+  without write, truncate+append without create_new) now fail `EINVAL` instead of
+  silently opening `O_RDONLY | O_TRUNC`. Regression test in `tests/fs.rs` (asserts
+  the open errors and the file is preserved); verified it fails without the guard.
 - [ ] **1.4 Mixing `mpsc::recv()` with the `Stream` impl reorders / aborts process.**
   `channel/mpsc.rs:686-711`. Unify both on the persistent `stream_wait` slot.
 - [ ] **1.5 `watch::changed()` version regression after cancelled wait.**
