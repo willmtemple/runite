@@ -185,7 +185,29 @@ impl ThreadShared {
         }
     }
 
+    /// Enqueues a cross-thread **user** macrotask, applying the bounded-queue
+    /// capacity limit as backpressure. Returns [`QueueError::Full`] when the
+    /// queue is at capacity.
     pub(crate) fn enqueue_macro(&self, task: SendTask) -> Result<(), QueueError> {
+        self.enqueue(task, true)
+    }
+
+    /// Enqueues an internal cross-thread **wake** (an I/O/channel completion
+    /// wake, or a spawned-task waker firing from another thread), bypassing the
+    /// capacity limit.
+    ///
+    /// These must never be dropped for backpressure: a completion stores its
+    /// result *before* queueing the wake, and a task waker's wake is a task's
+    /// only scheduling signal, so a dropped wake strands the target forever.
+    /// Unlike user macrotasks, their count is naturally bounded — one pending
+    /// wake per in-flight operation or per live task (each coalesced by its own
+    /// scheduled flag) — so the queue cannot grow without a matching amount of
+    /// genuine outstanding work. Only a `closed` thread rejects.
+    pub(crate) fn enqueue_internal_wake(&self, task: SendTask) -> Result<(), QueueError> {
+        self.enqueue(task, false)
+    }
+
+    fn enqueue(&self, task: SendTask, enforce_capacity: bool) -> Result<(), QueueError> {
         // Check `closed` under the queue lock so that the exit path can
         // atomically set `closed` while holding the same lock, eliminating
         // the window where a task is accepted but then stranded at shutdown.
@@ -193,7 +215,7 @@ impl ThreadShared {
         if self.closed.load(Ordering::Acquire) {
             return Err(QueueError::Closed);
         }
-        if queue.len() >= self.remote_macrotasks.capacity {
+        if enforce_capacity && queue.len() >= self.remote_macrotasks.capacity {
             if !self
                 .remote_macrotasks
                 .warned_full

@@ -240,6 +240,24 @@ impl ThreadHandle {
         result
     }
 
+    /// Queues an internal cross-thread wake onto this runtime thread, bypassing
+    /// the bounded-queue capacity limit.
+    ///
+    /// Used by the completion machinery and the task waker to deliver a wake to
+    /// its owning thread. Unlike [`queue_macrotask`](Self::queue_macrotask)
+    /// this never returns [`QueueError::Full`]: such a wake must not be dropped
+    /// (it would strand a completion whose result is already stored, or a task
+    /// with no other scheduling signal), and the number of outstanding wakes is
+    /// bounded by in-flight operations and live tasks rather than by user
+    /// input. See
+    /// [`ThreadShared::enqueue_internal_wake`](super::state::ThreadShared::enqueue_internal_wake).
+    pub(crate) fn queue_internal_wake<F>(&self, task: F) -> Result<(), QueueError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.shared.enqueue_internal_wake(Box::new(task))
+    }
+
     /// Returns `true` if the target runtime thread has shut down.
     pub fn is_closed(&self) -> bool {
         self.shared.closed.load(Ordering::Acquire)

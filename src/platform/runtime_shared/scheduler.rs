@@ -1053,4 +1053,32 @@ mod tests {
             Err(QueueError::Closed)
         ));
     }
+
+    #[test]
+    fn internal_wakes_bypass_remote_queue_capacity() {
+        let handle = handle_with_capacity(1);
+
+        // A user macrotask fills the queue to capacity; the next is rejected.
+        assert!(handle.queue_macrotask(|| {}).is_ok());
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Full)
+        ));
+
+        // Internal completion wakes are accepted even past capacity: dropping
+        // one would strand an awaiting future whose result is already stored.
+        assert!(handle.queue_internal_wake(|| {}).is_ok());
+        assert!(handle.queue_internal_wake(|| {}).is_ok());
+    }
+
+    #[test]
+    fn internal_wakes_still_reject_when_closed() {
+        let handle = handle_with_capacity(1);
+        handle.shared.closed.store(true, Ordering::Release);
+
+        assert!(matches!(
+            handle.queue_internal_wake(|| {}),
+            Err(QueueError::Closed)
+        ));
+    }
 }

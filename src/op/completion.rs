@@ -7,9 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::platform::current::runtime::{
-    QueueError, ThreadHandle, current_thread_handle, queue_microtask, queue_task,
+    ThreadHandle, current_thread_handle, queue_microtask, queue_task,
 };
-use crate::trace_targets;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -104,27 +103,24 @@ impl<T: Send + 'static> CompletionState<T> {
         #[cfg(test)]
         REMOTE_WAKE_COUNT.with(|c| c.set(c.get() + 1));
 
+        // Route through the capacity-bypassing completion-wake path. The
+        // result is already stored, so this wake must not be dropped for
+        // backpressure; it is bounded by `pending_ops` instead (one wake per
+        // in-flight op, coalesced by `wake_queued`). The only failure is a
+        // closed owner thread, which means nothing more can (or needs to) be
+        // scheduled there.
         let state = Arc::clone(self);
-        match self.owner.queue_macrotask(move || {
-            state.wake_queued.store(false, Ordering::Release);
-            if let Some(waker) = state.waker.lock().unwrap().take() {
-                waker.wake();
-            }
-        }) {
-            Ok(()) => {}
-            Err(QueueError::Closed) => {
-                self.wake_queued.store(false, Ordering::Release);
-            }
-            Err(QueueError::Full) => {
-                // Do not block or retry from a kernel/blocking completion callback.
-                // Dropping this wake is preferable to deadlocking the producer.
-                tracing::error!(
-                    target: trace_targets::SCHEDULER,
-                    event = "completion_wake_dropped",
-                    "dropping cross-thread completion wake because the remote queue is full"
-                );
-                self.wake_queued.store(false, Ordering::Release);
-            }
+        if self
+            .owner
+            .queue_internal_wake(move || {
+                state.wake_queued.store(false, Ordering::Release);
+                if let Some(waker) = state.waker.lock().unwrap().take() {
+                    waker.wake();
+                }
+            })
+            .is_err()
+        {
+            self.wake_queued.store(false, Ordering::Release);
         }
     }
 }
