@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use std::net::{
     Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs,
 };
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -218,12 +218,18 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
         },
         move |cqe| {
             let accepted_fd = cqe_to_result(cqe)? as RawFd;
+            // Take ownership of the accepted fd immediately so that an error
+            // parsing the peer address below closes it via `OwnedFd`'s drop
+            // rather than leaking a live connection.
+            // SAFETY: `accepted_fd` is a fresh descriptor from a successful
+            // accept CQE, owned here exactly once.
+            let accepted = unsafe { OwnedFd::from_raw_fd(accepted_fd) };
             // SAFETY: a successful accept CQE means the kernel initialized
             // `*addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
             let peer_addr = socket_addr_from_storage(&storage, *addr_len)?;
             Ok(AcceptedSocket {
-                fd: accepted_fd,
+                fd: accepted.into_raw_fd(),
                 peer_addr,
             })
         },

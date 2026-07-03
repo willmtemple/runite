@@ -200,9 +200,25 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   unchanged.
 - [ ] **2.9 fs ops have no older-kernel fallback; min kernel undocumented.**
   Decide floor (~5.19 full / 5.18 multi-thread) and document, or add blocking-pool fallbacks.
-- [ ] **2.10 Smaller robustness:** mpsc bounded-send cancel-registration Arc-cycle leak
+- [x] **2.10 Smaller robustness:** mpsc bounded-send cancel-registration Arc-cycle leak
   (`mpsc.rs:448-489`); accept fd leak on address-parse failure; stdin inherent-read offload
-  steals input + leaks a pool thread after cancel.
+  steals input + leaks a pool thread after cancel. **Done:**
+  - **Accept fd leak (fixed):** the io_uring accept completion handler now wraps the
+    accepted fd in an `OwnedFd` immediately, so a failure parsing the peer address
+    (`socket_addr_from_storage`) closes the live connection via RAII instead of leaking
+    it; the fd is released into `AcceptedSocket` only on success.
+  - **mpsc bounded-send cycle (analyzed, no change):** the cancel closure forms a
+    channel-state ↔ completion-state reference cycle, but it is broken on **every**
+    terminating path — a successful send removes the waiter and `finish()` clears the
+    cancel slot; a dropped send future runs the cancel (which removes the waiter and
+    drops the closure). The 200-iteration channel stress tests do not leak, confirming
+    it self-breaks. Left the (delicate, cancel-safety-critical) code untouched rather
+    than risk a regression.
+  - **stdin offload (documented):** the blocking-offload fallback cannot cancel an
+    in-flight `read(2)`, so a dropped stdin read loses the consumed bytes and pins a
+    pool worker until input arrives. This is now clearly documented on `Stdin::read`
+    (cancel-safe on the io_uring path, not on the fallback). The proper fix — a dedicated
+    buffered stdin reader thread — is deferred to post-0.1 (added below).
 
 ## Tier 3 — API shape (breaking window closes at 0.1)
 
@@ -276,5 +292,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 - [-] `CancellationToken`; `WorkerHandle::join()`.
 - [-] Hardening: Miri (mock driver), ASAN, io_uring-limited-kernel CI, macOS runner;
   macOS child-wait busy-poll; `ReadDir` unbounded producer.
+- [-] Cancel-safe buffered stdin: a dedicated long-lived reader thread feeding a buffer,
+  so a dropped `Stdin::read` on the blocking-offload path (macOS / pre-uring-stdin Linux)
+  no longer loses bytes or pins a pool worker (see 2.10).
 - [-] Windows IOCP backend.
 - [-] Dead-code cleanup (fold into P-1 driver refactor).
