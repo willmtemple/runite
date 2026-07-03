@@ -401,6 +401,7 @@ pub fn run<R: Runtime>() {
         "entering runtime event loop"
     );
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_all::<R>();
@@ -517,6 +518,7 @@ pub fn run<R: Runtime>() {
 /// need to re-enter the scheduler while an outer platform loop remains active.
 pub fn run_until_stalled<R: Runtime>() {
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_all::<R>();
@@ -560,6 +562,7 @@ pub fn run_until_stalled<R: Runtime>() {
 /// from inside a host callback without re-entering timer callbacks.
 pub fn run_ready_tasks<R: Runtime>() {
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_remote_tasks::<R>();
@@ -619,6 +622,45 @@ fn run_guarded(task: LocalTask) {
             panic = describe_panic(&*payload),
             "scheduled task panicked; isolating panic to keep the event loop running",
         );
+    }
+}
+
+/// RAII guard that marks the current thread as actively driving its event loop
+/// and clears the mark on drop.
+///
+/// Constructing it via [`enter`](Self::enter) panics if a driver loop is
+/// already running on this thread — that is, if [`run`], [`run_until_stalled`],
+/// or [`run_ready_tasks`] is (transitively) re-entered from inside a task poll
+/// or scheduled callback. Re-entry would drive the same microtask/macrotask
+/// queues from two stack frames at once and corrupt scheduling state, so it is
+/// rejected up front. The panic is subject to the per-task firewall, so a task
+/// that illegally re-enters resolves to `JoinError::Panicked` rather than
+/// taking down the outer loop.
+struct EventLoopGuard;
+
+impl EventLoopGuard {
+    fn enter() -> Self {
+        with_installed_thread(|state| {
+            assert!(
+                !state.in_event_loop.replace(true),
+                "runite: cannot re-enter the runtime event loop; `run`, \
+                 `run_until_stalled`, and `run_ready_tasks` must not be called from \
+                 within a task or callback already running on this runtime thread",
+            );
+        });
+        EventLoopGuard
+    }
+}
+
+impl Drop for EventLoopGuard {
+    fn drop(&mut self) {
+        // Best-effort: `run()` tears the thread state down before this guard
+        // drops on the normal exit path, so a missing state is expected.
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                state.in_event_loop.set(false);
+            }
+        });
     }
 }
 

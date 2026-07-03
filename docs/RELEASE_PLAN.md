@@ -125,8 +125,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   survives; sibling tasks unaffected). Public API snapshot regenerated. **Deferred to
   3.6:** `#[non_exhaustive]` on `JoinError` (this commit adds the variant only). The panic
   payload is intentionally not carried, keeping `JoinError: Copy`.
-- [ ] **2.2 No reentrancy guard on `run()`/`run_until_stalled()`.**
-  Add `in_event_loop` flag; panic on nested entry (tokio-style).
+- [x] **2.2 No reentrancy guard on `run()`/`run_until_stalled()`.**
+  Add `in_event_loop` flag; panic on nested entry (tokio-style). **Done:** added
+  `ThreadState::in_event_loop` and an `EventLoopGuard` set at the top of all three
+  drivers (`run`, `run_until_stalled`, `run_ready_tasks`); constructing it panics if a
+  driver is already active on the thread (re-entry from inside a task/callback). The
+  panic is caught by the 2.1 per-task firewall, so an offending task resolves to
+  `JoinError::Panicked` and the outer loop survives. Sequential (non-nested) calls are
+  unaffected. Regression tests in `tests/reentrancy.rs` (nested `run` and
+  `run_until_stalled` both rejected; outer loop continues).
 - [ ] **2.3 Cross-thread completion wakes dropped when remote queue full.**
   `op/completion.rs:118-127`. Give internal completion wakes a reserved/unbounded
   internal queue (bounded by `pending_ops`).
