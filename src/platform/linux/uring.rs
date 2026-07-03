@@ -623,7 +623,29 @@ impl IoUring {
         if to_submit == 0 {
             return Ok(0);
         }
-        self.enter(to_submit, 0, 0)
+        loop {
+            match self.enter(to_submit, 0, 0) {
+                Ok(submitted) => return Ok(submitted),
+                // EINTR consumes no SQEs; retry the whole submission.
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    // io_uring_enter consumed no SQEs on error. Un-publish the
+                    // queued entries by rolling the SQ tail back to the head the
+                    // kernel last observed: the caller's error path is about to
+                    // drop the backing completions (and their staging buffers),
+                    // so a stale SQE left in the ring would point the kernel at
+                    // freed memory on the next submission (a use-after-free).
+                    //
+                    // Sound because the current design submits immediately after
+                    // each push, so every un-consumed SQE belongs to this failed
+                    // submission. A future batched submitter (release-plan P-1)
+                    // must instead roll back only the un-consumed suffix and keep
+                    // already-accepted ops' completions alive.
+                    store_u32(self.sq_tail, head);
+                    return Err(error);
+                }
+            }
+        }
     }
 
     fn enter(&self, to_submit: u32, min_complete: u32, flags: u32) -> io::Result<u32> {
