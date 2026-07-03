@@ -177,8 +177,22 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   succeeds). Regression test `uring_socket_is_cloexec` locks the property.
 - [ ] **2.7 Signal reader consumes a shared blocking-pool worker.**
   `signal/unix.rs:319-324`. Move to a dedicated `std::thread`.
-- [ ] **2.8 `watch::Ref` holds the channel `Mutex`; two same-thread borrows deadlock.**
+- [x] **2.8 `watch::Ref` holds the channel `Mutex`; two same-thread borrows deadlock.**
   `watch.rs:99-101` etc. RwLock the value or split the value lock; harden docs.
+  **Done:** split the single `Mutex<State<T>>` into `Shared<T> { value: RwLock<T>,
+  version: AtomicU64, book: Arc<Mutex<Book>> }`. `Ref` now holds a `RwLockReadGuard<T>`,
+  so multiple borrows (including several on one thread) coexist instead of deadlocking
+  on the second. The version is bumped under the value **write** lock and read under the
+  value **read** lock, so `borrow_and_update` always sees a consistent (value, version)
+  pair; `changed`'s check+enqueue stays under the `book` lock that `send` wakes under, so
+  no wakeup is lost. Keeping the value split from the bookkeeping (and giving `book` its
+  own `Arc<Mutex<_>>`) lets the `Send` cancel closure capture only the bookkeeping — so
+  the public bound stays `T: Send` (a straight `RwLock<State<T>>` would have forced
+  `T: Send + Sync`, dropping thread-local `!Sync` values). Handles are `Send`/`Sync` only
+  when `T: Send + Sync` (auto). `Ref` docs now warn that holding a borrow across a
+  same-thread `send`/`.await` deadlocks. Regression test
+  `two_borrows_on_same_thread_do_not_deadlock` (hangs on the old design); public API
+  unchanged.
 - [ ] **2.9 fs ops have no older-kernel fallback; min kernel undocumented.**
   Decide floor (~5.19 full / 5.18 multi-thread) and document, or add blocking-pool fallbacks.
 - [ ] **2.10 Smaller robustness:** mpsc bounded-send cancel-registration Arc-cycle leak
