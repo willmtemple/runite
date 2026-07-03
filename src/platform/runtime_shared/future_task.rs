@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
-use super::handles::{QueueError, ThreadHandle};
+use super::handles::ThreadHandle;
 use super::state::{describe_panic, try_with_installed_thread, with_installed_thread};
 use crate::task::JoinError;
 use crate::trace_targets;
@@ -178,20 +178,25 @@ impl TaskWaker {
 
         // Cross-thread wake: hop to the owner thread and schedule there. The
         // closure captures only a `Send` `Arc<TaskWaker>` and the numeric id.
+        // Route through the capacity-bypassing internal-wake path: a task
+        // waker's wake is the task's only scheduling signal, so dropping it on
+        // a full queue would strand the task (a lost-wakeup hang). It is
+        // bounded instead by the number of live tasks — one pending wake each,
+        // coalesced by `scheduled`.
         let this = Arc::clone(self);
         let id = self.id;
-        match self.owner.queue_macrotask(move || {
-            this.scheduled.store(false, Ordering::Release);
-            schedule_task_by_id(id);
-        }) {
-            Ok(()) => {}
-            // Closed: the owner runtime has exited; nothing can be scheduled.
-            // Full: the wake is dropped (see the reserved-capacity follow-up in
-            // the release plan, task 2.3). Reset the marker either way so a
-            // later wake can retry.
-            Err(QueueError::Closed) | Err(QueueError::Full) => {
-                self.scheduled.store(false, Ordering::Release);
-            }
+        if self
+            .owner
+            .queue_internal_wake(move || {
+                this.scheduled.store(false, Ordering::Release);
+                schedule_task_by_id(id);
+            })
+            .is_err()
+        {
+            // The only remaining error is a closed owner runtime; nothing more
+            // can be scheduled there. Reset the marker so a later wake (if the
+            // runtime somehow reopens) can retry.
+            self.scheduled.store(false, Ordering::Release);
         }
     }
 }

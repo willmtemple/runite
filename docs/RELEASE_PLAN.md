@@ -20,8 +20,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   live in a per-thread `ThreadState::tasks` registry keyed by id, so a wake from
   any thread resolves the `!Send` task on its owner. Regression tests in
   `tests/waker.rs` (foreign-thread wake resolves; concurrent clone/drop is race-
-  free). Cross-thread wake under a full remote queue is still best-effort — folds
-  into task 2.3's reserved-capacity work.
+  free). Cross-thread wake under a full remote queue was best-effort here;
+  **resolved in 2.3** (task wakes now route through the capacity-bypassing
+  internal-wake path).
 - [x] **0.2 Stale-SQE use-after-free on `io_uring_enter` failure.**
   `uring.rs:580-627` + `driver.rs:246-248`. Advances SQ tail, then on enter failure
   drops the buffer-owning completion while the SQE stays queued → next submit hands
@@ -134,9 +135,20 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `JoinError::Panicked` and the outer loop survives. Sequential (non-nested) calls are
   unaffected. Regression tests in `tests/reentrancy.rs` (nested `run` and
   `run_until_stalled` both rejected; outer loop continues).
-- [ ] **2.3 Cross-thread completion wakes dropped when remote queue full.**
+- [x] **2.3 Cross-thread completion wakes dropped when remote queue full.**
   `op/completion.rs:118-127`. Give internal completion wakes a reserved/unbounded
-  internal queue (bounded by `pending_ops`).
+  internal queue (bounded by `pending_ops`). **Done:** split the remote-enqueue
+  path into `enqueue_macro` (user tasks, capacity-limited → `QueueError::Full`) and
+  `enqueue_internal_wake` (capacity-bypassing), exposed as
+  `ThreadHandle::queue_internal_wake`. Both the completion machinery
+  (`op/completion.rs`) and the spawned-task waker (`future_task.rs` cross-thread
+  path) now route through it, so a wake is never dropped on a full queue — dropping
+  either stranded the target (a completion whose result is already stored, or a
+  task with no other scheduling signal = lost-wakeup hang). The internal wakes stay
+  in the same single remote queue, so the atomic close-commit protocol is unchanged;
+  they are bounded by in-flight ops + live tasks (one coalesced wake each) rather
+  than user input. Unit tests assert the capacity bypass and that `closed` still
+  rejects. This also closes the 0.1 waker follow-up.
 - [ ] **2.4 Notifier TOCTOU on raw fds.** `linux/driver.rs:42-71` (+ macOS). Notifier holds
   a dup'd `OwnedFd` of the ring / pipe write end.
 - [ ] **2.5 io_uring robustness cluster.** Check CQ-overflow flags / `FEAT_NODROP`; honor
