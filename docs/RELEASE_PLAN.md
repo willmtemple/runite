@@ -105,9 +105,26 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 
 ## Tier 2 — Hangs, panics, robustness
 
-- [ ] **2.1 No panic isolation.** `catch_unwind` per task/macrotask/microtask and per
+- [x] **2.1 No panic isolation.** `catch_unwind` per task/macrotask/microtask and per
   blocking job; `Drop` guard on worker completion (notify parent on unwind); scope-guard
   reset of `closing` in `run()`; add `JoinError::Panicked` (coordinate with 3.6).
+  **Done:** added `JoinError::Panicked` + `is_panicked()`. `FutureTask::poll` now
+  `catch_unwind`s the future poll: a panicking task is dropped, deregistered, and its
+  joiner resolved to `Panicked` (new `TaskState::Panicked`) instead of unwinding the
+  loop. A `run_guarded` firewall wraps every scheduled macrotask/microtask closure in
+  all three drivers (`run`, `run_until_stalled`, `run_ready_tasks`) so a panicking timer/
+  interval/`queue_*`/`on_exit` closure is isolated too. `spawn_worker` wraps the whole
+  worker body in `catch_unwind` and, on unwind, marks the `WorkerCompletion` finished +
+  notifies the parent (fulfils the "notify parent on unwind" guard) so a dead worker can
+  never hang its parent. `run()` gained a `ClosingResetGuard` that restores `closing` on
+  any non-committed exit from the shutdown probe, including a panic. The blocking pool's
+  `worker_loop` catches job panics (keeps pool threads alive for every internal caller),
+  and `spawn_blocking` catches the closure's panic to deliver `Panicked` (vs `Cancelled`)
+  to the awaiter. Regression tests in `tests/panic_isolation.rs` (task panic → joinable +
+  loop survives; blocking panic → `Panicked` + pool survives; macrotask panic → loop
+  survives; sibling tasks unaffected). Public API snapshot regenerated. **Deferred to
+  3.6:** `#[non_exhaustive]` on `JoinError` (this commit adds the variant only). The panic
+  payload is intentionally not carried, keeping `JoinError: Copy`.
 - [ ] **2.2 No reentrancy guard on `run()`/`run_until_stalled()`.**
   Add `in_event_loop` flag; panic on nested entry (tokio-style).
 - [ ] **2.3 Cross-thread completion wakes dropped when remote queue full.**

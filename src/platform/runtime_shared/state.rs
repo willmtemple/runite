@@ -242,6 +242,20 @@ pub(crate) fn lock_queue(queue: &RemoteQueue) -> MutexGuard<'_, VecDeque<SendTas
     queue.inner.lock().expect("runtime queue poisoned")
 }
 
+/// Best-effort extraction of a human-readable message from a caught panic
+/// payload (the `Box<dyn Any + Send>` returned by [`std::panic::catch_unwind`]).
+/// The standard library uses `&'static str` for `panic!("literal")` and
+/// `String` for formatted panics; anything else is opaque.
+pub(crate) fn describe_panic(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "Box<dyn Any>"
+    }
+}
+
 fn remote_queue_capacity() -> usize {
     *REMOTE_QUEUE_CAPACITY.get_or_init(|| {
         std::env::var("RUNITE_REMOTE_QUEUE_CAPACITY")

@@ -73,16 +73,29 @@ mod join_set;
 
 pub use join_set::{JoinError, JoinSet};
 
+/// Result the blocking pool delivers over the result channel: `Ok(value)` on a
+/// normal return, `Err(())` when the closure panicked (the payload is dropped so
+/// the value stays `Send`-agnostic and the awaiter maps it to
+/// [`JoinError::Panicked`]).
+type BlockingOutcome<R> = Result<R, ()>;
+
+/// Boxed future that resolves the [`BlockingJoinHandle`]: the outer `Result`
+/// distinguishes a delivered outcome from a closed channel (pool shutdown).
+type BlockingResultFuture<R> =
+    Pin<Box<dyn Future<Output = Result<BlockingOutcome<R>, oneshot::RecvError>> + Send + 'static>>;
+
 /// Future returned by [`spawn_blocking`].
 ///
-/// Awaiting it yields the closure's return value. If the worker pool dropped
-/// the task without completing it (for example because the process is shutting
-/// down), the future resolves to [`JoinError::Cancelled`].
+/// Awaiting it yields the closure's return value. If the closure panicked, the
+/// future resolves to [`JoinError::Panicked`] (the panic is reported through
+/// the process panic hook and does not take down the worker pool). If the
+/// worker pool dropped the task without completing it (for example because the
+/// process is shutting down), it resolves to [`JoinError::Cancelled`].
 ///
 /// This handle is itself a future, so it is normally `.await`ed from a future
 /// scheduled on a runtime thread.
 pub struct BlockingJoinHandle<R: Send + 'static> {
-    inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>>,
+    inner: BlockingResultFuture<R>,
 }
 
 impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
@@ -92,7 +105,12 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
         let this = self.get_mut();
         match this.inner.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+            // The closure returned normally.
+            Poll::Ready(Ok(Ok(value))) => Poll::Ready(Ok(value)),
+            // The closure panicked; its unwind was caught on the pool thread.
+            Poll::Ready(Ok(Err(()))) => Poll::Ready(Err(JoinError::Panicked)),
+            // The result channel closed without a value (pool shutdown / the
+            // worker died before delivering).
             Poll::Ready(Err(_)) => Poll::Ready(Err(JoinError::Cancelled)),
         }
     }
@@ -133,13 +151,15 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    let (sender, mut receiver) = oneshot::channel::<R>();
+    let (sender, mut receiver) = oneshot::channel::<Result<R, ()>>();
     blocking::spawn_blocking(move || {
-        let value = f();
-        let _ = sender.send(value);
+        // Catch a panic in `f` so it is delivered to the awaiter as
+        // `JoinError::Panicked` rather than unwinding the pool thread. The
+        // panic is still reported through the process panic hook.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ());
+        let _ = sender.send(result);
     })?;
-    let inner: Pin<Box<dyn Future<Output = Result<R, oneshot::RecvError>> + Send + 'static>> =
-        Box::pin(async move { receiver.recv().await });
+    let inner: BlockingResultFuture<R> = Box::pin(async move { receiver.recv().await });
     Ok(BlockingJoinHandle { inner })
 }
 
