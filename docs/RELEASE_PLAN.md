@@ -37,9 +37,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 
 ## Tier 1 — Data corruption & loss
 
-- [ ] **1.1 BufReader replays consumed bytes after inner `Pending`.**
-  `io/buf.rs:253-254` (and `fill_buf` error/drop path `178-185`). Reset `filled=0`
-  with `pos=0` before polling inner; add a `Pending`-returning-reader regression test.
+- [x] **1.1 BufReader replays consumed bytes after inner `Pending`.**
+  `io/buf.rs:253-254` (and `fill_buf` error/drop path `178-185`).
+  **Done:** both `poll_read` and `fill_buf` now assign `pos`/`filled` only after
+  the inner read resolves, so a `Pending`/cancelled/errored read leaves the
+  cursor invariant intact. Added a `ParkingReader` (self-waking `Pending` between
+  chunks) + two regression tests (byte-wise `poll_read`, and `read_line`);
+  verified they fail against the pre-fix code.
 - [ ] **1.2 Pending-op/buffer mismatch across polls.**
   `net/mod.rs:731-780`, `fs.rs:400-404`, `stdio.rs:453-457`, `hyper_impl.rs:48-51`.
   Smaller re-poll buffer destroys received bytes; changed write buffer misreports;
