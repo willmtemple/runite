@@ -318,9 +318,17 @@ struct SignalDispatch {
 impl SignalDispatch {
     fn new() -> io::Result<Self> {
         let read_fd = create_wake_fd()?;
-        crate::sys::blocking::spawn_blocking(move || reader_loop(read_fd)).inspect_err(|_| {
-            close_fd(read_fd);
-        })?;
+        // The reader loop blocks for the entire lifetime of the process. Give it
+        // a dedicated OS thread rather than a shared blocking-pool worker:
+        // parking one pool worker forever would permanently shrink the bounded
+        // pool (2 workers at the low end), starving `spawn_blocking`, fs offload,
+        // and DNS of a slot.
+        std::thread::Builder::new()
+            .name("runite-signal".into())
+            .spawn(move || reader_loop(read_fd))
+            .inspect_err(|_| {
+                close_fd(read_fd);
+            })?;
 
         Ok(Self {
             installed: [const { AtomicBool::new(false) }; SIGNAL_COUNT],
