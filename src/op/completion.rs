@@ -239,7 +239,14 @@ impl<T> Drop for CompletionFuture<T> {
             return;
         }
 
-        if let Some(cancel) = self.state.cancel.lock().unwrap().take() {
+        // Take the cancel callback out and release the `cancel` mutex guard
+        // *before* invoking it. Holding the guard across the call self-
+        // deadlocks when the callback runs `finish()` synchronously (e.g. the
+        // channel waiters), because `finish()` re-locks the same `cancel`
+        // mutex. io_uring cancels finish asynchronously, so they never exposed
+        // this, but dropping a channel receiver with a pending waiter did.
+        let cancel = self.state.cancel.lock().unwrap().take();
+        if let Some(cancel) = cancel {
             // Delegate to the cancel callback (e.g. submit an io_uring cancel).
             // The actual I/O completion will eventually call handle.finish(),
             // which decrements pending_ops.
