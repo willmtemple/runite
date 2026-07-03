@@ -540,36 +540,51 @@ fn path_to_c_string(path: &Path) -> io::Result<CString> {
 }
 
 fn open_flags(options: &OpenOptions) -> io::Result<(i32, u32)> {
-    if !options.read && !options.write && !options.append {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "OpenOptions requires read, write, or append access",
-        ));
-    }
+    let access = access_mode(options)?;
+    let creation = creation_mode(options)?;
+    Ok((access | creation | libc::O_CLOEXEC, 0o666))
+}
 
-    let mut flags = if options.read {
-        if options.write || options.append {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
+/// Resolves the access-mode flags, mirroring `std::fs::OpenOptions` so that
+/// invalid access combinations fail with `EINVAL` on Linux exactly as they do
+/// on the std-backed macOS path.
+fn access_mode(options: &OpenOptions) -> io::Result<i32> {
+    match (options.read, options.write, options.append) {
+        (true, false, false) => Ok(libc::O_RDONLY),
+        (false, true, false) => Ok(libc::O_WRONLY),
+        (true, true, false) => Ok(libc::O_RDWR),
+        (false, _, true) => Ok(libc::O_WRONLY | libc::O_APPEND),
+        (true, _, true) => Ok(libc::O_RDWR | libc::O_APPEND),
+        (false, false, false) => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+    }
+}
+
+/// Resolves the creation-mode flags, mirroring `std::fs::OpenOptions`. In
+/// particular `truncate`/`create`/`create_new` without write access — e.g.
+/// `read(true).truncate(true)` — is rejected with `EINVAL` rather than being
+/// silently turned into `O_RDONLY | O_TRUNC`, which would truncate the file.
+fn creation_mode(options: &OpenOptions) -> io::Result<i32> {
+    match (options.write, options.append) {
+        (true, false) => {}
+        (false, false) => {
+            if options.truncate || options.create || options.create_new {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
         }
-    } else {
-        libc::O_WRONLY
-    };
-
-    if options.append {
-        flags |= libc::O_APPEND;
-    }
-    if options.truncate {
-        flags |= libc::O_TRUNC;
-    }
-    if options.create_new {
-        flags |= libc::O_CREAT | libc::O_EXCL;
-    } else if options.create {
-        flags |= libc::O_CREAT;
+        (_, true) => {
+            if options.truncate && !options.create_new {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+        }
     }
 
-    Ok((flags | libc::O_CLOEXEC, 0o666))
+    Ok(match (options.create, options.truncate, options.create_new) {
+        (false, false, false) => 0,
+        (true, false, false) => libc::O_CREAT,
+        (false, true, false) => libc::O_TRUNC,
+        (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
+        (_, _, true) => libc::O_CREAT | libc::O_EXCL,
+    })
 }
 
 fn metadata_flags(follow_symlinks: bool) -> i32 {
