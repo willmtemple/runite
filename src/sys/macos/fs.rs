@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::future::poll_fn;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -121,12 +121,34 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
     .await
 }
 
+/// Durably flushes a file to disk on macOS.
+///
+/// Plain `fsync(2)` on macOS does **not** flush the drive's write cache, so it
+/// is not a real durability barrier; `fcntl(F_FULLFSYNC)` is. `std::fs` uses
+/// `F_FULLFSYNC` for both `sync_all` and `sync_data` on Apple targets for this
+/// reason, falling back to `fsync` on filesystems (e.g. some network mounts)
+/// that do not support it. We match that behavior.
+fn full_fsync(fd: RawFd) -> io::Result<()> {
+    match cvt(unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) }) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOTTY)
+            ) =>
+        {
+            cvt(unsafe { libc::fsync(fd) }).map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn sync_all(op: FsOp) -> io::Result<()> {
     let FsOp::SyncAll { fd } = op else {
         unreachable!("sync_all backend called with non-sync_all op");
     };
 
-    offload(move || cvt(unsafe { libc::fsync(fd) }).map(|_| ())).await
+    offload(move || full_fsync(fd)).await
 }
 
 pub async fn sync_data(op: FsOp) -> io::Result<()> {
@@ -134,7 +156,7 @@ pub async fn sync_data(op: FsOp) -> io::Result<()> {
         unreachable!("sync_data backend called with non-sync_data op");
     };
 
-    offload(move || cvt(unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) }).map(|_| ())).await
+    offload(move || full_fsync(fd)).await
 }
 
 pub async fn set_len(op: FsOp) -> io::Result<()> {

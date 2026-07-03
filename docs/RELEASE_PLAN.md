@@ -68,8 +68,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 - [ ] **1.7 Inherent async I/O methods lose data on cancellation.**
   `net/mod.rs:451-468` etc. Route inherent read/recv through the same pending-op stash;
   document cancel-safety per method.
-- [ ] **1.8 macOS `sync_all`/`sync_data` durability inverted.**
-  `sys/macos/fs.rs:124-138`. Swap so `sync_all` → `F_FULLFSYNC`.
+- [x] **1.8 macOS `sync_all`/`sync_data` durability inverted.**
+  `sys/macos/fs.rs:124-138`. **Done:** both now go through a `full_fsync` helper
+  that uses `F_FULLFSYNC` (the only real drive-cache flush on macOS) with an
+  `ENOTSUP`/`EINVAL` fallback to `fsync`, matching `std::fs`. `sync_all` no longer
+  gets the weaker plain `fsync`. Cross-checked with `cargo check --target
+  aarch64-apple-darwin`; runtime behavior exercised on macOS CI.
 - [x] **1.9 Accepted sockets missing `SOCK_CLOEXEC` on uring path.**
   `sys/linux/net.rs:201-207`. **Done:** set `sqe.op_flags = SOCK_CLOEXEC` on the
   ACCEPT SQE (matching the `accept_sync` fallback). Regression test drives the
