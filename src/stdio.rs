@@ -282,6 +282,21 @@ impl Stdin {
     /// For extension methods such as `read_exact` and `read_to_end`, use the
     /// [`AsyncReadExt`](crate::io::AsyncReadExt) trait.
     ///
+    /// # Cancel safety
+    ///
+    /// On the Linux `io_uring` path this method is cancel-safe: a read that
+    /// completes after its future is dropped is stashed on the handle and served
+    /// by the next read, so no bytes are lost.
+    ///
+    /// The blocking-offload fallback (macOS, and Linux kernels without
+    /// `io_uring` stdin read support) is **not** cancel-safe. A blocking
+    /// `read(2)` cannot be interrupted, so if the returned future is dropped
+    /// while a read is in progress, the byte(s) that read consumes are lost
+    /// (they will not be returned to a later read), and the pool worker running
+    /// it stays blocked until input arrives. Avoid dropping a stdin read future
+    /// (e.g. in a `select!`) on those platforms. A dedicated buffered stdin
+    /// reader that closes this gap is planned post-0.1.
+    ///
     /// # Examples
     ///
     /// ```no_run
