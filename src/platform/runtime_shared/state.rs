@@ -100,6 +100,11 @@ pub(crate) struct ThreadState {
     /// a wake for a completed task simply finds no entry.
     pub(crate) tasks: RefCell<HashMap<u64, Rc<FutureTask>>>,
     pub(crate) next_task_id: Cell<u64>,
+    /// `true` while one of the driver loops (`run`, `run_until_stalled`,
+    /// `run_ready_tasks`) is active on this thread. Used to detect and reject
+    /// re-entrant driver calls (e.g. calling `run()` from inside a task poll),
+    /// which would double-drive the same queues and corrupt scheduling state.
+    pub(crate) in_event_loop: Cell<bool>,
     pub(crate) children: RefCell<Vec<ChildWorker>>,
     /// Unique generation token issued by `NEXT_GENERATION` when this state was
     /// installed on this thread. Used to detect stale `TimeoutHandle` and
@@ -126,6 +131,7 @@ impl ThreadState {
             next_timer_id: Cell::new(1),
             tasks: RefCell::new(HashMap::new()),
             next_task_id: Cell::new(1),
+            in_event_loop: Cell::new(false),
             children: RefCell::new(Vec::new()),
             generation,
         }
