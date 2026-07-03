@@ -56,8 +56,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   the open errors and the file is preserved); verified it fails without the guard.
 - [ ] **1.4 Mixing `mpsc::recv()` with the `Stream` impl reorders / aborts process.**
   `channel/mpsc.rs:686-711`. Unify both on the persistent `stream_wait` slot.
-- [ ] **1.5 `watch::changed()` version regression after cancelled wait.**
-  `channel/watch.rs:450-462`. Only accept `version > self.version`; never regress.
+- [x] **1.5 `watch::changed()` version regression after cancelled wait.**
+  `channel/watch.rs:450-462`. **Done:** the stale-completion arm now only accepts
+  `version > self.version` and otherwise re-registers instead of regressing the
+  receiver's version. Regression test in `tests/channel.rs` (verified it fails
+  against the pre-fix code). Writing the test uncovered the pre-existing
+  completion-drop deadlock (D-2), fixed alongside.
 - [ ] **1.6 `mpsc::recv`/`oneshot::recv` not cancel-safe.**
   `mpsc.rs:551-576`, `oneshot.rs:167-169`. Adopt the persistent-slot pattern (park the
   delivered value, pick it up on next poll) that broadcast/watch already use.
@@ -148,6 +152,17 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   a CI-stability issue. Fix: keep `run()` alive while blocking tasks are
   outstanding (register a pending op for the duration) and give the blocking pool
   a distinct panic vs. shutdown outcome.
+
+- [x] **D-2 Completion-drop self-deadlock in the cancel path (pre-existing).**
+  `op/completion.rs`. `CompletionFuture::drop` held the `cancel` mutex guard
+  across the `cancel()` call (`if let Some(cancel) = mutex.lock().take()` keeps
+  the guard alive for the whole body). Channel waiter cancels call `finish()`
+  synchronously, which re-locks the same mutex → self-deadlock on drop; io_uring
+  cancels finish asynchronously so they never hit it. Result: dropping any
+  channel receiver (watch/mpsc/broadcast/oneshot) with a pending waiter — e.g.
+  a `timeout(dur, rx.changed())` that elapses — froze the runtime thread.
+  **Done:** take the callback out and release the guard before invoking it.
+  Confirmed on baseline; full suite green after the fix.
 
 ## Post-0.1 (deferred)
 

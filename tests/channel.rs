@@ -182,6 +182,38 @@ fn watch_cross_thread_change_wakes_waiting_receiver() {
     assert_eq!(value, 99);
 }
 
+/// Regression: a waiter registered at an old version and completed but never
+/// re-polled (its `changed()` future abandoned while the receiver's internal
+/// wait slot persists) must not fire a spurious `changed()` and regress the
+/// receiver's version after `borrow_and_update` has advanced past it.
+#[test]
+fn watch_stale_completion_does_not_regress_version() {
+    use std::time::Duration;
+
+    let parked = block_on(|| async {
+        let (sender, mut receiver) = watch::channel(0u32);
+
+        // Register a waiter (version 0), then let it time out so the `changed()`
+        // future is dropped while the receiver's internal wait slot persists.
+        let _ =
+            runite::time::timeout(Duration::from_millis(10), receiver.changed()).await;
+
+        // Complete the persisted (never re-polled) waiter, then advance past it.
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        assert_eq!(*receiver.borrow_and_update(), 2);
+
+        // `changed()` must park: nothing is newer than version 2. If it instead
+        // resolves off the stale version-1 completion (regressing the receiver's
+        // version), the timeout returns `Ok` instead of elapsing.
+        runite::time::timeout(Duration::from_millis(10), receiver.changed())
+            .await
+            .is_err()
+    });
+
+    assert!(parked, "changed() must park, not fire a stale completion");
+}
+
 #[test]
 fn broadcast_fanout_lag_resubscribe_and_close() {
     let observed = block_on(|| async {
