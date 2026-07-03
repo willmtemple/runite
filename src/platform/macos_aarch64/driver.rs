@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -37,7 +37,19 @@ struct FdWaiter {
 
 #[derive(Clone)]
 struct NotifierInner {
-    write_fd: RawFd,
+    /// A **dup** of the wake pipe's write end, owned by the notifier (shared via
+    /// `Arc` so the notifier stays cloneable).
+    ///
+    /// Holding an [`OwnedFd`] rather than a bare `RawFd` closes a TOCTOU hazard:
+    /// after the target [`Driver`] drops and closes its own write-end fd, the
+    /// raw number could be recycled for an unrelated resource, and an in-flight
+    /// `notify` that already passed the `closed` check would then `write` a
+    /// stray wake byte into it — corrupting whatever now owns that fd. The dup
+    /// keeps the number reserved for as long as any notifier exists, so a racing
+    /// `notify` can only ever write to the original pipe. `F_SETNOSIGPIPE` on
+    /// the dup turns a write to a fully-closed pipe into `EPIPE` instead of a
+    /// `SIGPIPE`.
+    write_fd: Arc<OwnedFd>,
     closed: Arc<AtomicBool>,
 }
 
@@ -53,7 +65,7 @@ impl NotifierInner {
         let byte = 1u8;
         let written = unsafe {
             libc::write(
-                self.write_fd,
+                self.write_fd.as_raw_fd(),
                 &byte as *const u8 as *const libc::c_void,
                 std::mem::size_of::<u8>(),
             )
@@ -149,14 +161,42 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
         fd_waiters: RefCell::new(HashMap::new()),
     };
 
+    // The notifier holds its own dup of the write end so a cross-thread wake can
+    // never target a recycled fd after this driver drops (see `NotifierInner`).
+    let notifier_write_fd = match dup_nosigpipe_cloexec(wake_write_fd) {
+        Ok(fd) => fd,
+        Err(error) => {
+            // `driver` owns wake_read_fd/wake_write_fd/kqueue_fd and will close
+            // them when it drops here.
+            drop(driver);
+            return Err(error);
+        }
+    };
     let notifier = ThreadNotifier {
         inner: NotifierInner {
-            write_fd: wake_write_fd,
+            write_fd: Arc::new(notifier_write_fd),
             closed,
         },
     };
 
     Ok((driver, notifier))
+}
+
+/// Duplicates `fd` with close-on-exec set, then disables `SIGPIPE` on the copy
+/// (`F_SETNOSIGPIPE`) so a write to a fully-closed pipe returns `EPIPE` rather
+/// than raising a signal.
+fn dup_nosigpipe_cloexec(fd: RawFd) -> io::Result<OwnedFd> {
+    // `F_SETNOSIGPIPE` (Darwin `fcntl` command 105) is not re-exported by the
+    // pinned `libc`; define it locally.
+    const F_SETNOSIGPIPE: libc::c_int = 105;
+
+    let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: `duplicated` is a fresh, exclusively-owned fd from
+    // `fcntl(F_DUPFD_CLOEXEC)`; ownership transfers to the `OwnedFd`, which
+    // closes it on drop even if the `F_SETNOSIGPIPE` call below fails.
+    let owned = unsafe { OwnedFd::from_raw_fd(duplicated) };
+    cvt(unsafe { libc::fcntl(owned.as_raw_fd(), F_SETNOSIGPIPE, 1) })?;
+    Ok(owned)
 }
 
 impl Driver {

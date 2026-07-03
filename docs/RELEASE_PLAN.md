@@ -149,8 +149,18 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   they are bounded by in-flight ops + live tasks (one coalesced wake each) rather
   than user input. Unit tests assert the capacity bypass and that `closed` still
   rejects. This also closes the 0.1 waker follow-up.
-- [ ] **2.4 Notifier TOCTOU on raw fds.** `linux/driver.rs:42-71` (+ macOS). Notifier holds
-  a dup'd `OwnedFd` of the ring / pipe write end.
+- [x] **2.4 Notifier TOCTOU on raw fds.** `linux/driver.rs:42-71` (+ macOS). Notifier holds
+  a dup'd `OwnedFd` of the ring / pipe write end. **Done:** both notifiers now hold a
+  dup'd `OwnedFd` (Linux: `F_DUPFD_CLOEXEC` of the ring fd; macOS: dup of the wake-pipe
+  write end, `Arc<OwnedFd>` so the notifier stays `Clone`, plus `F_SETNOSIGPIPE` so a
+  racing write to a torn-down pipe yields `EPIPE` not `SIGPIPE`). The dup keeps the fd
+  number reserved (and the kernel object alive) for as long as any cross-thread handle
+  exists, so a `notify` that races the target's teardown can only ever reach the
+  original — now draining — ring/pipe, never a recycled fd pointing at an unrelated
+  resource. The `closed` flag still short-circuits the common case. Linux regression
+  test asserts the notifier's dup fd stays valid after the target driver drops (fails
+  on the old bare-`RawFd` copy); macOS cross-checked with
+  `cargo check/clippy --target aarch64-apple-darwin`.
 - [ ] **2.5 io_uring robustness cluster.** Check CQ-overflow flags / `FEAT_NODROP`; honor
   partial-submission return; log/ handle MSG_RING failure CQEs (kernel <5.18 has no
   cross-thread wake); drain the global fallback submitter CQ; give `TIMEOUT_UPDATE` a real
