@@ -6,7 +6,7 @@
 //! turbofish.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::rc::Rc;
@@ -268,23 +268,38 @@ where
         event = "queue_future",
         "queueing local future"
     );
-    // Force thread-state lazy-init before constructing the task, so the
+    // Force thread-state lazy-init before constructing the task (so the
     // waker's `with_installed_thread` precondition holds before any wake can
-    // fire.
-    with_current_thread::<R, _>(|_| {});
+    // fire), and allocate this task's registry id and an owner handle for its
+    // `Send + Sync` waker.
+    let (id, owner) = with_current_thread::<R, _>(|state| {
+        let id = state.next_task_id.get();
+        state
+            .next_task_id
+            .set(id.checked_add(1).expect("task ID space exhausted"));
+        (id, state.handle())
+    });
 
     let shared = Rc::new(TaskShared::new());
     let state = Rc::new(JoinState::new(Rc::clone(&shared)));
     let completion = Rc::clone(&state);
-    let task = Rc::new(FutureTask {
-        future: RefCell::new(Some(Box::pin(async move {
+    let task = FutureTask::new(
+        Box::pin(async move {
             let output = future.await;
             completion.complete(output);
-        }))),
-        queued: Cell::new(false),
-        shared: Rc::clone(&shared),
-    });
+        }),
+        Rc::clone(&shared),
+        id,
+        owner,
+    );
     shared.set_task(&task);
+
+    // Register before scheduling so a wake fired during the first poll can find
+    // the task; the registry holds the runtime's strong reference until the
+    // task completes or is aborted.
+    with_current_thread::<R, _>(|state| {
+        state.tasks.borrow_mut().insert(id, Rc::clone(&task));
+    });
 
     task.schedule();
 

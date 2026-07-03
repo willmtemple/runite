@@ -5,12 +5,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
+use super::future_task::FutureTask;
 use super::handles::QueueError;
 use super::scheduler::Runtime;
 use super::timer::TimerHeap;
@@ -90,6 +92,14 @@ pub(crate) struct ThreadState {
     /// map is what makes `cancel_interval` work uniformly across both states.
     pub(crate) live_intervals: LiveIntervals,
     pub(crate) next_timer_id: Cell<usize>,
+    /// Registry of every live spawned task on this thread, keyed by task id.
+    /// This holds the runtime's strong reference to each `FutureTask` from
+    /// spawn until it completes or is aborted, so a `Send + Sync` waker can
+    /// reschedule a task by id without holding an `Rc` across threads (see
+    /// [`FutureTask`](super::future_task::FutureTask)). Ids are never reused, so
+    /// a wake for a completed task simply finds no entry.
+    pub(crate) tasks: RefCell<HashMap<u64, Rc<FutureTask>>>,
+    pub(crate) next_task_id: Cell<u64>,
     pub(crate) children: RefCell<Vec<ChildWorker>>,
     /// Unique generation token issued by `NEXT_GENERATION` when this state was
     /// installed on this thread. Used to detect stale `TimeoutHandle` and
@@ -114,6 +124,8 @@ impl ThreadState {
             timers: RefCell::new(TimerHeap::new()),
             live_intervals: RefCell::new(HashMap::new()),
             next_timer_id: Cell::new(1),
+            tasks: RefCell::new(HashMap::new()),
+            next_task_id: Cell::new(1),
             children: RefCell::new(Vec::new()),
             generation,
         }
