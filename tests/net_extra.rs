@@ -286,6 +286,60 @@ fn udp_peek_recv_and_truncation_on_connected_socket() {
     });
 }
 
+/// A read submitted with a large buffer that is then abandoned, and later polled
+/// with a smaller buffer, must not lose the received bytes: the surplus is
+/// retained and served by subsequent reads. Regression for the pending-op /
+/// buffer-shrink data loss.
+#[test]
+fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
+    use runite::io::AsyncRead;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    let received = block_on(|| async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = runite::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+
+            // Submit a read with a large (64-byte) buffer, then abandon that
+            // poll so the recv stays stashed on the stream sized for 64 bytes.
+            poll_fn(|cx| {
+                let mut big = [0u8; 64];
+                let _ = Pin::new(&mut stream).poll_read(cx, &mut big);
+                Poll::Ready(())
+            })
+            .await;
+
+            // Read 4 bytes at a time. The first small read completes the stashed
+            // 64-byte recv and must keep the surplus; the overflow buffer serves
+            // the rest. No byte may be lost or spuriously error.
+            let mut out = Vec::new();
+            while out.len() < 10 {
+                let mut small = [0u8; 4];
+                let n = poll_fn(|cx| Pin::new(&mut stream).poll_read(cx, &mut small))
+                    .await
+                    .expect("read must not error on a shrunk buffer");
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&small[..n]);
+            }
+            out
+        });
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        client.write_all(b"0123456789").await.expect("write");
+        let out = server.await.expect("server task");
+        drop(client);
+        out
+    });
+
+    assert_eq!(&received, b"0123456789");
+}
+
 #[cfg(feature = "hyper")]
 #[test]
 fn hyper_http1_client_uses_runite_tcp_stream() {

@@ -97,6 +97,40 @@ type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 
+/// FIFO buffer holding read bytes that overflowed a caller's slice, drained via
+/// a cursor so repeated small reads do not repeatedly shift the backing `Vec`.
+/// Boxed on the stream (see [`TcpStream`]) so the common no-overflow case costs
+/// only a null pointer.
+struct ReadOverflow {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl ReadOverflow {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            data: bytes.to_vec(),
+            pos: 0,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    fn is_drained(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
+    /// Copies up to `buf.len()` buffered bytes into `buf`, returning the count.
+    fn drain_into(&mut self, buf: &mut [u8]) -> usize {
+        let n = buf.len().min(self.remaining());
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        n
+    }
+}
+
 /// Async TCP stream connected to a peer.
 ///
 /// `TcpStream` owns a connected stream socket and provides async byte-oriented
@@ -115,7 +149,19 @@ type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 pub struct TcpStream {
     inner: Arc<TcpStreamInner>,
     pending_read: Option<PendingRead>,
+    /// Bytes a completed read produced that did not fit the caller's buffer
+    /// (e.g. when a read future is dropped after being submitted with a large
+    /// buffer and a later `poll_read` presents a smaller one). Served before any
+    /// new read is submitted so no received bytes are ever lost. Boxed so the
+    /// common no-overflow case is just a null pointer.
+    read_overflow: Option<Box<ReadOverflow>>,
     pending_write: Option<PendingWrite>,
+    /// Identity `(ptr, len)` of the buffer that `pending_write` was submitted
+    /// for. A re-poll presenting a different buffer means the original write
+    /// future was dropped mid-flight and an unrelated write started; reporting
+    /// the in-flight op's byte count against the new buffer would corrupt the
+    /// stream, so that is rejected instead.
+    pending_write_ident: Option<(*const u8, usize)>,
     pending_shutdown: Option<PendingShutdown>,
 }
 
@@ -560,13 +606,17 @@ impl TcpStream {
         let read = Self {
             inner: Arc::clone(&self.inner),
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         };
         let write = Self {
             inner: self.inner,
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         };
         (
@@ -579,6 +629,10 @@ impl TcpStream {
     /// [`into_split`](Self::into_split).
     ///
     /// Returns [`ReuniteError`] if the halves came from different streams.
+    // ReuniteError intentionally carries both halves (each a full TcpStream)
+    // so the caller gets them back, like tokio's ReuniteError; the large Err is
+    // by design and only materializes on the rare mismatch path.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<Self, ReuniteError> {
         if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
             drop(read);
@@ -676,7 +730,9 @@ impl TcpStream {
                 timeouts: Mutex::new(SocketTimeouts::default()),
             }),
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         }
     }
@@ -705,6 +761,17 @@ impl AsyncRead for TcpStream {
         }
 
         let this = self.get_mut();
+
+        // Serve any bytes a previous read produced that overflowed a smaller
+        // caller buffer before submitting (or polling) a new read.
+        if let Some(overflow) = this.read_overflow.as_mut() {
+            let n = overflow.drain_into(buf);
+            if overflow.is_drained() {
+                this.read_overflow = None;
+            }
+            return Poll::Ready(Ok(n));
+        }
+
         if this.pending_read.is_none() {
             this.pending_read = Some(match this.read_timeout_value() {
                 Some(timeout) => Box::pin(crate::sys::current::net::recv_timeout(
@@ -727,15 +794,15 @@ impl AsyncRead for TcpStream {
             Poll::Ready(result) => {
                 this.pending_read = None;
                 let data = result?;
-                let read = data.len();
-                if read > buf.len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "read completed with more bytes than destination buffer can hold",
-                    )));
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                // If the completed read is larger than the current buffer (the
+                // submitted buffer shrank across polls), keep the surplus for the
+                // next read rather than discarding it.
+                if data.len() > n {
+                    this.read_overflow = Some(Box::new(ReadOverflow::new(&data[n..])));
                 }
-                buf[..read].copy_from_slice(&data);
-                Poll::Ready(Ok(read))
+                Poll::Ready(Ok(n))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -753,6 +820,7 @@ impl AsyncWrite for TcpStream {
         }
 
         let this = self.get_mut();
+        let ident = (buf.as_ptr(), buf.len());
         if this.pending_write.is_none() {
             this.pending_write = Some(match this.write_timeout_value() {
                 Some(timeout) => Box::pin(crate::sys::current::net::send_timeout(
@@ -763,6 +831,17 @@ impl AsyncWrite for TcpStream {
                 )),
                 None => crate::sys::current::net::send_future(this.raw_fd(), buf.to_vec()),
             });
+            this.pending_write_ident = Some(ident);
+        } else if this.pending_write_ident != Some(ident) {
+            // A write is in flight for a *different* buffer: the future that
+            // submitted it was dropped mid-flight and an unrelated write began.
+            // Those bytes are already committed to the kernel, so reporting this
+            // op's count against the new buffer would corrupt the stream. Reject
+            // instead. (The in-flight op keeps running; drive writes to
+            // completion, or reuse the same buffer, to resume cleanly.)
+            return Poll::Ready(Err(io::Error::other(
+                "write buffer changed while a previous write was still in flight",
+            )));
         }
 
         match this
@@ -774,6 +853,7 @@ impl AsyncWrite for TcpStream {
         {
             Poll::Ready(result) => {
                 this.pending_write = None;
+                this.pending_write_ident = None;
                 Poll::Ready(result)
             }
             Poll::Pending => Poll::Pending,
@@ -846,6 +926,7 @@ impl OwnedReadHalf {
     ///
     /// Returns [`ReuniteError`] and both halves if `write` originated from a
     /// different stream.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(self, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(self, write)
     }
@@ -872,6 +953,7 @@ impl OwnedWriteHalf {
     ///
     /// Returns [`ReuniteError`] and both halves if `read` originated from a
     /// different stream.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(self, read: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(read, self)
     }
@@ -1809,3 +1891,4 @@ mod tests {
         assert_eq!(*count.lock().unwrap(), 3);
     }
 }
+
