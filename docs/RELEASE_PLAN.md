@@ -165,8 +165,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   partial-submission return; log/ handle MSG_RING failure CQEs (kernel <5.18 has no
   cross-thread wake); drain the global fallback submitter CQ; give `TIMEOUT_UPDATE` a real
   token + pre-5.11 remove/re-add fallback.
-- [ ] **2.6 `IORING_OP_SOCKET` flags in wrong SQE field.** `sys/linux/net.rs:89-99`.
-  `sqe.off = (type | flags); sqe.op_flags = 0`.
+- [x] **2.6 `IORING_OP_SOCKET` flags in wrong SQE field.** `sys/linux/net.rs:89-99`.
+  `sqe.off = (type | flags); sqe.op_flags = 0`. **Done:** the socket-creation flags
+  (`SOCK_CLOEXEC`/`SOCK_NONBLOCK`) now OR into the type field (`sqe.off`), matching
+  `socket(2)`/`socket_sync`, with `op_flags = 0`. Empirically confirmed: pre-fix the
+  flags sat in `op_flags` (`rw_flags`), which kernels ≥5.19 reject with `EINVAL`, so
+  every uring `socket()` silently fell back to `socket_sync` (dead fast path; cloexec
+  stayed correct only via the fallback) — and would drop `SOCK_CLOEXEC` outright on
+  non-validating kernels. Post-fix the uring path succeeds and produces a cloexec
+  socket (verified by disabling the fallback: pre-fix panics with `EINVAL`, post-fix
+  succeeds). Regression test `uring_socket_is_cloexec` locks the property.
 - [ ] **2.7 Signal reader consumes a shared blocking-pool worker.**
   `signal/unix.rs:319-324`. Move to a dedicated `std::thread`.
 - [ ] **2.8 `watch::Ref` holds the channel `Mutex`; two same-thread borrows deadlock.**

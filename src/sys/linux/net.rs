@@ -90,9 +90,16 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
         move |sqe| {
             sqe.opcode = IORING_OP_SOCKET;
             sqe.fd = domain;
-            sqe.off = socket_type as u64;
+            // IORING_OP_SOCKET reads the socket type (including the
+            // SOCK_CLOEXEC / SOCK_NONBLOCK bits) from `sqe.off`, exactly like
+            // the `type` argument of `socket(2)`; it does NOT consume socket
+            // creation flags from `rw_flags` (`op_flags`), which must be 0.
+            // Placing the flags in `op_flags` silently dropped SOCK_CLOEXEC,
+            // leaking uring-created sockets across `exec`. OR them into the
+            // type instead, mirroring `socket_sync`.
+            sqe.off = u64::from(socket_type as u32 | flags);
             sqe.len = protocol as u32;
-            sqe.op_flags = flags;
+            sqe.op_flags = 0;
         },
         // SAFETY: `fd` is the non-negative descriptor returned by a successful
         // socket CQE and ownership is transferred to `OwnedFd` exactly once.
@@ -1529,6 +1536,43 @@ mod tests {
             *cloexec.lock().expect("result mutex poisoned"),
             Some(true),
             "accepted socket must have FD_CLOEXEC set"
+        );
+    }
+
+    /// A socket created through the production io_uring `IORING_OP_SOCKET` path
+    /// must honour the requested `SOCK_CLOEXEC` flag. The flag rides in the
+    /// socket *type* field (`sqe.off`), not `op_flags`. Placing it in `op_flags`
+    /// (`rw_flags`) made kernels ≥5.19 reject the op with `EINVAL` — silently
+    /// falling back to `socket_sync` so the uring fast path was always dead —
+    /// and would drop `SOCK_CLOEXEC` outright on kernels that do not validate
+    /// `rw_flags`. This test locks the observable property across both paths.
+    #[test]
+    fn uring_socket_is_cloexec() {
+        let cloexec = Arc::new(Mutex::new(None));
+        let cloexec_task = Arc::clone(&cloexec);
+
+        spawn(async move {
+            let sock = socket(NetOp::Socket {
+                domain: libc::AF_INET,
+                socket_type: libc::SOCK_STREAM,
+                protocol: 0,
+                flags: libc::SOCK_CLOEXEC as u32,
+            })
+            .await
+            .expect("socket should be created");
+
+            // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
+            let flags = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFD) };
+            *cloexec_task.lock().expect("result mutex poisoned") =
+                Some(flags >= 0 && (flags & libc::FD_CLOEXEC) != 0);
+        });
+
+        run();
+
+        assert_eq!(
+            *cloexec.lock().expect("result mutex poisoned"),
+            Some(true),
+            "uring-created socket must have FD_CLOEXEC set"
         );
     }
 }
