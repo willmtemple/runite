@@ -68,9 +68,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   receiver's version. Regression test in `tests/channel.rs` (verified it fails
   against the pre-fix code). Writing the test uncovered the pre-existing
   completion-drop deadlock (D-2), fixed alongside.
-- [ ] **1.6 `mpsc::recv`/`oneshot::recv` not cancel-safe.**
-  `mpsc.rs:551-576`, `oneshot.rs:167-169`. Adopt the persistent-slot pattern (park the
-  delivered value, pick it up on next poll) that broadcast/watch already use.
+- [x] **1.6 `mpsc::recv`/`oneshot::recv` not cancel-safe.**
+  `mpsc.rs:551-576`, `oneshot.rs:167-169`. **Done:** mpsc covered by 1.4 (recv now
+  shares the persistent `stream_wait` slot). oneshot gained a persistent `wait`
+  slot on the receiver (poll_recv refactored to an associated fn with disjoint
+  field borrows), so a delivered-but-unpolled value survives a cancelled `recv`.
+  Cancel-safety documented on both; regression tests for each; verified they fail
+  against the pre-fix code.
 - [ ] **1.7 Inherent async I/O methods lose data on cancellation.**
   `net/mod.rs:451-468` etc. Route inherent read/recv through the same pending-op stash;
   document cancel-safety per method.
