@@ -97,39 +97,7 @@ type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 
-/// FIFO buffer holding read bytes that overflowed a caller's slice, drained via
-/// a cursor so repeated small reads do not repeatedly shift the backing `Vec`.
-/// Boxed on the stream (see [`TcpStream`]) so the common no-overflow case costs
-/// only a null pointer.
-struct ReadOverflow {
-    data: Vec<u8>,
-    pos: usize,
-}
-
-impl ReadOverflow {
-    fn new(bytes: &[u8]) -> Self {
-        Self {
-            data: bytes.to_vec(),
-            pos: 0,
-        }
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len() - self.pos
-    }
-
-    fn is_drained(&self) -> bool {
-        self.pos >= self.data.len()
-    }
-
-    /// Copies up to `buf.len()` buffered bytes into `buf`, returning the count.
-    fn drain_into(&mut self, buf: &mut [u8]) -> usize {
-        let n = buf.len().min(self.remaining());
-        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-        self.pos += n;
-        n
-    }
-}
+use crate::io::ReadOverflow;
 
 /// Async TCP stream connected to a peer.
 ///

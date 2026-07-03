@@ -44,10 +44,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   cursor invariant intact. Added a `ParkingReader` (self-waking `Pending` between
   chunks) + two regression tests (byte-wise `poll_read`, and `read_line`);
   verified they fail against the pre-fix code.
-- [ ] **1.2 Pending-op/buffer mismatch across polls.**
-  `net/mod.rs:731-780`, `fs.rs:400-404`, `stdio.rs:453-457`, `hyper_impl.rs:48-51`.
-  Smaller re-poll buffer destroys received bytes; changed write buffer misreports;
-  hyper adapter panics. Stash surplus in a per-object overflow buffer / clamp writes.
+- [x] **1.2 Pending-op/buffer mismatch across polls.**
+  `net/mod.rs`, `fs.rs`, `stdio.rs`, `process/pipe.rs`, `hyper_impl.rs`.
+  **Done:** added a shared `pub(crate) io::ReadOverflow` (boxed, cursor-drained)
+  and wired it into every completion-based reader — `TcpStream` (covers the split
+  halves), `File`, `Stdin`, `ChildStdout`/`ChildStderr`, and the hyper adapter —
+  so a read completing with more bytes than the current buffer keeps the surplus
+  instead of erroring/discarding (and the hyper `put_slice` panic is gone). Writes
+  on `TcpStream` now record the in-flight buffer identity and reject a re-poll
+  presenting a different buffer rather than misreporting the count. Regression test
+  covers the read buffer-shrink path.
 - [x] **1.3 `read(true).truncate(true)` truncates on Linux.**
   `sys/linux/fs.rs:542-573`. **Done:** split `open_flags` into std-mirroring
   `access_mode` + `creation_mode`; invalid access combinations (truncate/create
