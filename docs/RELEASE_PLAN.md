@@ -54,8 +54,14 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   without write, truncate+append without create_new) now fail `EINVAL` instead of
   silently opening `O_RDONLY | O_TRUNC`. Regression test in `tests/fs.rs` (asserts
   the open errors and the file is preserved); verified it fails without the guard.
-- [ ] **1.4 Mixing `mpsc::recv()` with the `Stream` impl reorders / aborts process.**
-  `channel/mpsc.rs:686-711`. Unify both on the persistent `stream_wait` slot.
+- [x] **1.4 Mixing `mpsc::recv()` with the `Stream` impl reorders / aborts process.**
+  `channel/mpsc.rs:686-711`. **Done:** `recv()` now uses the receiver's persistent
+  `stream_wait` slot (shared with `poll_next`) instead of a local one, so the two
+  can't register two waiters (no assert/abort) and values are never reordered.
+  This also makes `mpsc::recv` cancel-safe (covers the mpsc half of 1.6): a value
+  delivered to a dropped `recv` future is retained for the next call. Regression
+  test asserts FIFO across an abandoned stream poll; verified it hangs (strands
+  the value) against the pre-fix code.
 - [x] **1.5 `watch::changed()` version regression after cancelled wait.**
   `channel/watch.rs:450-462`. **Done:** the stale-completion arm now only accepts
   `version > self.version` and otherwise re-registers instead of regressing the
