@@ -204,6 +204,10 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
             sqe.fd = fd;
             sqe.addr = storage_ptr as u64;
             sqe.off = addr_len_ptr as u64;
+            // For IORING_OP_ACCEPT, op_flags carries the accept4(2) flags. Set
+            // SOCK_CLOEXEC so accepted connections are not leaked into child
+            // processes (matching the accept_sync fallback and std/tokio).
+            sqe.op_flags = libc::SOCK_CLOEXEC as u32;
         },
         move |cqe| {
             let accepted_fd = cqe_to_result(cqe)? as RawFd;
@@ -1476,5 +1480,55 @@ mod tests {
 
         let echoed = done.lock().expect("result mutex poisoned").take();
         assert_eq!(echoed.as_deref(), Some(&b"pong"[..]));
+    }
+
+    /// A socket accepted through the production io_uring `accept` path must have
+    /// `FD_CLOEXEC` set, so live connections are never leaked into child
+    /// processes. Regression test for the missing `SOCK_CLOEXEC` accept flag.
+    #[test]
+    fn accepted_socket_is_cloexec() {
+        let cloexec = Arc::new(Mutex::new(None));
+        let cloexec_task = Arc::clone(&cloexec);
+
+        spawn(async move {
+            let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("listener socket should be created");
+            let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            bind_sync(
+                listener.as_raw_fd(),
+                RawSocketAddr::from_socket_addr(loopback),
+            )
+            .expect("bind should succeed");
+            listen_sync(listener.as_raw_fd(), DEFAULT_LISTENER_BACKLOG)
+                .expect("listen should succeed");
+            let bound = local_addr(listener.as_raw_fd()).expect("local_addr should resolve");
+
+            let client = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("client socket should be created");
+            connect_ready(client.as_raw_fd(), RawSocketAddr::from_socket_addr(bound))
+                .await
+                .expect("connect should succeed");
+
+            // Drive the production io_uring accept path (not the fallback).
+            let server = accept(NetOp::Accept {
+                fd: listener.as_raw_fd(),
+            })
+            .await
+            .expect("accept should succeed");
+
+            // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
+            let flags = unsafe { libc::fcntl(server.fd, libc::F_GETFD) };
+            let is_cloexec = flags >= 0 && (flags & libc::FD_CLOEXEC) != 0;
+            let _ = close_sync(server.fd);
+            *cloexec_task.lock().expect("result mutex poisoned") = Some(is_cloexec);
+        });
+
+        run();
+
+        assert_eq!(
+            *cloexec.lock().expect("result mutex poisoned"),
+            Some(true),
+            "accepted socket must have FD_CLOEXEC set"
+        );
     }
 }

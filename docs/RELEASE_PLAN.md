@@ -70,8 +70,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   document cancel-safety per method.
 - [ ] **1.8 macOS `sync_all`/`sync_data` durability inverted.**
   `sys/macos/fs.rs:124-138`. Swap so `sync_all` → `F_FULLFSYNC`.
-- [ ] **1.9 Accepted sockets missing `SOCK_CLOEXEC` on uring path.**
-  `sys/linux/net.rs:201-207`. Set `sqe.op_flags = SOCK_CLOEXEC` (consider `SOCK_NONBLOCK`).
+- [x] **1.9 Accepted sockets missing `SOCK_CLOEXEC` on uring path.**
+  `sys/linux/net.rs:201-207`. **Done:** set `sqe.op_flags = SOCK_CLOEXEC` on the
+  ACCEPT SQE (matching the `accept_sync` fallback). Regression test drives the
+  production io_uring accept and asserts `FD_CLOEXEC`; verified it fails without
+  the flag.
 
 ## Tier 2 — Hangs, panics, robustness
 
