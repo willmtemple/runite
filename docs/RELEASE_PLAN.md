@@ -175,8 +175,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   non-validating kernels. Post-fix the uring path succeeds and produces a cloexec
   socket (verified by disabling the fallback: pre-fix panics with `EINVAL`, post-fix
   succeeds). Regression test `uring_socket_is_cloexec` locks the property.
-- [ ] **2.7 Signal reader consumes a shared blocking-pool worker.**
-  `signal/unix.rs:319-324`. Move to a dedicated `std::thread`.
+- [x] **2.7 Signal reader consumes a shared blocking-pool worker.**
+  `signal/unix.rs:319-324`. Move to a dedicated `std::thread`. **Done:** the
+  process-lifetime `reader_loop` now runs on a dedicated `std::thread`
+  (`runite-signal`) instead of `spawn_blocking`, so it no longer permanently parks one
+  of the bounded (2–32) blocking-pool workers — which starved `spawn_blocking`, fs
+  offload, and DNS of a slot (worst case 1 of 2 workers). fd cleanup on spawn failure
+  preserved. macOS cross-checked.
 - [x] **2.8 `watch::Ref` holds the channel `Mutex`; two same-thread borrows deadlock.**
   `watch.rs:99-101` etc. RwLock the value or split the value lock; harden docs.
   **Done:** split the single `Mutex<State<T>>` into `Shared<T> { value: RwLock<T>,
