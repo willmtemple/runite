@@ -294,42 +294,12 @@ impl Stdin {
     /// runite::run();
     /// ```
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let fd = self.fd.as_raw_fd();
-        #[cfg(target_os = "linux")]
-        {
-            let support = STDIN_URING_SUPPORTED.with(Cell::get);
-            if support != Some(false) {
-                match submit_uring_read(fd, buf.len()).await {
-                    Ok(bytes) => {
-                        STDIN_URING_SUPPORTED.with(|state| state.set(Some(true)));
-                        let read = bytes.len();
-                        buf[..read].copy_from_slice(&bytes);
-                        return Ok(read);
-                    }
-                    Err(error) if should_fallback_to_offload(&error) => {
-                        STDIN_URING_SUPPORTED.with(|state| state.set(Some(false)));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-
-        let len = buf.len();
-        offload(move || {
-            let mut buffer = vec![0; len];
-            let read = blocking_read(fd, &mut buffer)?;
-            buffer.truncate(read);
-            Ok(buffer)
-        })
-        .await
-        .map(|bytes| {
-            let read = bytes.len();
-            buf[..read].copy_from_slice(&bytes);
-            read
-        })
+        // Delegate to the AsyncRead path so the in-flight read is stashed on the
+        // handle. On the Linux io_uring path this makes the read cancel-safe (a
+        // completed-but-unclaimed read is served next via the overflow buffer);
+        // the blocking-offload fallback still cannot cancel an in-progress
+        // `read(2)` (see release-plan 2.10).
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
     }
 }
 

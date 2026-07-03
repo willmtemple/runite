@@ -81,9 +81,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   field borrows), so a delivered-but-unpolled value survives a cancelled `recv`.
   Cancel-safety documented on both; regression tests for each; verified they fail
   against the pre-fix code.
-- [ ] **1.7 Inherent async I/O methods lose data on cancellation.**
-  `net/mod.rs:451-468` etc. Route inherent read/recv through the same pending-op stash;
-  document cancel-safety per method.
+- [x] **1.7 Inherent async I/O methods lose data on cancellation.**
+  `net/mod.rs`, `fs.rs`, `stdio.rs`. **Done:** `TcpStream::{read,write}`,
+  `File::{read,write}` (sequential), and `Stdin::read` now delegate to their
+  `AsyncRead`/`AsyncWrite` trait paths, so the in-flight op is stashed on the
+  object — a dropped inherent read retains its op (cancel-safe via the overflow
+  buffer) and can no longer race a concurrent trait read (two recvs in flight).
+  Regression test locks the stash-through-inherent-read behavior. **Remaining
+  (documented):** UDP datagram recv and the stdin blocking-offload fallback still
+  lose on cancel (offload can't cancel `read(2)`) — folded into 2.10; UnixStream
+  gains this once it implements the traits in 3.4.
 - [x] **1.8 macOS `sync_all`/`sync_data` durability inverted.**
   `sys/macos/fs.rs:124-138`. **Done:** both now go through a `full_fsync` helper
   that uses `F_FULLFSYNC` (the only real drive-cache flush on macOS) with an

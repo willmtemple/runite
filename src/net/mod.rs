@@ -463,22 +463,11 @@ impl TcpStream {
     /// empty. If a configured read timeout expires, the error kind is
     /// [`io::ErrorKind::TimedOut`].
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let data = match self.read_timeout_value() {
-            Some(timeout) => {
-                crate::sys::current::net::recv_timeout(self.raw_fd(), buf.len(), 0, timeout).await?
-            }
-            None => {
-                crate::sys::current::net::recv(NetOp::Recv {
-                    fd: self.raw_fd(),
-                    len: buf.len(),
-                    flags: 0,
-                })
-                .await?
-            }
-        };
-        let read = data.len();
-        buf[..read].copy_from_slice(&data);
-        Ok(read)
+        // Delegate to the AsyncRead path so the in-flight recv is stashed on the
+        // stream: dropping this future retains the operation (cancel-safe — a
+        // completed-but-unclaimed read is served by the next read via the
+        // overflow buffer) and it cannot race a concurrent trait-based read.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
     }
 
     /// Reads exactly `buf.len()` bytes from the stream.
@@ -503,20 +492,10 @@ impl TcpStream {
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self.write_timeout_value() {
-            Some(timeout) => {
-                crate::sys::current::net::send_timeout(self.raw_fd(), buf.to_vec(), 0, timeout)
-                    .await
-            }
-            None => {
-                crate::sys::current::net::send(NetOp::Send {
-                    fd: self.raw_fd(),
-                    data: buf.to_vec(),
-                    flags: 0,
-                })
-                .await
-            }
-        }
+        // Delegate to the AsyncWrite path so the in-flight send is stashed on the
+        // stream and the buffer-identity guard applies uniformly across the
+        // inherent and trait-based write APIs.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
     }
 
     /// Writes the entire buffer to the stream.

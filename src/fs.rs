@@ -166,7 +166,12 @@ impl File {
     /// Returns the number of bytes copied into `buf`. A return value of `0`
     /// indicates EOF when `buf` is not empty.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_impl(None, buf).await
+        // Delegate to the AsyncRead path so the in-flight read is stashed on the
+        // file: dropping this future retains the operation (cancel-safe — a
+        // completed-but-unclaimed read is served next via the overflow buffer)
+        // and it cannot race a concurrent trait-based read. Positional
+        // [`read_at`](Self::read_at) keeps using `read_impl`.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
     }
 
     /// Reads exactly `buf.len()` bytes from the current cursor position.
@@ -217,7 +222,10 @@ impl File {
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.write_impl(None, buf).await
+        // Delegate to the AsyncWrite path so the in-flight write is stashed on
+        // the file. Positional [`write_at`](Self::write_at) keeps using
+        // `write_impl`.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
     }
 
     /// Writes the entire buffer at the file's current cursor position.
