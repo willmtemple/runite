@@ -340,6 +340,50 @@ fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
     assert_eq!(&received, b"0123456789");
 }
 
+/// The inherent `read()` now stashes its operation on the stream (like the
+/// `AsyncRead` trait path), so abandoning a read and reading again does not lose
+/// bytes or leave two recvs racing. Regression for inherent-method cancellation.
+#[test]
+fn tcp_inherent_read_stashes_operation() {
+    use std::future::poll_fn;
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let received = block_on(|| async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = runite::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+
+            // Submit an inherent read, then abandon it after a single poll. The
+            // recv is stashed on the stream rather than owned by this future.
+            {
+                let mut scratch = [0u8; 16];
+                let mut fut = pin!(stream.read(&mut scratch));
+                poll_fn(|cx| {
+                    let _ = fut.as_mut().poll(cx);
+                    Poll::Ready(())
+                })
+                .await;
+            }
+
+            // The next read observes the peer's bytes via the stashed op.
+            let mut out = [0u8; 16];
+            let n = stream.read(&mut out).await.expect("read");
+            out[..n].to_vec()
+        });
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        client.write_all(b"hello").await.expect("write");
+        let out = server.await.expect("server task");
+        drop(client);
+        out
+    });
+
+    assert_eq!(&received, b"hello");
+}
+
 #[cfg(feature = "hyper")]
 #[test]
 fn hyper_http1_client_uses_runite_tcp_stream() {

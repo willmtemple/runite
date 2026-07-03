@@ -112,12 +112,14 @@ impl ReadOverflow {
     /// Returns up to `max` buffered bytes from the front without consuming them.
     /// Pair with [`advance`](Self::advance) for sinks that take a slice rather
     /// than a `&mut [u8]` (e.g. Hyper's `ReadBufCursor`).
+    #[cfg(feature = "hyper")]
     pub(crate) fn front(&self, max: usize) -> &[u8] {
         let n = max.min(self.remaining());
         &self.data[self.pos..self.pos + n]
     }
 
     /// Advances the drain cursor by `n` bytes.
+    #[cfg(feature = "hyper")]
     pub(crate) fn advance(&mut self, n: usize) {
         self.pos = (self.pos + n).min(self.data.len());
     }
