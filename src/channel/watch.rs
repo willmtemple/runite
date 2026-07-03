@@ -452,11 +452,21 @@ impl<T: Send + 'static> Receiver<T> {
             match Pin::new(future).poll(cx) {
                 Poll::Ready(result) => {
                     self.wait.take();
-                    if let Ok(version) = result {
-                        self.version = version;
-                        Poll::Ready(Ok(()))
-                    } else {
-                        Poll::Ready(Err(RecvError))
+                    match result {
+                        Ok(version) if version > self.version => {
+                            self.version = version;
+                            Poll::Ready(Ok(()))
+                        }
+                        Ok(_) => {
+                            // Stale completion: a waiter registered at an older
+                            // version fired, but `self.version` has since caught
+                            // up or passed it (e.g. via `borrow_and_update`).
+                            // Accepting it would regress `self.version` and
+                            // report a spurious change, so discard it and
+                            // re-register instead of moving the version backward.
+                            self.poll_changed(cx)
+                        }
+                        Err(_) => Poll::Ready(Err(RecvError)),
                     }
                 }
                 Poll::Pending => Poll::Pending,
