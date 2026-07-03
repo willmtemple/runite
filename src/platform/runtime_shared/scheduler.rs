@@ -20,8 +20,8 @@ use super::handles::{
     IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
 };
 use super::state::{
-    ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, install_thread,
-    lock_queue, teardown_thread, try_with_installed_thread, with_current_thread,
+    ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, describe_panic,
+    install_thread, lock_queue, teardown_thread, try_with_installed_thread, with_current_thread,
     with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
@@ -345,9 +345,26 @@ where
     std::thread::Builder::new()
         .name("runite-worker".into())
         .spawn(move || {
-            install_thread(shared, driver, Some(worker_completion));
-            queue_task::<R, _>(initial_task);
-            run::<R>();
+            // Retain a handle to the completion so the parent can be released
+            // even if the worker unwinds before `run()` reaches its clean exit.
+            let panic_completion = Arc::clone(&worker_completion);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                install_thread(shared, driver, Some(worker_completion));
+                queue_task::<R, _>(initial_task);
+                run::<R>();
+            }));
+            if outcome.is_err() {
+                // A panic escaped the worker's event loop or its setup — a
+                // runtime-invariant violation, since user-task panics are
+                // already isolated inside `run()`. Because `run()` could not
+                // perform its clean exit, mark the completion finished and wake
+                // the parent here so it does not hang forever waiting on a dead
+                // child. The child thread's driver state may leak, which is
+                // acceptable for an already-fatal condition; the panic itself
+                // is reported through the process panic hook.
+                panic_completion.finished.store(true, Ordering::Release);
+                panic_completion.parent_event.shared.notify();
+            }
         })
         .expect("worker thread should spawn");
 
@@ -390,7 +407,7 @@ pub fn run<R: Runtime>() {
 
         let mut microtasks_run: u64 = 0;
         while let Some(task) = pop_microtask() {
-            task();
+            run_guarded(task);
             microtasks_run += 1;
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
@@ -403,7 +420,7 @@ pub fn run<R: Runtime>() {
         }
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -417,12 +434,14 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
+        // From here `closing` is `true`. This guard restores it to `false` on
+        // any early exit from the shutdown-probe region below — including a
+        // panic unwind — and is disarmed only once we commit to exiting.
+        let mut closing_reset = ClosingResetGuard::new();
+
         drain_all::<R>();
 
         if has_ready_work() {
-            with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
-            });
             continue;
         }
 
@@ -465,11 +484,14 @@ pub fn run<R: Runtime>() {
         });
 
         if !committed {
-            with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
-            });
+            // A remote task snuck in after the probe above; `closing_reset`
+            // restores the flag as this iteration unwinds back to the top.
             continue;
         }
+
+        // Committed to exit: `closed` is now set under the queue lock, so the
+        // `closing` flag is no longer meaningful and the guard is disarmed.
+        closing_reset.disarm();
 
         if let Some(completion) = worker_completion {
             completion.finished.store(true, Ordering::Release);
@@ -501,7 +523,7 @@ pub fn run_until_stalled<R: Runtime>() {
 
         let mut microtasks_run: u64 = 0;
         while let Some(task) = pop_microtask() {
-            task();
+            run_guarded(task);
             microtasks_run += 1;
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
@@ -514,7 +536,7 @@ pub fn run_until_stalled<R: Runtime>() {
         }
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -545,7 +567,7 @@ pub fn run_ready_tasks<R: Runtime>() {
 
         let mut microtasks_run: u64 = 0;
         while let Some(task) = pop_microtask() {
-            task();
+            run_guarded(task);
             microtasks_run += 1;
         }
         if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
@@ -558,7 +580,7 @@ pub fn run_ready_tasks<R: Runtime>() {
         }
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -577,6 +599,63 @@ pub fn run_ready_tasks<R: Runtime>() {
 }
 
 // -- Internal scheduler primitives ------------------------------------------
+
+/// Runs one scheduled unit of work (a macrotask or microtask closure) with a
+/// panic firewall.
+///
+/// A panic escaping a scheduled closure — a timer/interval callback, a
+/// `queue_task`/`queue_microtask` closure, a worker `on_exit` handler, or a
+/// task poll — is caught here so it cannot unwind the event loop and take down
+/// the runtime thread. Spawned-future polls additionally convert their panic
+/// into `JoinError::Panicked` inside `FutureTask::poll`, so by the time such a
+/// microtask reaches this guard it no longer panics; this is the backstop for
+/// every *other* scheduled closure. The panic is still surfaced through the
+/// process panic hook.
+fn run_guarded(task: LocalTask) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
+        tracing::error!(
+            target: trace_targets::SCHEDULER,
+            event = "scheduled_task_panicked",
+            panic = describe_panic(&*payload),
+            "scheduled task panicked; isolating panic to keep the event loop running",
+        );
+    }
+}
+
+/// Resets the current thread's `closing` flag on drop.
+///
+/// `run()` sets `closing` while it probes for an idle-shutdown opportunity. On
+/// every path that does not commit to exiting, the flag must return to `false`
+/// so the loop can be re-entered. This guard makes that reset happen even if a
+/// panic unwinds through the shutdown-probe region (belt-and-suspenders on top
+/// of the per-task firewall), and is disarmed only once the loop has committed
+/// to exit. Best-effort: a no-op if the thread state is already torn down.
+struct ClosingResetGuard {
+    armed: bool,
+}
+
+impl ClosingResetGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClosingResetGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                state.shared.closing.store(false, Ordering::Release);
+            }
+        });
+    }
+}
 
 /// Reap all external events into the local queues: poll the driver for I/O
 /// completions and expired timers, splice in cross-thread (remote) tasks, and

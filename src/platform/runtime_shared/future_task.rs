@@ -27,8 +27,9 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
 use super::handles::{QueueError, ThreadHandle};
-use super::state::{try_with_installed_thread, with_installed_thread};
+use super::state::{describe_panic, try_with_installed_thread, with_installed_thread};
 use crate::task::JoinError;
+use crate::trace_targets;
 
 pub(crate) struct FutureTask {
     pub(crate) future: RefCell<Option<LocalBoxFuture>>,
@@ -92,14 +93,22 @@ impl FutureTask {
         };
 
         let mut context = Context::from_waker(&self.waker);
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(()) => {
+        // Isolate task panics: a future that unwinds must not tear down the
+        // event loop that is polling it. Catch the unwind here, report it, and
+        // resolve the joiner to `JoinError::Panicked` so awaiters are released
+        // rather than hung. `AssertUnwindSafe` is sound because on unwind the
+        // future is dropped (never polled again) and the only other state
+        // touched — `TaskShared` — is moved to a terminal `Panicked` state.
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(&mut context)));
+        match outcome {
+            Ok(Poll::Ready(())) => {
                 // The task is done; drop it from the registry so its `Rc` is
                 // released (the currently-executing microtask closure still
                 // holds one, so the drop happens after this returns).
                 deregister_task(self.id);
             }
-            Poll::Pending => {
+            Ok(Poll::Pending) => {
                 // If the task aborted itself during this poll (e.g. it holds
                 // its own `AbortHandle`), drop the future instead of restoring
                 // it so it is never polled again. `abort` has already removed
@@ -109,6 +118,21 @@ impl FutureTask {
                 } else {
                     *self.future.borrow_mut() = Some(future);
                 }
+            }
+            Err(payload) => {
+                tracing::error!(
+                    target: trace_targets::ASYNC,
+                    event = "task_panicked",
+                    task_id = self.id,
+                    panic = describe_panic(&*payload),
+                    "spawned task panicked; isolating and reporting JoinError::Panicked to the joiner",
+                );
+                // Drop the panicked future rather than restore it, remove the
+                // registry reference, and move the joiner to a terminal
+                // panicked state.
+                drop(future);
+                deregister_task(self.id);
+                self.shared.mark_panicked();
             }
         }
     }
@@ -242,6 +266,8 @@ enum TaskState {
     Finished,
     /// The task was aborted before completion.
     Aborted,
+    /// The task panicked while being polled.
+    Panicked,
 }
 
 /// Type-erased, shared cancellation state for a queued future.
@@ -311,6 +337,21 @@ impl TaskShared {
             waker.wake();
         }
     }
+
+    /// Moves the task to a terminal panicked state and wakes the joiner with
+    /// [`JoinError::Panicked`]. Called from [`FutureTask::poll`] when the
+    /// future unwinds. A no-op if the task already finished or was aborted
+    /// (an abort observed during the panicking poll wins).
+    fn mark_panicked(&self) {
+        if !matches!(self.state.get(), TaskState::Running) {
+            return;
+        }
+        self.state.set(TaskState::Panicked);
+
+        if let Some(waker) = self.join_waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
 }
 
 pub(crate) struct JoinState<T> {
@@ -348,6 +389,7 @@ impl<T> JoinState<T> {
                 .take()
                 .expect("join handle polled after completion"))),
             TaskState::Aborted => Poll::Ready(Err(JoinError::Aborted)),
+            TaskState::Panicked => Poll::Ready(Err(JoinError::Panicked)),
             TaskState::Running => {
                 *self.shared.join_waker.borrow_mut() = Some(cx.waker().clone());
                 Poll::Pending
