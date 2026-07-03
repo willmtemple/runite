@@ -26,6 +26,17 @@ impl HyperRead for TcpStream {
             return Poll::Ready(Ok(()));
         }
 
+        // Serve any surplus from a previous read before submitting a new one.
+        if let Some(overflow) = this.read_overflow.as_mut() {
+            let n = buf.remaining().min(overflow.remaining());
+            buf.put_slice(overflow.front(n));
+            overflow.advance(n);
+            if overflow.is_drained() {
+                this.read_overflow = None;
+            }
+            return Poll::Ready(Ok(()));
+        }
+
         if this.pending_read.is_none() {
             this.pending_read = Some(match this.read_timeout_value() {
                 Some(timeout) => Box::pin(crate::sys::current::net::recv_timeout(
@@ -47,7 +58,14 @@ impl HyperRead for TcpStream {
         match poll {
             Poll::Ready(Ok(data)) => {
                 this.pending_read = None;
-                buf.put_slice(&data);
+                // `put_slice` panics if given more than the cursor can hold, so
+                // copy only what fits and retain the surplus for the next read.
+                let n = data.len().min(buf.remaining());
+                buf.put_slice(&data[..n]);
+                if data.len() > n {
+                    this.read_overflow =
+                        Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
+                }
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {

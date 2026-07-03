@@ -83,6 +83,10 @@ type PendingFileWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static
 pub struct File {
     inner: Arc<FileInner>,
     pending_read: Option<PendingFileRead>,
+    /// Bytes a completed read produced that overflowed a smaller caller buffer;
+    /// served before any new read so no bytes are lost. See
+    /// [`ReadOverflow`](crate::io::ReadOverflow).
+    read_overflow: Option<Box<crate::io::ReadOverflow>>,
     pending_write: Option<PendingFileWrite>,
 }
 
@@ -335,6 +339,7 @@ impl File {
         Self {
             inner: Arc::new(FileInner { fd }),
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
         }
     }
@@ -377,6 +382,16 @@ impl AsyncRead for File {
         }
 
         let this = self.get_mut();
+
+        // Serve any surplus from a previous read before submitting a new one.
+        if let Some(overflow) = this.read_overflow.as_mut() {
+            let n = overflow.drain_into(buf);
+            if overflow.is_drained() {
+                this.read_overflow = None;
+            }
+            return Poll::Ready(Ok(n));
+        }
+
         if this.pending_read.is_none() {
             let op = FsOp::Read {
                 fd: this.raw_fd(),
@@ -396,15 +411,13 @@ impl AsyncRead for File {
             Poll::Ready(result) => {
                 this.pending_read = None;
                 let data = result?;
-                let read = data.len();
-                if read > buf.len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "read completed with more bytes than destination buffer can hold",
-                    )));
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                // Retain any bytes that did not fit rather than discarding them.
+                if data.len() > n {
+                    this.read_overflow = Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
                 }
-                buf[..read].copy_from_slice(&data);
-                Poll::Ready(Ok(read))
+                Poll::Ready(Ok(n))
             }
             Poll::Pending => Poll::Pending,
         }

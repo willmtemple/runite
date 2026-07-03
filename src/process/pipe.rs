@@ -96,6 +96,7 @@ pub struct ChildStdin {
 pub struct ChildStdout {
     pipe: Pipe,
     pending_read: Option<PendingRead>,
+    read_overflow: Option<Box<crate::io::ReadOverflow>>,
 }
 
 /// Async reader connected to a child process's standard error.
@@ -107,6 +108,7 @@ pub struct ChildStdout {
 pub struct ChildStderr {
     pipe: Pipe,
     pending_read: Option<PendingRead>,
+    read_overflow: Option<Box<crate::io::ReadOverflow>>,
 }
 
 impl ChildStdin {
@@ -123,6 +125,7 @@ impl ChildStdout {
         Self {
             pipe,
             pending_read: None,
+            read_overflow: None,
         }
     }
 }
@@ -132,6 +135,7 @@ impl ChildStderr {
         Self {
             pipe,
             pending_read: None,
+            read_overflow: None,
         }
     }
 }
@@ -199,6 +203,15 @@ macro_rules! impl_async_read {
                 }
 
                 let this = self.get_mut();
+
+                if let Some(overflow) = this.read_overflow.as_mut() {
+                    let n = overflow.drain_into(buf);
+                    if overflow.is_drained() {
+                        this.read_overflow = None;
+                    }
+                    return Poll::Ready(Ok(n));
+                }
+
                 if this.pending_read.is_none() {
                     match this.pipe.raw_fd() {
                         Ok(fd) => {
@@ -220,15 +233,14 @@ macro_rules! impl_async_read {
                     Poll::Ready(result) => {
                         this.pending_read = None;
                         let data = result?;
-                        let read = data.len();
-                        if read > buf.len() {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "read completed with more bytes than destination buffer can hold",
-                            )));
+                        let n = data.len().min(buf.len());
+                        buf[..n].copy_from_slice(&data[..n]);
+                        // Retain any bytes that did not fit rather than discarding them.
+                        if data.len() > n {
+                            this.read_overflow =
+                                Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
                         }
-                        buf[..read].copy_from_slice(&data);
-                        Poll::Ready(Ok(read))
+                        Poll::Ready(Ok(n))
                     }
                     Poll::Pending => Poll::Pending,
                 }
