@@ -54,27 +54,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     environment: release
+    permissions:
+      # Required to mint the OIDC token that crates.io Trusted Publishing
+      # exchanges for a short-lived registry token. Both crates must list
+      # this repo + release.yml + the `release` environment as a trusted
+      # publisher in their crates.io settings.
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain via mise
         uses: jdx/mise-action@v4
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
       # The proc-macro crate must be published first: runite depends on it by
       # path + pinned version, so the umbrella crate's verify build has to
       # resolve the just-published dependency from crates.io. cargo (>=1.66)
       # blocks until the publish is visible in the index; the sleep is extra
       # insurance against CDN propagation lag.
-      #
-      # The first publish must use an API token (CARGO_REGISTRY_TOKEN). Once
-      # both crates exist on crates.io, this job can migrate to crates.io
-      # Trusted Publishing (OIDC via rust-lang/crates-io-auth-action) and the
-      # long-lived token can be revoked.
       - name: Publish runite-proc-macros
         run: cargo publish -p runite-proc-macros
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
       - name: Wait for index propagation
         run: sleep 30
       - name: Publish runite
         run: cargo publish -p runite
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
