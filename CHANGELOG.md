@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 0.1.0
+## [0.1.0] — 2026-07-04
 
 Initial public release of `runite`: an event-loop-per-thread async runtime for
 Rust, built on io_uring (Linux `x86_64`/`aarch64`), kqueue (macOS `aarch64`),
@@ -103,4 +103,4 @@ parallelism.
   Unix-only, and `TcpSocket::set_reuseport` reports `Unsupported` on Windows.
 - Stable Rust only (MSRV 1.88); no nightly features.
 
-[Unreleased]: https://github.com/willmtemple/runite/commits/main
+[0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0

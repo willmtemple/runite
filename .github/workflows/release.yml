@@ -1,35 +1,66 @@
 name: Release
 
+# Publishes to crates.io when a GitHub Release is published. The release's tag
+# must be `v<version>` and match both crate versions (they are versioned in
+# lockstep). Create the release from a commit whose CI run is fully green.
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v4
+      - name: Verify tag matches both crate versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          meta=$(cargo metadata --no-deps --format-version 1)
+          for crate in runite runite-proc-macros; do
+            version=$(echo "$meta" | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
+            if [ "$tag" != "$version" ]; then
+              echo "Tag $tag does not match $crate version $version" >&2
+              exit 1
+            fi
+          done
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: Package dry-run (proc macros)
+        run: cargo publish --dry-run -p runite-proc-macros
+      # runite itself cannot be dry-run until runite-proc-macros@<version>
+      # exists on crates.io; its verify build runs during the real publish.
+      - name: Package list (runite)
+        run: cargo package --list -p runite
+
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    needs: validate
     environment: release
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain via mise
         uses: jdx/mise-action@v4
-      - name: Verify tag matches crate version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          crate=$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='runite'))")
-          if [ "$tag" != "$crate" ]; then
-            echo "Tag $tag does not match crate version $crate" >&2
-            exit 1
-          fi
-      # The proc-macro crate must be published first because runite depends on it
-      # by path + version. After it lands we wait for the registry index to
-      # propagate so the umbrella crate's verify build can resolve the just-
-      # published dependency from crates.io.
+      # The proc-macro crate must be published first: runite depends on it by
+      # path + pinned version, so the umbrella crate's verify build has to
+      # resolve the just-published dependency from crates.io. cargo (>=1.66)
+      # blocks until the publish is visible in the index; the sleep is extra
+      # insurance against CDN propagation lag.
+      #
+      # The first publish must use an API token (CARGO_REGISTRY_TOKEN). Once
+      # both crates exist on crates.io, this job can migrate to crates.io
+      # Trusted Publishing (OIDC via rust-lang/crates-io-auth-action) and the
+      # long-lived token can be revoked.
       - name: Publish runite-proc-macros
         run: cargo publish -p runite-proc-macros
         env:
