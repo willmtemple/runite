@@ -306,8 +306,17 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `tests/unix_stream.rs` (trait read/write + shutdown-to-EOF, concurrent split halves,
   reunite origin check); public API snapshot updated. Closes the 1.7 note that UnixStream
   gains cancel-safe inherent I/O once it implements the traits.
-- [ ] **3.5 `Command::output()` → `Output { status, stdout, stderr }`; don't error on
-  non-zero exit; close child stdin.**
+- [x] **3.5 `Command::output()` → `Output { status, stdout, stderr }`; don't error on
+  non-zero exit; close child stdin.** **Done:** `output()` now returns
+  `io::Result<Output>` where `Output { status, stdout, stderr }` mirrors
+  `std::process::Output` (derives `Clone/Debug/Eq/PartialEq`, re-exported as
+  `runite::process::Output`). It forces stdout+stderr to piped, redirects **stdin to
+  null** (a stdin-reading child sees EOF instead of hanging — matches std), reads stdout
+  and stderr **concurrently** (spawned stderr reader) to avoid pipe-buffer deadlock, and
+  **no longer treats a non-zero exit as an error** — the caller inspects `output.status`.
+  Updated the process tests (the old "false errors" assertion now checks
+  `status.code() == Some(1)`, and the stderr-drain test asserts the 200KB is captured)
+  and the doc examples. Public API snapshot updated.
 - [x] **3.6 Panic story + `#[non_exhaustive]`.** `JoinError::Panicked`; mark `SignalKind`
   (or make opaque w/ `from_raw`), `JoinError`, `QueueError`, `MissedTickBehavior`.
   **Done:** `JoinError::Panicked` landed in 2.1 (the panic story). Added
