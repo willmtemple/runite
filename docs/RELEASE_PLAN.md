@@ -363,7 +363,14 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
     present.
   Public API snapshot updated.
 - [x] **3.9 Pin proc-macro dep `=0.1.0`.** Done: `runite-proc-macros` dependency pinned to `=0.1.0` so the lockstep-versioned macro crate can never resolve to a mismatched version.
-- [ ] **3.10 Per-method cancel-safety docs.**
+- [x] **3.10 Per-method cancel-safety docs.** **Done:** added explicit `# Cancel safety`
+  sections to the primary await points, documenting the facts established in Tier 1.
+  Cancel-safe: `TcpStream::read`, `File::read`, `broadcast::recv`, `watch::changed`
+  (+ `mpsc::recv`/`oneshot::recv`/`Stdin::read` already documented in 1.6/2.10). Explicitly
+  **not** cancel-safe: `TcpStream::write`, `File::write` (a completion-based write dropped
+  mid-flight may have committed bytes without reporting the count). `time::timeout`
+  documented as inheriting its inner future's cancel-safety. `UnixStream` read/write carry
+  the same note from 3.4.
 
 ## Tier 4 — Release mechanics
 

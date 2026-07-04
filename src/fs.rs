@@ -167,6 +167,11 @@ impl File {
     ///
     /// Returns the number of bytes copied into `buf`. A return value of `0`
     /// indicates EOF when `buf` is not empty.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe: bytes an in-flight read already received are retained on the
+    /// file and returned by the next read if this future is dropped.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Delegate to the AsyncRead path so the in-flight read is stashed on the
         // file: dropping this future retains the operation (cancel-safe — a
@@ -223,6 +228,12 @@ impl File {
     /// The operation may write fewer bytes than `buf.len()`; use
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
+    ///
+    /// # Cancel safety
+    ///
+    /// **Not** cancel-safe: a completion-based write dropped mid-flight may have
+    /// already committed bytes without reporting the count. Drive writes to
+    /// completion rather than cancelling them.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Delegate to the AsyncWrite path so the in-flight write is stashed on
         // the file. Positional [`write_at`](Self::write_at) keeps using
