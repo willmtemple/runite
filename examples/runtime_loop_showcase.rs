@@ -1,3 +1,13 @@
+//! # Event-loop semantics tour: microtasks, macrotasks, timers
+//!
+//! Walks through the JavaScript-style scheduling rules one by one — microtask
+//! checkpoints, macrotask turns, `set_timeout`/`set_interval`, `yield_now`,
+//! and cross-thread wakes — with numbered log lines asserting the exact
+//! delivery order. This is the reference demo for "when does my code run?";
+//! `reactive_state.rs` shows why these rules matter for applications.
+//!
+//! Run it: `cargo run --example runtime_loop_showcase`
+
 use runite::{
     IntervalHandle, ThreadHandle, current_thread_handle, queue_macrotask, queue_microtask, spawn,
     spawn_worker,
