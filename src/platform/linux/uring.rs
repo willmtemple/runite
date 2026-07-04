@@ -16,6 +16,10 @@ const IORING_REGISTER_PROBE: u32 = 8;
 const IORING_SETUP_CLAMP: u32 = 1 << 4;
 
 const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
+/// The kernel keeps overflowed CQEs in an internal list and flushes them on the
+/// next `io_uring_enter` instead of dropping them (Linux 5.5+). Below this the
+/// kernel silently drops CQEs on CQ overflow.
+const IORING_FEAT_NODROP: u32 = 1 << 1;
 
 #[cfg(test)]
 pub(crate) const IORING_OP_NOP: u8 = 0;
@@ -303,7 +307,14 @@ pub(crate) struct IoUring {
     cq_head: *mut u32,
     cq_tail: *mut u32,
     cq_ring_mask: *mut u32,
+    cq_overflow: *mut u32,
     cqes: *mut IoUringCqe,
+    /// `true` when the kernel reported `IORING_FEAT_NODROP`: overflowed CQEs are
+    /// preserved and flushed on the next enter rather than dropped.
+    nodrop: bool,
+    /// Highest CQ-overflow count observed so far. Used to warn at most once per
+    /// new overflow event rather than on every drain.
+    overflow_seen: Cell<u32>,
 }
 
 impl IoUring {
@@ -323,6 +334,25 @@ impl IoUring {
             )
         })? as RawFd;
         let supported_ops = supported_ops_for_ring(ring_fd);
+
+        if !supported_ops.supports(IORING_OP_MSG_RING) {
+            tracing::warn!(
+                target: "runite::driver",
+                event = "msg_ring_unsupported",
+                "this kernel lacks IORING_OP_MSG_RING (needs Linux 5.18+); cross-thread \
+                 wakeups will not be delivered, so multithreaded runtimes (spawn_worker) \
+                 and cross-thread ThreadHandle wakes will hang",
+            );
+        }
+        let nodrop = params.features & IORING_FEAT_NODROP != 0;
+        if !nodrop {
+            tracing::warn!(
+                target: "runite::driver",
+                event = "cq_nodrop_unsupported",
+                "this kernel lacks IORING_FEAT_NODROP (needs Linux 5.5+); completions may \
+                 be dropped on completion-queue overflow",
+            );
+        }
 
         let sq_ring_size =
             params.sq_off.array as usize + params.sq_entries as usize * std::mem::size_of::<u32>();
@@ -365,7 +395,10 @@ impl IoUring {
             cq_head: offset_ptr(cq_ring_ptr, params.cq_off.head),
             cq_tail: offset_ptr(cq_ring_ptr, params.cq_off.tail),
             cq_ring_mask: offset_ptr(cq_ring_ptr, params.cq_off.ring_mask),
+            cq_overflow: offset_ptr(cq_ring_ptr, params.cq_off.overflow),
             cqes: offset_ptr(cq_ring_ptr, params.cq_off.cqes),
+            nodrop,
+            overflow_seen: Cell::new(0),
         })
     }
 
@@ -415,9 +448,29 @@ impl IoUring {
                 *ring = Some(IoUring::new(64)?);
             }
 
-            f(ring
+            let ring = ring
                 .as_ref()
-                .expect("global submitter ring should initialize"))
+                .expect("global submitter ring should initialize");
+            let result = f(ring);
+
+            // Nothing polls the global fallback ring's completion queue, so
+            // drain it here to keep it from overflowing over the process
+            // lifetime. Only failures land here — every op submitted through the
+            // fallback (currently just MSG_RING wakes) uses CQE_SKIP_SUCCESS — so
+            // a CQE means a cross-thread wake failed; surface it.
+            ring.drain_completions(|cqe| {
+                if cqe.res < 0 {
+                    tracing::warn!(
+                        target: "runite::driver",
+                        event = "fallback_submitter_op_failed",
+                        errno = -cqe.res,
+                        "an io_uring op on the global fallback submitter failed \
+                         (likely a cross-thread MSG_RING wake to a closed ring)",
+                    );
+                }
+            });
+
+            result
         })
     }
 
@@ -460,6 +513,7 @@ impl IoUring {
         &self,
         token_to_update: u64,
         deadline: Duration,
+        completion: u64,
     ) -> io::Result<()> {
         // SAFETY: Same stack-pointer contract as submit_timeout — the kernel
         // copies the timespec during the synchronous io_uring_enter call made
@@ -468,6 +522,12 @@ impl IoUring {
         self.push_sqe(|sqe| {
             sqe.opcode = IORING_OP_TIMEOUT_REMOVE;
             sqe.fd = -1;
+            // Give the update op a real, decodable completion token and skip its
+            // success CQE (matching submit_timeout_remove). Previously it left
+            // `user_data` at the zeroed default, so the update's completion
+            // arrived as an unattributable token-0 CQE.
+            sqe.flags = IOSQE_CQE_SKIP_SUCCESS;
+            sqe.user_data = completion;
             sqe.off = (&timespec as *const KernelTimespec) as u64;
             sqe.addr = token_to_update;
             sqe.op_flags = IORING_TIMEOUT_UPDATE | IORING_TIMEOUT_ABS;
@@ -564,7 +624,41 @@ impl IoUring {
         }
 
         store_u32(self.cq_head, head);
+        self.check_cq_overflow();
         true
+    }
+
+    /// Reports completion-queue overflow. The kernel bumps `cq.overflow` when
+    /// the CQ ring fills before the runtime drains it. On `IORING_FEAT_NODROP`
+    /// kernels the overflowed CQEs are held and flushed on the next enter, so
+    /// this is a backpressure signal (the CQ ring should be larger) rather than
+    /// data loss; without NODROP those CQEs were dropped, which strands the
+    /// awaiting futures. Warns at most once per new overflow event.
+    fn check_cq_overflow(&self) {
+        // SAFETY: `cq_overflow` points into the CQ ring mapping at the
+        // kernel-provided overflow offset; a volatile read observes the kernel's
+        // latest store.
+        let overflow = unsafe { ptr::read_volatile(self.cq_overflow) };
+        if overflow > self.overflow_seen.get() {
+            self.overflow_seen.set(overflow);
+            if self.nodrop {
+                tracing::warn!(
+                    target: "runite::driver",
+                    event = "cq_overflow",
+                    overflow,
+                    "io_uring completion queue overflowed; CQEs were held by the kernel \
+                     (FEAT_NODROP) and flushed, but the ring is undersized for the load",
+                );
+            } else {
+                tracing::error!(
+                    target: "runite::driver",
+                    event = "cq_overflow_dropped",
+                    overflow,
+                    "io_uring completion queue overflowed and this kernel lacks FEAT_NODROP; \
+                     completions were dropped and their futures may hang",
+                );
+            }
+        }
     }
 
     pub(crate) fn wait_for_cqe(&self) -> io::Result<()> {
