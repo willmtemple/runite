@@ -383,7 +383,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `cargo publish --dry-run -p runite` step in release.yml.
 - [ ] **4.4 Fix ARCHITECTURE.md drift** (4 stale claims) and move the microtask-starvation
   warning inside the drain loop (`scheduler.rs:376-388`).
-- [ ] **4.5 Regression tests** for 1.1/1.2/1.3/1.7 + a non-`#[ignore]` signal e2e test.
+- [x] **4.5 Regression tests** for 1.1/1.2/1.3/1.7 + a non-`#[ignore]` signal e2e test.
+  **Done:** the 1.1/1.2/1.3/1.7 regression tests landed with their Tier-1 fixes (each
+  verified failing against the pre-fix code). Signal e2e: `signal_receives_sigwinch`
+  was already un-ignored; un-ignored `signal_receives_sigusr1_linux` as well after
+  verifying stability (20 isolated runs + 3 full parallel lib runs, all green) — the
+  suite now has zero ignored lib tests. Also fixed the signal module doc still claiming
+  the reader runs on the blocking pool (stale since 2.7's dedicated thread).
 
 ## Performance (0.1-eligible)
 
