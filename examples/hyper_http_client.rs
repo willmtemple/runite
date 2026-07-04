@@ -23,7 +23,7 @@ fn spawn_demo_server() -> std::io::Result<(std::net::SocketAddr, thread::JoinHan
             let response = concat!(
                 "HTTP/1.1 200 OK\r\n",
                 "content-type: text/plain; charset=utf-8\r\n",
-                "content-length: 24\r\n",
+                "content-length: 18\r\n",
                 "connection: close\r\n",
                 "\r\n",
                 "hello from runite!"
