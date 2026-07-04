@@ -126,9 +126,11 @@ Per-turn ordering in `run()`:
 5. Run one macrotask.
 6. Repeat.
 
-If a single checkpoint crosses 1000 microtasks, a starvation warning is emitted from *inside* the
-drain loop — a checkpoint that never empties (the pathology the warning exists for) would never
-reach an after-the-loop check. Implemented by `drain_all()`, `drain_microtasks()`, and the single
+If a single checkpoint crosses 1000 microtasks while a macrotask is actually waiting — queued
+locally or remotely, or a timer past its deadline — a starvation warning is emitted from *inside*
+the drain loop; a checkpoint that never empties (the pathology the warning exists for) would never
+reach an after-the-loop check. A long checkpoint with nothing queued behind it starves no one and
+warns nothing. Implemented by `drain_all()`, `drain_microtasks()`, and the single
 `pop_macrotask()` per turn (`src/platform/runtime_shared/scheduler.rs`).
 
 Why this shape exists:
