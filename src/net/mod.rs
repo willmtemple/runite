@@ -133,12 +133,20 @@ pub struct TcpStream {
     pending_shutdown: Option<PendingShutdown>,
 }
 
+impl std::fmt::Debug for TcpStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpStream")
+            .field("fd", &self.inner.fd.as_raw_fd())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Async TCP listening socket.
 ///
 /// A listener accepts inbound [`TcpStream`] connections from a bound local
 /// address. Use [`TcpListener::accept`] for one connection at a time or
 /// [`TcpListener::incoming`] for a [`Stream`] adapter.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TcpListener {
     inner: Arc<TcpListenerInner>,
 }
@@ -843,6 +851,7 @@ impl AsyncWrite for TcpStream {
 /// same runtime thread dedicated to receiving bytes. Recombine it with the
 /// matching [`OwnedWriteHalf`] through
 /// [`TcpStream::reunite`] when exclusive stream ownership is needed again.
+#[derive(Debug)]
 pub struct OwnedReadHalf {
     stream: TcpStream,
 }
@@ -854,6 +863,7 @@ pub struct OwnedReadHalf {
 /// same runtime thread dedicated to sending bytes. Use [`shutdown`](Self::shutdown)
 /// to half-close the write direction with [`std::net::Shutdown::Write`]
 /// without dropping the matching [`OwnedReadHalf`].
+#[derive(Debug)]
 pub struct OwnedWriteHalf {
     stream: TcpStream,
 }
@@ -1026,7 +1036,7 @@ impl TcpListener {
     /// ending iteration.
     pub fn incoming(&self) -> Incoming {
         Incoming {
-            listener: self.clone(),
+            listener: self.share(),
             pending: None,
         }
     }
@@ -1052,6 +1062,15 @@ impl TcpListener {
         }
     }
 
+    /// Internal fd-sharing clone (reference-counts the same socket). Not public:
+    /// callers who want an independent listener use [`try_clone`](Self::try_clone),
+    /// which duplicates the descriptor, mirroring `std::net::TcpListener`.
+    fn share(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     fn raw_fd(&self) -> RawFd {
         self.inner.fd.as_raw_fd()
     }
@@ -1065,6 +1084,14 @@ impl TcpListener {
 pub struct Incoming {
     listener: TcpListener,
     pending: Option<Pin<Box<dyn Future<Output = io::Result<TcpStream>>>>>,
+}
+
+impl std::fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Incoming")
+            .field("listener", &self.listener)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Stream for Incoming {

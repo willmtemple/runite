@@ -326,9 +326,25 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   exhaustive matches are unaffected; no external test needed a wildcard arm. API snapshot
   updated. Kept `SignalKind` as an enum (rather than opaque + `from_raw`) since it now
   grows non-breakingly.
-- [ ] **3.7 Conventions sweep.** `Debug` on all public types; `#[must_use]` on guards/
+- [x] **3.7 Conventions sweep.** `Debug` on all public types; `#[must_use]` on guards/
   lazy futures/handles; `Display`+`Error` on mpsc/oneshot errors; export `io::ext` future
-  types; drop `TcpListener: Clone` for `try_clone`.
+  types; drop `TcpListener: Clone` for `try_clone`. **Done:**
+  - **`Display` + `Error`** on all six channel error types (`mpsc::{SendError, TrySendError,
+    TryRecvError}`, `oneshot::{SendError, RecvError, TryRecvError}`), so they satisfy
+    `std::error::Error` and compose with `?`/`Box<dyn Error>`.
+  - **`TcpListener: Clone` dropped** — the derived `Clone` silently shared the fd via `Arc`
+    (misleading vs std). Replaced with a private `share()` for the internal `incoming()`
+    use; the public path to an independent listener is `try_clone` (dups the fd), matching
+    `std::net`.
+  - **Exported the `io::ext` future types** (`Read`, `ReadExact`, `ReadToEnd`, `Write`,
+    `WriteAll`, `Flush`, `Close`) — they were `pub` inside a private module and therefore
+    unnameable return types.
+  - **`#[must_use]`** on every lazy future/stream combinator in `io::ext`/`io::stream`
+    (they do nothing unless awaited/polled).
+  - **`Debug`** filled in for the primary I/O types that couldn't derive it (future fields):
+    manual impls for `TcpStream` and both `Incoming` streams, derives on the `TcpStream`
+    split halves (`UnixStream` + its halves already got theirs in 3.4).
+  Public API snapshot updated.
 - [x] **3.8 fs semantic gaps.** `symlink_metadata` (so `is_symlink` can be true); `File::seek`;
   document/drop implicit `SO_REUSEADDR`; unify `Metadata::mode()` across platforms.
   **Done (all four):**

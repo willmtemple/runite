@@ -101,6 +101,33 @@ pub enum TryRecvError {
     Closed,
 }
 
+impl<T> std::fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sending on a closed oneshot channel")
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+impl std::fmt::Display for RecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("receiving on a closed oneshot channel")
+    }
+}
+
+impl std::error::Error for RecvError {}
+
+impl std::fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryRecvError::Empty => f.write_str("oneshot channel is empty"),
+            TryRecvError::Closed => f.write_str("oneshot channel is closed"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
+
 impl<T: Send + 'static> Sender<T> {
     /// Sends `value` into the channel.
     ///
