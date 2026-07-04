@@ -16,13 +16,11 @@ for this repository. Include:
 - a minimal reproduction if possible, and
 - any suggested remediation.
 
-You can expect an acknowledgement within a few days. Once a fix is available we will
-coordinate a release and credit reporters who wish to be named.
+## Scope
 
-## Scope and context
-
-`runite` is a low-level async runtime that makes extensive use of `unsafe` to interact with
-io_uring (Linux) and kqueue (macOS). The most safety-critical area is the I/O
-buffer-ownership and cancellation model described in [ARCHITECTURE.md](./ARCHITECTURE.md);
-soundness reports against that model are especially valuable. Each `unsafe` block carries a
-`// SAFETY:` comment documenting the invariant it relies on.
+`runite` is an async runtime that makes extensive use of `unsafe` to interact
+with host-platform asynchronous I/O systems. The most safety-critical area is the
+I/O buffer-ownership and cancellation model described in
+[ARCHITECTURE.md](./ARCHITECTURE.md); soundness reports against that model are
+especially valuable. Each `unsafe` block carries a `// SAFETY:` comment
+documenting the invariant it relies on.

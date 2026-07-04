@@ -70,11 +70,13 @@ The timer is deliberately a *standard* waitable timer: timers created with
 (`SetWaitableTimer` fails with `ERROR_INVALID_PARAMETER`). Expiry precision is therefore
 bounded by the system interrupt period (~15.6 ms worst case), matching mainstream Windows
 runtimes; marrying the high-resolution timer kind to the port via
-`NtAssociateWaitCompletionPacket` is a possible future refinement, tracked in the roadmap.
+`NtAssociateWaitCompletionPacket` is a possible future refinement, tracked in the project's
+GitHub issues.
 
 ## Operation submission and buffer ownership
 
-The Linux "option A" staging rules carry over unchanged, and Windows makes them mandatory:
+The Linux staging rules (the buffer-ownership model in `ARCHITECTURE.md`) carry over
+unchanged, and Windows makes them mandatory:
 the kernel writes into the `WSABUF`/`ReadFile` buffer until the completion packet arrives,
 so the buffer must be runtime-owned and pinned for the life of the operation.
 
