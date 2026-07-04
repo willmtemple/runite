@@ -380,6 +380,12 @@ impl<T: Clone + Send + 'static> Receiver<T> {
     /// runite::run();
     /// ```
     ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe: dropping the returned future before it resolves does not
+    /// consume a message or advance the receiver's position, so a later `recv`
+    /// observes the same next value.
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.

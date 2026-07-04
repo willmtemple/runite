@@ -470,6 +470,13 @@ impl TcpStream {
     /// than requested. A return value of `0` indicates EOF when `buf` is not
     /// empty. If a configured read timeout expires, the error kind is
     /// [`io::ErrorKind::TimedOut`].
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel-safe. If the returned future is dropped before it
+    /// resolves, bytes that the in-flight read already received are retained on
+    /// the stream and returned by the next read, so no data is lost — it is safe
+    /// to use in a `select!`.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Delegate to the AsyncRead path so the in-flight recv is stashed on the
         // stream: dropping this future retains the operation (cancel-safe — a
@@ -499,6 +506,14 @@ impl TcpStream {
     /// write timeout expires, the error kind is [`io::ErrorKind::TimedOut`]; use
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is **not** cancel-safe. Because the write is completion-based,
+    /// a future dropped mid-flight may have already committed bytes to the
+    /// kernel without reporting the count, and re-polling with a *different*
+    /// buffer afterward is rejected. Drive a write to completion (or use the same
+    /// buffer) rather than cancelling it in a `select!`.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Delegate to the AsyncWrite path so the in-flight send is stashed on the
         // stream and the buffer-identity guard applies uniformly across the

@@ -432,6 +432,12 @@ impl<T: Send + 'static> Receiver<T> {
     /// runite::run();
     /// ```
     ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe: dropping the returned future before it resolves does not
+    /// advance the receiver's observed version, so a later `changed` still
+    /// reports the pending change.
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.

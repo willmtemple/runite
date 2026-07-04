@@ -273,6 +273,12 @@ where
 /// If the wrapped future and the sleeper are both ready in the same poll,
 /// `future` wins: it is polled first and the result is `Ok(output)`.
 ///
+/// # Cancel safety
+///
+/// `timeout` is as cancel-safe as the `future` it wraps: dropping the `timeout`
+/// future drops the inner future and cancels the timer, so it inherits whatever
+/// cancel-safety `future` has. It does not add or remove data on cancellation.
+///
 /// # Examples
 ///
 /// ```
