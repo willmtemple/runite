@@ -5,11 +5,12 @@
 //! for Unix-specific runtime integration such as graceful shutdown hooks,
 //! reconfiguration on `SIGHUP`, or terminal UI redraws after `SIGWINCH`.
 //!
-//! This implementation deliberately uses a dedicated blocking-pool reader task
-//! instead of a per-runtime-thread microtask drain. Signals are process-global,
-//! so one async-signal-safe handler writes to one process-wide wake fd, and the
-//! reader forwards observed signal kinds on a best-effort basis to live runtime
-//! threads that have constructed a [`Signal`]. Forwarding uses
+//! This implementation deliberately uses one dedicated OS reader thread
+//! (`runite-signal`) instead of a per-runtime-thread drain. Signals are
+//! process-global, so one async-signal-safe handler writes to one process-wide
+//! wake fd, and the reader thread forwards observed signal kinds on a
+//! best-effort basis to live runtime threads that have constructed a
+//! [`Signal`]. Forwarding uses
 //! [`crate::ThreadHandle::queue_macrotask`]; if a target thread is closed or its
 //! queue is full, that wake is dropped. Repeated calls to [`signal`] share the
 //! same process-wide signal handler and create independent per-thread stream
@@ -678,7 +679,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore]
     fn signal_receives_sigusr1_linux() {
         use std::sync::{Arc, Mutex};
 
