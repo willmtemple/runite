@@ -161,10 +161,30 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   test asserts the notifier's dup fd stays valid after the target driver drops (fails
   on the old bare-`RawFd` copy); macOS cross-checked with
   `cargo check/clippy --target aarch64-apple-darwin`.
-- [ ] **2.5 io_uring robustness cluster.** Check CQ-overflow flags / `FEAT_NODROP`; honor
+- [x] **2.5 io_uring robustness cluster.** Check CQ-overflow flags / `FEAT_NODROP`; honor
   partial-submission return; log/ handle MSG_RING failure CQEs (kernel <5.18 has no
   cross-thread wake); drain the global fallback submitter CQ; give `TIMEOUT_UPDATE` a real
-  token + pre-5.11 remove/re-add fallback.
+  token + pre-5.11 remove/re-add fallback. **Done (most):**
+  - **CQ overflow / FEAT_NODROP:** map the CQ `overflow` counter and check it after each
+    drain; warn once per new overflow event (NODROP → backpressure/undersized-ring), error
+    if the kernel lacks `FEAT_NODROP` (dropped CQEs → possible hangs). Warn at startup if
+    `FEAT_NODROP` is missing.
+  - **MSG_RING unsupported:** warn at ring creation if `IORING_OP_MSG_RING` is unsupported
+    (<5.18), so a runtime whose cross-thread wakes will silently never arrive is flagged
+    instead of hanging mysteriously.
+  - **Global fallback submitter CQ:** `with_submitter` now drains the global ring's CQ
+    after each use (nobody else polls it), preventing lifetime CQ overflow, and logs any
+    failure CQE — which for the fallback ring means a cross-thread MSG_RING wake failed
+    (covers "log/handle MSG_RING failure CQEs").
+  - **TIMEOUT_UPDATE token:** the update SQE now carries a real, decodable completion token
+    and `IOSQE_CQE_SKIP_SUCCESS` (matching `submit_timeout_remove`) instead of leaving
+    `user_data` at 0 and emitting an unattributable token-0 CQE.
+  **Deferred:** partial-submission handling (roll back only the un-consumed suffix, keep
+  accepted ops alive) → folded into **P-1** batched submission as the plan already notes
+  (the current immediate-submit design makes the 0.2 all-or-nothing rollback sound). The
+  pre-5.11 `TIMEOUT_UPDATE` remove/re-add fallback is unnecessary at the documented kernel
+  floor (5.11 < the 5.18 multi-thread floor and `TIMEOUT_UPDATE` sits above the 5.6 base;
+  recommended floor is 6.1), so it is left out with this note.
 - [x] **2.6 `IORING_OP_SOCKET` flags in wrong SQE field.** `sys/linux/net.rs:89-99`.
   `sqe.off = (type | flags); sqe.op_flags = 0`. **Done:** the socket-creation flags
   (`SOCK_CLOEXEC`/`SOCK_NONBLOCK`) now OR into the type field (`sqe.off`), matching

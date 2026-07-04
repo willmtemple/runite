@@ -228,7 +228,11 @@ impl Driver {
         );
         match (self.active_timer_token.get(), deadline) {
             (Some(active), Some(deadline)) => {
-                self.ring.submit_timeout_update(active, deadline)?;
+                self.ring.submit_timeout_update(
+                    active,
+                    deadline,
+                    self.next_token(CompletionKind::TimerRemove),
+                )?;
             }
             (Some(active), None) => {
                 self.active_timer_token.set(None);
