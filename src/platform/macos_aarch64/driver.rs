@@ -186,9 +186,12 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
 /// (`F_SETNOSIGPIPE`) so a write to a fully-closed pipe returns `EPIPE` rather
 /// than raising a signal.
 fn dup_nosigpipe_cloexec(fd: RawFd) -> io::Result<OwnedFd> {
-    // `F_SETNOSIGPIPE` (Darwin `fcntl` command 105) is not re-exported by the
-    // pinned `libc`; define it locally.
-    const F_SETNOSIGPIPE: libc::c_int = 105;
+    // `F_SETNOSIGPIPE` (Darwin `fcntl` command 73, per XNU `bsd/sys/fcntl.h`)
+    // is not re-exported by the pinned `libc`; define it locally. An earlier
+    // draft used a wrong command number here, which made this fcntl — and
+    // therefore every macOS driver creation — fail at runtime while passing
+    // compile-only cross-checks; the macOS CI test job is what catches this.
+    const F_SETNOSIGPIPE: libc::c_int = 73;
 
     let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
     // SAFETY: `duplicated` is a fresh, exclusively-owned fd from
