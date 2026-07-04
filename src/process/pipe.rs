@@ -43,27 +43,27 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use crate::io::{AsyncRead, AsyncWrite};
+use crate::sys::handle::{OwnedFile, RawFile, raw_file};
 
 type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 
 #[derive(Debug)]
 pub(crate) struct Pipe {
-    fd: Option<OwnedFd>,
+    fd: Option<OwnedFile>,
 }
 
 impl Pipe {
-    pub(crate) fn new(fd: OwnedFd) -> Self {
+    pub(crate) fn new(fd: OwnedFile) -> Self {
         Self { fd: Some(fd) }
     }
 
-    fn raw_fd(&self) -> io::Result<RawFd> {
+    fn raw_fd(&self) -> io::Result<RawFile> {
         self.fd
             .as_ref()
-            .map(AsRawFd::as_raw_fd)
+            .map(raw_file)
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "pipe is closed"))
     }
 

@@ -32,7 +32,10 @@ async fn symlink_metadata_does_not_follow() {
     let link_meta = runite::fs::symlink_metadata(&link)
         .await
         .expect("symlink_metadata");
-    assert!(link_meta.is_symlink(), "symlink_metadata should see the link");
+    assert!(
+        link_meta.is_symlink(),
+        "symlink_metadata should see the link"
+    );
     assert!(!link_meta.is_file());
 
     std::fs::remove_dir_all(&dir).expect("cleanup");

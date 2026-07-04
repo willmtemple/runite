@@ -58,7 +58,8 @@ fn blocking_task_panic_resolves_to_panicked() {
             .expect_err("a panicking blocking task must not yield a value");
 
         // The pool worker survived: another blocking job still runs.
-        let follow_up = runite::spawn_blocking(|| 11u32).expect("second blocking task should queue");
+        let follow_up =
+            runite::spawn_blocking(|| 11u32).expect("second blocking task should queue");
         let value = follow_up
             .await
             .expect("follow-up blocking task should complete");

@@ -477,6 +477,26 @@ artificially fence off hyper server and http2.
   through `RuniteExecutor`, and http1 over a `UnixStream::pair`. Public API snapshot
   updated (+`hyper_rt` module).
 
+- [x] **W-1 Merge the Windows IOCP backend (`origin/windows`).** Merged the port
+  (one completion port per runtime thread; overlapped file/socket/pipe I/O;
+  `CancelIoEx` drop-cancellation; waitable-timer APC timers; console-event signals;
+  `AsHandle`/`AsSocket` interop; `docs/WINDOWS.md`) into this branch and integrated it
+  with the post-fork work. Conflict resolutions: kept the dead-code deletions (their
+  branch predated them — `Close` variants and `ExecutionPath` stay gone; their new
+  `MSG_PEEK` re-export kept); merged docs.rs metadata (three targets + our
+  `docsrs` args); took our rewritten CHANGELOG/ROADMAP/ARCHITECTURE and ported their
+  Windows content into the new structure (4-column parity matrix with our corrected
+  close/set_len cells; Windows driver/cancellation/subprocess/glossary notes; ROADMAP
+  Windows follow-ups replacing the now-shipped "Windows backend" item). Integration:
+  gated the H-2 UDS hyper test `#[cfg(unix)]`; verified `hyper_rt` + hyper
+  server/http2 check clean on the IOCP transport. Validation: full Linux suite,
+  Linux/macOS/Windows clippy all clean (`x86_64-pc-windows-msvc` via rustup
+  cross-target), docs `-D warnings`, all 14 examples, fmt, API snapshot regenerated
+  (note: the snapshot is rendered on Linux, so Windows-only API under
+  `cfg(windows)` — `runite::os::windows`, `signal::windows`, handle interop — does
+  not appear in it). CI now carries both sides: our default-features/api-drift/example
+  gates plus their `test-windows` and Windows-MSRV jobs.
+
 ## Performance (0.1-eligible)
 
 - [ ] **P-1 Batched/deferred submission** (also fixes 0.2). Flush once per turn via

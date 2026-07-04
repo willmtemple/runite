@@ -17,13 +17,13 @@ use syn::{Error, ItemFn, LitStr, Path, Token, parse_macro_input, parse_quote};
 /// Marks `fn main` as the runite entry point.
 ///
 /// Works for both synchronous and `async` entry points. An `async fn main` has
-/// its future driven to completion with [`runite::block_on`], so the program
+/// its future driven to completion with `runite::block_on`, so the program
 /// ends when `main`'s future resolves (like `std`'s `main`, any still-running
 /// background tasks are abandoned) and the function's return value is honored:
 /// an `async fn main() -> Result<…>` that returns `Err` reports a non-zero exit
 /// status through [`std::process::Termination`], instead of silently exiting 0.
 /// A synchronous `fn main` runs its body, drives the event loop to drain any
-/// tasks it spawned via [`runite::run`], then returns its value.
+/// tasks it spawned via `runite::run`, then returns its value.
 ///
 /// To use a renamed `runite` dependency, pass the path:
 /// `#[runite::main(crate = "my_runite")]`.
@@ -35,7 +35,7 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Marks an `async fn` as a runite-driven test.
 ///
 /// Generates a `#[test]` wrapper that drives the test's future to completion
-/// with [`runite::block_on`]. The test function may return anything that
+/// with `runite::block_on`. The test function may return anything that
 /// implements [`std::process::Termination`] (for example `Result<(), E>` so the
 /// body can use `?`). Test attributes such as `#[ignore]` and `#[should_panic]`
 /// placed below `#[runite::test]` are forwarded to the generated test.

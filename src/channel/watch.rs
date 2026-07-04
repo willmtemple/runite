@@ -211,7 +211,9 @@ impl Book {
 
 impl<T: Send + 'static> Shared<T> {
     fn lock_book(&self) -> std::sync::MutexGuard<'_, Book> {
-        self.book.lock().expect("watch state should not be poisoned")
+        self.book
+            .lock()
+            .expect("watch state should not be poisoned")
     }
 
     /// Replaces the value via `mutate` and bumps the version, both under the

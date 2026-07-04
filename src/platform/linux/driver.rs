@@ -644,7 +644,10 @@ mod tests {
         // notify() short-circuits on the closed flag rather than submitting to
         // a stale/recycled fd.
         assert_eq!(
-            notifier.notify().expect_err("notify after drop should fail").kind(),
+            notifier
+                .notify()
+                .expect_err("notify after drop should fail")
+                .kind(),
             io::ErrorKind::BrokenPipe,
         );
     }

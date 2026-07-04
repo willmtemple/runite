@@ -114,6 +114,47 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  test-windows:
+    name: Test (Windows x86_64, IOCP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Install only the pinned Rust: the other mise tools (cop, cargo-public-api)
+      # run in the Linux lint job, and skipping them keeps Windows provisioning
+      # fast. rust-toolchain.toml pins the same toolchain for rustup either way.
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v4
+        with:
+          install_args: rust
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Ensure rust components
+        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
+        shell: bash
+      # The subprocess tests and examples spawn Git-style shell utilities
+      # (`sh`, `cat`, `true`, `false`), which GitHub's Windows images provide
+      # via Git Bash. Fail fast with a clear message if an image change ever
+      # drops them from PATH, rather than failing deep inside a test.
+      # `where.exe` (not bash's `command -v`, which would report shell
+      # builtins for `true`/`false`) resolves real executables the way
+      # `std::process::Command` does.
+      - name: Verify shell utilities for subprocess tests
+        run: where.exe sh cat true false
+        shell: bash
+      - name: Build
+        run: cargo build --workspace --all-targets --all-features
+      # Clippy and docs run per-OS here because the Windows-only code and its
+      # public documentation (sys/windows, platform/windows, signal/windows,
+      # os/windows) are invisible to the Linux lint job's cfg.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features
+
   msrv:
     name: MSRV (Rust 1.88)
     runs-on: ubuntu-latest
@@ -124,11 +165,18 @@ jobs:
       # used language/library feature that raises the real MSRV fails here instead
       # of silently invalidating the published `rust-version`.
       - name: Install Rust 1.88.0
-        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup target add x86_64-pc-windows-msvc --toolchain 1.88.0
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Check on MSRV
         run: cargo +1.88.0 check --workspace --all-features
+      # The Windows backend is cfg'd out of the host check above; a cross-target
+      # `cargo check` (no linking, so no MSVC toolchain needed) keeps its MSRV
+      # honest from Linux.
+      - name: Check on MSRV (Windows target)
+        run: cargo +1.88.0 check --workspace --all-features --target x86_64-pc-windows-msvc
 
   deny:
     name: Licenses & advisories

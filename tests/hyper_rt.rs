@@ -14,7 +14,9 @@ use runite::io::AsyncReadExt;
 use runite::net::{TcpListener, TcpStream};
 
 async fn hello(_req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(Response::new(Full::new(Bytes::from_static(b"hello from runite"))))
+    Ok(Response::new(Full::new(Bytes::from_static(
+        b"hello from runite",
+    ))))
 }
 
 /// An http1 hyper *server* on runite, with `header_read_timeout` configured —
@@ -43,7 +45,10 @@ async fn http1_server_with_timer_serves_request() {
         .await
         .expect("write request");
     let mut response = Vec::new();
-    client.read_to_end(&mut response).await.expect("read response");
+    client
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
     let response = String::from_utf8_lossy(&response);
 
     assert!(response.starts_with("HTTP/1.1 200 OK"), "got: {response}");
@@ -100,7 +105,8 @@ async fn http2_client_server_round_trip() {
 
 /// HTTP over a Unix-domain socket (release plan H-2): hyper http1 server on
 /// one end of a `UnixStream::pair`, hyper http1 client on the other — the
-/// Docker-socket / local-RPC shape.
+/// Docker-socket / local-RPC shape. (`net::unix` is Unix-only.)
+#[cfg(unix)]
 #[runite::test]
 async fn http1_over_unix_stream() {
     let (server_io, client_io) = runite::net::unix::UnixStream::pair().expect("pair");
@@ -129,7 +135,12 @@ async fn http1_over_unix_stream() {
         .expect("request");
     let response = sender.send_request(request).await.expect("send request");
     assert_eq!(response.status(), 200);
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     assert_eq!(&body[..], b"hello from runite");
 
     server.await.expect("server task");

@@ -99,8 +99,9 @@ impl FutureTask {
         // rather than hung. `AssertUnwindSafe` is sound because on unwind the
         // future is dropped (never polled again) and the only other state
         // touched — `TaskShared` — is moved to a terminal `Panicked` state.
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(&mut context)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future.as_mut().poll(&mut context)
+        }));
         match outcome {
             Ok(Poll::Ready(())) => {
                 // The task is done; drop it from the registry so its `Rc` is
@@ -158,7 +159,12 @@ impl TaskWaker {
         // `Arc::into_raw`/`Arc::from_raw`, preserving the strong count, and
         // every operation it performs is thread-safe (atomic refcounting,
         // atomic `scheduled`, and `ThreadHandle` which is `Send + Sync`).
-        unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(data).cast::<()>(), &TASK_WAKER_VTABLE)) }
+        unsafe {
+            Waker::from_raw(RawWaker::new(
+                Arc::into_raw(data).cast::<()>(),
+                &TASK_WAKER_VTABLE,
+            ))
+        }
     }
 
     fn wake(self: &Arc<Self>) {

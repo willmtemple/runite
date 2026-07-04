@@ -7,7 +7,7 @@ name = "runite"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "An event-loop-per-thread async runtime built on io_uring (Linux) and kqueue (macOS)"
+description = "An event-loop-per-thread async runtime built on io_uring (Linux), kqueue (macOS), and IOCP (Windows)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/willmtemple/runite"
 homepage = "https://github.com/willmtemple/runite"
@@ -35,7 +35,11 @@ exclude = [
 
 [package.metadata.docs.rs]
 all-features = true
-targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
 # docs.rs builds with nightly; --cfg docsrs enables doc_auto_cfg so every
 # feature-gated item is badged with its required feature in the rendered docs.
 rustdoc-args = ["--cfg", "docsrs"]
@@ -53,9 +57,24 @@ hyper = { version = "1.8", default-features = false, features = [
   "http1",
   "http2",
 ], optional = true }
-libc = "0.2"
 runite-proc-macros = { package = "runite-proc-macros", version = "=0.1.0", path = "./proc_macros" }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_IO",
+  "Win32_System_Performance",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 bytes = "1"

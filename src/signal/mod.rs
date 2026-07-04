@@ -2,8 +2,9 @@
 //!
 //! This module lets runtime tasks wait for process signals without blocking the
 //! thread-local event loop. [`ctrl_c`] is the portable entry point for shutdown
-//! handling, while [`unix`] exposes streams for specific Unix signal kinds such
-//! as terminal resize notifications.
+//! handling; the platform submodule (`unix` or `windows`) exposes streams for
+//! specific event kinds, such as terminal resize notifications on Unix or
+//! console close events on Windows.
 //!
 //! POSIX signals are process-global, while this runtime is thread-local and
 //! supports `!Send` futures. The Unix backend therefore uses one process-wide
@@ -39,13 +40,16 @@
 //! runite::run();
 //! ```
 
+#[cfg(unix)]
 pub mod unix;
+#[cfg(windows)]
+pub mod windows;
 
 /// Awaits a single Ctrl-C interrupt request.
 ///
-/// This is a convenience wrapper around
-/// [`unix::signal(unix::SignalKind::Interrupt)`](unix::signal). It completes
-/// once and then drops its signal stream.
+/// This is the portable shutdown-signal entry point: on Unix it wraps
+/// `unix::signal(unix::SignalKind::Interrupt)`, and on Windows it wraps
+/// `windows::ctrl_c`. It completes once and then drops its signal stream.
 ///
 /// # Examples
 ///
@@ -60,7 +64,15 @@ pub mod unix;
 /// runite::run();
 /// ```
 pub async fn ctrl_c() -> std::io::Result<()> {
-    let mut signal = unix::signal(unix::SignalKind::Interrupt)?;
-    signal.recv().await;
+    #[cfg(unix)]
+    {
+        let mut signal = unix::signal(unix::SignalKind::Interrupt)?;
+        signal.recv().await;
+    }
+    #[cfg(windows)]
+    {
+        let mut interrupts = windows::ctrl_c()?;
+        interrupts.recv().await;
+    }
     Ok(())
 }
