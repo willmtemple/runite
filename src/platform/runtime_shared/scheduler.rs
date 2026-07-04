@@ -407,7 +407,7 @@ pub fn run<R: Runtime>() {
     loop {
         drain_all::<R>();
 
-        drain_microtasks();
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -512,7 +512,7 @@ pub fn run_until_stalled<R: Runtime>() {
     loop {
         drain_all::<R>();
 
-        drain_microtasks();
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -545,7 +545,7 @@ pub fn run_ready_tasks<R: Runtime>() {
         drain_remote_tasks::<R>();
         drain_completed_workers::<R>();
 
-        drain_microtasks();
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -607,7 +607,7 @@ pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
         // probe: `block_on` exits on the future, not on loop quiescence.
         drain_all::<R>();
 
-        drain_microtasks();
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -656,27 +656,56 @@ impl Wake for BlockOnWaker {
 
 // -- Internal scheduler primitives ------------------------------------------
 
-/// Runs the microtask queue to exhaustion (one checkpoint), warning the moment
-/// a single checkpoint crosses the starvation threshold.
+/// Runs the microtask queue to exhaustion (one checkpoint), warning if the
+/// checkpoint crosses the starvation threshold while a macrotask is actually
+/// waiting to run.
 ///
-/// The warning fires from *inside* the loop, once, on crossing: a checkpoint
-/// that never empties — a task chain that keeps scheduling new microtasks
-/// without ever yielding to a macro turn, the exact pathology this warning
-/// exists to flag — would never reach an after-the-loop check at all.
-fn drain_microtasks() {
+/// The warning fires from *inside* the loop, at most once per checkpoint: a
+/// checkpoint that never empties — a task chain that keeps scheduling new
+/// microtasks without ever yielding to a macro turn, the exact pathology this
+/// warning exists to flag — would never reach an after-the-loop check at all.
+/// A long checkpoint with nothing queued behind it starves no one, so the
+/// waiting-macrotask condition is re-checked at each threshold multiple rather
+/// than warning on count alone.
+fn drain_microtasks<R: Runtime>() {
     let mut microtasks_run: u64 = 0;
+    let mut warned = false;
     while let Some(task) = pop_microtask() {
         run_guarded(task);
         microtasks_run += 1;
-        if microtasks_run == MICROTASK_STARVATION_THRESHOLD {
+        if !warned
+            && microtasks_run.is_multiple_of(MICROTASK_STARVATION_THRESHOLD)
+            && macrotask_waiting::<R>()
+        {
+            warned = true;
             tracing::warn!(
                 target: trace_targets::SCHEDULER,
                 event = "microtask_starvation",
                 threshold = MICROTASK_STARVATION_THRESHOLD,
-                "a single microtask checkpoint has run {MICROTASK_STARVATION_THRESHOLD} tasks without yielding; macrotask handlers (timers, I/O) are being starved",
+                microtasks_run,
+                "a single microtask checkpoint has run {microtasks_run} tasks without yielding while macrotasks (timers, I/O, cross-thread work) are waiting; macrotask handlers are being starved",
             );
         }
     }
+}
+
+/// Returns whether a macrotask is waiting to run on this thread: a queued
+/// local or remote macrotask, or a timer whose deadline has already passed.
+///
+/// I/O completions parked in the driver are invisible without polling it —
+/// which the scheduler deliberately does only once per turn — so they do not
+/// count here.
+fn macrotask_waiting<R: Runtime>() -> bool {
+    let now = deadline_from_now::<R>(Duration::ZERO);
+    with_installed_thread(|state| {
+        !state.local_macrotasks.borrow().is_empty()
+            || state
+                .timers
+                .borrow()
+                .peek_deadline()
+                .is_some_and(|deadline| deadline <= now)
+            || !lock_queue(&state.shared.remote_macrotasks).is_empty()
+    })
 }
 
 /// Runs one scheduled unit of work (a macrotask or microtask closure) with a
