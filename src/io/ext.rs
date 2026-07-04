@@ -537,6 +537,7 @@ where
 }
 
 /// Future returned by [`AsyncReadExt::read`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Read<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
@@ -552,6 +553,7 @@ impl<R: AsyncRead + Unpin + ?Sized> Future for Read<'_, R> {
 }
 
 /// Future returned by [`AsyncReadExt::read_exact`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct ReadExact<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
@@ -582,6 +584,7 @@ impl<R: AsyncRead + Unpin + ?Sized> Future for ReadExact<'_, R> {
 }
 
 /// Future returned by [`AsyncReadExt::read_to_end`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct ReadToEnd<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut Vec<u8>,
@@ -614,6 +617,7 @@ impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToEnd<'_, R> {
 }
 
 /// Future returned by [`AsyncWriteExt::write`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Write<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
@@ -629,6 +633,7 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Write<'_, W> {
 }
 
 /// Future returned by [`AsyncWriteExt::write_all`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct WriteAll<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
@@ -704,6 +709,7 @@ enum CopyState {
 /// });
 /// runite::run();
 /// ```
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     reader: &'a mut R,
     writer: &'a mut W,
@@ -892,6 +898,7 @@ where
 /// });
 /// runite::run();
 /// ```
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
@@ -934,6 +941,7 @@ where
 }
 
 /// Future returned by [`AsyncWriteExt::flush`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Flush<'a, W: ?Sized> {
     writer: &'a mut W,
 }
@@ -947,6 +955,7 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Flush<'_, W> {
 }
 
 /// Future returned by [`AsyncWriteExt::close`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Close<'a, W: ?Sized> {
     writer: &'a mut W,
 }
@@ -964,6 +973,7 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Close<'_, W> {
 /// Each item is an [`io::Result<String>`]. A trailing `\n` is removed from each
 /// yielded line; if the input uses CRLF, the preceding `\r` remains in the
 /// string. Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
+#[must_use = "streams do nothing unless polled"]
 pub struct Lines<R> {
     reader: R,
     buf: Vec<u8>,

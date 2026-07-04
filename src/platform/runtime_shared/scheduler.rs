@@ -6,12 +6,13 @@
 //! turbofish.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
@@ -20,8 +21,8 @@ use super::handles::{
     IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
 };
 use super::state::{
-    ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, install_thread,
-    lock_queue, teardown_thread, try_with_installed_thread, with_current_thread,
+    ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, describe_panic,
+    install_thread, lock_queue, teardown_thread, try_with_installed_thread, with_current_thread,
     with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
@@ -268,23 +269,38 @@ where
         event = "queue_future",
         "queueing local future"
     );
-    // Force thread-state lazy-init before constructing the task, so the
+    // Force thread-state lazy-init before constructing the task (so the
     // waker's `with_installed_thread` precondition holds before any wake can
-    // fire.
-    with_current_thread::<R, _>(|_| {});
+    // fire), and allocate this task's registry id and an owner handle for its
+    // `Send + Sync` waker.
+    let (id, owner) = with_current_thread::<R, _>(|state| {
+        let id = state.next_task_id.get();
+        state
+            .next_task_id
+            .set(id.checked_add(1).expect("task ID space exhausted"));
+        (id, state.handle())
+    });
 
     let shared = Rc::new(TaskShared::new());
     let state = Rc::new(JoinState::new(Rc::clone(&shared)));
     let completion = Rc::clone(&state);
-    let task = Rc::new(FutureTask {
-        future: RefCell::new(Some(Box::pin(async move {
+    let task = FutureTask::new(
+        Box::pin(async move {
             let output = future.await;
             completion.complete(output);
-        }))),
-        queued: Cell::new(false),
-        shared: Rc::clone(&shared),
-    });
+        }),
+        Rc::clone(&shared),
+        id,
+        owner,
+    );
     shared.set_task(&task);
+
+    // Register before scheduling so a wake fired during the first poll can find
+    // the task; the registry holds the runtime's strong reference until the
+    // task completes or is aborted.
+    with_current_thread::<R, _>(|state| {
+        state.tasks.borrow_mut().insert(id, Rc::clone(&task));
+    });
 
     task.schedule();
 
@@ -330,9 +346,26 @@ where
     std::thread::Builder::new()
         .name("runite-worker".into())
         .spawn(move || {
-            install_thread(shared, driver, Some(worker_completion));
-            queue_task::<R, _>(initial_task);
-            run::<R>();
+            // Retain a handle to the completion so the parent can be released
+            // even if the worker unwinds before `run()` reaches its clean exit.
+            let panic_completion = Arc::clone(&worker_completion);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                install_thread(shared, driver, Some(worker_completion));
+                queue_task::<R, _>(initial_task);
+                run::<R>();
+            }));
+            if outcome.is_err() {
+                // A panic escaped the worker's event loop or its setup — a
+                // runtime-invariant violation, since user-task panics are
+                // already isolated inside `run()`. Because `run()` could not
+                // perform its clean exit, mark the completion finished and wake
+                // the parent here so it does not hang forever waiting on a dead
+                // child. The child thread's driver state may leak, which is
+                // acceptable for an already-fatal condition; the panic itself
+                // is reported through the process panic hook.
+                panic_completion.finished.store(true, Ordering::Release);
+                panic_completion.parent_event.shared.notify();
+            }
         })
         .expect("worker thread should spawn");
 
@@ -369,26 +402,15 @@ pub fn run<R: Runtime>() {
         "entering runtime event loop"
     );
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_all::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            task();
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -402,12 +424,14 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
+        // From here `closing` is `true`. This guard restores it to `false` on
+        // any early exit from the shutdown-probe region below — including a
+        // panic unwind — and is disarmed only once we commit to exiting.
+        let mut closing_reset = ClosingResetGuard::new();
+
         drain_all::<R>();
 
         if has_ready_work() {
-            with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
-            });
             continue;
         }
 
@@ -450,11 +474,14 @@ pub fn run<R: Runtime>() {
         });
 
         if !committed {
-            with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
-            });
+            // A remote task snuck in after the probe above; `closing_reset`
+            // restores the flag as this iteration unwinds back to the top.
             continue;
         }
+
+        // Committed to exit: `closed` is now set under the queue lock, so the
+        // `closing` flag is no longer meaningful and the guard is disarmed.
+        closing_reset.disarm();
 
         if let Some(completion) = worker_completion {
             completion.finished.store(true, Ordering::Release);
@@ -480,26 +507,15 @@ pub fn run<R: Runtime>() {
 /// need to re-enter the scheduler while an outer platform loop remains active.
 pub fn run_until_stalled<R: Runtime>() {
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_all::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            task();
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -523,27 +539,16 @@ pub fn run_until_stalled<R: Runtime>() {
 /// from inside a host callback without re-entering timer callbacks.
 pub fn run_ready_tasks<R: Runtime>() {
     with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_remote_tasks::<R>();
         drain_completed_workers::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            task();
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks::<R>();
 
         if let Some(task) = pop_macrotask::<R>() {
-            task();
+            run_guarded(task);
             continue;
         }
 
@@ -561,7 +566,243 @@ pub fn run_ready_tasks<R: Runtime>() {
     }
 }
 
+/// Drives the current thread's event loop until `future` resolves, then returns
+/// its output.
+///
+/// Unlike [`run`], which runs until the loop is fully idle, `block_on` returns
+/// as soon as the supplied future completes; any other tasks still queued on the
+/// thread are left in place for a later `run`/`block_on`. The future is driven in
+/// place (not spawned), so it may borrow local state and need not be `Send` or
+/// `'static`.
+///
+/// # Panics
+///
+/// Panics if runtime initialization fails, if the driver returns an unexpected
+/// error, or if called re-entrantly from within a task already running on this
+/// thread (see the reentrancy guard shared with [`run`]).
+pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
+    with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
+
+    let owner = with_installed_thread(|state| state.handle());
+    // `woken` starts true so the future is polled once before the loop parks.
+    let block_waker = Arc::new(BlockOnWaker {
+        woken: AtomicBool::new(true),
+        owner,
+    });
+    let waker = Waker::from(Arc::clone(&block_waker));
+    let mut context = Context::from_waker(&waker);
+
+    let mut future = core::pin::pin!(future);
+
+    loop {
+        // Poll the top-level future whenever it may have made progress.
+        if block_waker.woken.swap(false, Ordering::AcqRel)
+            && let Poll::Ready(output) = future.as_mut().poll(&mut context)
+        {
+            return output;
+        }
+
+        // Pump one turn of the loop, mirroring `run` minus the idle-shutdown
+        // probe: `block_on` exits on the future, not on loop quiescence.
+        drain_all::<R>();
+
+        drain_microtasks::<R>();
+
+        if let Some(task) = pop_macrotask::<R>() {
+            run_guarded(task);
+            continue;
+        }
+
+        drain_all::<R>();
+
+        // If the future was woken during draining, or there is more ready work,
+        // handle it before considering a blocking wait.
+        if block_waker.woken.load(Ordering::Acquire) || has_ready_work() {
+            continue;
+        }
+
+        // Nothing runnable and the future is pending: block for external events
+        // (I/O completions, timers, cross-thread wakes), then re-check.
+        with_installed_thread(|state| {
+            state.driver.wait().expect("driver wait should succeed");
+        });
+    }
+}
+
+/// Waker for the top-level [`block_on`] future. Marks that the future should be
+/// re-polled and, for a cross-thread wake, nudges the driver so a parked
+/// `block_on` loop wakes up.
+struct BlockOnWaker {
+    woken: AtomicBool,
+    owner: ThreadHandle,
+}
+
+impl Wake for BlockOnWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        // A same-thread wake happens while the loop is actively running (never
+        // parked in `driver.wait`), so the flag alone suffices. A cross-thread
+        // wake may find the loop parked; notify the driver to unblock it.
+        if !self.owner.is_current() {
+            self.owner.shared.notify();
+        }
+    }
+}
+
 // -- Internal scheduler primitives ------------------------------------------
+
+/// Runs the microtask queue to exhaustion (one checkpoint), warning if the
+/// checkpoint crosses the starvation threshold while a macrotask is actually
+/// waiting to run.
+///
+/// The warning fires from *inside* the loop, at most once per checkpoint: a
+/// checkpoint that never empties — a task chain that keeps scheduling new
+/// microtasks without ever yielding to a macro turn, the exact pathology this
+/// warning exists to flag — would never reach an after-the-loop check at all.
+/// A long checkpoint with nothing queued behind it starves no one, so the
+/// waiting-macrotask condition is re-checked at each threshold multiple rather
+/// than warning on count alone.
+fn drain_microtasks<R: Runtime>() {
+    let mut microtasks_run: u64 = 0;
+    let mut warned = false;
+    while let Some(task) = pop_microtask() {
+        run_guarded(task);
+        microtasks_run += 1;
+        if !warned
+            && microtasks_run.is_multiple_of(MICROTASK_STARVATION_THRESHOLD)
+            && macrotask_waiting::<R>()
+        {
+            warned = true;
+            tracing::warn!(
+                target: trace_targets::SCHEDULER,
+                event = "microtask_starvation",
+                threshold = MICROTASK_STARVATION_THRESHOLD,
+                microtasks_run,
+                "a single microtask checkpoint has run {microtasks_run} tasks without yielding while macrotasks (timers, I/O, cross-thread work) are waiting; macrotask handlers are being starved",
+            );
+        }
+    }
+}
+
+/// Returns whether a macrotask is waiting to run on this thread: a queued
+/// local or remote macrotask, or a timer whose deadline has already passed.
+///
+/// I/O completions parked in the driver are invisible without polling it —
+/// which the scheduler deliberately does only once per turn — so they do not
+/// count here.
+fn macrotask_waiting<R: Runtime>() -> bool {
+    let now = deadline_from_now::<R>(Duration::ZERO);
+    with_installed_thread(|state| {
+        !state.local_macrotasks.borrow().is_empty()
+            || state
+                .timers
+                .borrow()
+                .peek_deadline()
+                .is_some_and(|deadline| deadline <= now)
+            || !lock_queue(&state.shared.remote_macrotasks).is_empty()
+    })
+}
+
+/// Runs one scheduled unit of work (a macrotask or microtask closure) with a
+/// panic firewall.
+///
+/// A panic escaping a scheduled closure — a timer/interval callback, a
+/// `queue_task`/`queue_microtask` closure, a worker `on_exit` handler, or a
+/// task poll — is caught here so it cannot unwind the event loop and take down
+/// the runtime thread. Spawned-future polls additionally convert their panic
+/// into `JoinError::Panicked` inside `FutureTask::poll`, so by the time such a
+/// microtask reaches this guard it no longer panics; this is the backstop for
+/// every *other* scheduled closure. The panic is still surfaced through the
+/// process panic hook.
+fn run_guarded(task: LocalTask) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
+        tracing::error!(
+            target: trace_targets::SCHEDULER,
+            event = "scheduled_task_panicked",
+            panic = describe_panic(&*payload),
+            "scheduled task panicked; isolating panic to keep the event loop running",
+        );
+    }
+}
+
+/// RAII guard that marks the current thread as actively driving its event loop
+/// and clears the mark on drop.
+///
+/// Constructing it via [`enter`](Self::enter) panics if a driver loop is
+/// already running on this thread — that is, if [`run`], [`run_until_stalled`],
+/// or [`run_ready_tasks`] is (transitively) re-entered from inside a task poll
+/// or scheduled callback. Re-entry would drive the same microtask/macrotask
+/// queues from two stack frames at once and corrupt scheduling state, so it is
+/// rejected up front. The panic is subject to the per-task firewall, so a task
+/// that illegally re-enters resolves to `JoinError::Panicked` rather than
+/// taking down the outer loop.
+struct EventLoopGuard;
+
+impl EventLoopGuard {
+    fn enter() -> Self {
+        with_installed_thread(|state| {
+            assert!(
+                !state.in_event_loop.replace(true),
+                "runite: cannot re-enter the runtime event loop; `run`, \
+                 `run_until_stalled`, and `run_ready_tasks` must not be called from \
+                 within a task or callback already running on this runtime thread",
+            );
+        });
+        EventLoopGuard
+    }
+}
+
+impl Drop for EventLoopGuard {
+    fn drop(&mut self) {
+        // Best-effort: `run()` tears the thread state down before this guard
+        // drops on the normal exit path, so a missing state is expected.
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                state.in_event_loop.set(false);
+            }
+        });
+    }
+}
+
+/// Resets the current thread's `closing` flag on drop.
+///
+/// `run()` sets `closing` while it probes for an idle-shutdown opportunity. On
+/// every path that does not commit to exiting, the flag must return to `false`
+/// so the loop can be re-entered. This guard makes that reset happen even if a
+/// panic unwinds through the shutdown-probe region (belt-and-suspenders on top
+/// of the per-task firewall), and is disarmed only once the loop has committed
+/// to exit. Best-effort: a no-op if the thread state is already torn down.
+struct ClosingResetGuard {
+    armed: bool,
+}
+
+impl ClosingResetGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClosingResetGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                state.shared.closing.store(false, Ordering::Release);
+            }
+        });
+    }
+}
 
 /// Reap all external events into the local queues: poll the driver for I/O
 /// completions and expired timers, splice in cross-thread (remote) tasks, and
@@ -914,6 +1155,34 @@ mod tests {
 
         assert!(matches!(
             handle.queue_macrotask(|| {}),
+            Err(QueueError::Closed)
+        ));
+    }
+
+    #[test]
+    fn internal_wakes_bypass_remote_queue_capacity() {
+        let handle = handle_with_capacity(1);
+
+        // A user macrotask fills the queue to capacity; the next is rejected.
+        assert!(handle.queue_macrotask(|| {}).is_ok());
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Full)
+        ));
+
+        // Internal completion wakes are accepted even past capacity: dropping
+        // one would strand an awaiting future whose result is already stored.
+        assert!(handle.queue_internal_wake(|| {}).is_ok());
+        assert!(handle.queue_internal_wake(|| {}).is_ok());
+    }
+
+    #[test]
+    fn internal_wakes_still_reject_when_closed() {
+        let handle = handle_with_capacity(1);
+        handle.shared.closed.store(true, Ordering::Release);
+
+        assert!(matches!(
+            handle.queue_internal_wake(|| {}),
             Err(QueueError::Closed)
         ));
     }

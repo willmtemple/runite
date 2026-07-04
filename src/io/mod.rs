@@ -18,7 +18,8 @@
 //! The platform backend shapes what an I/O readiness point means. On Linux,
 //! runite submits completion-based operations to `io_uring`; on macOS
 //! aarch64, it waits for readiness through `kqueue` and then performs the
-//! nonblocking operation. Unlike Tokio's default multi-thread scheduler or
+//! nonblocking operation; on Windows, overlapped operations complete through
+//! the thread's I/O completion port. Unlike Tokio's default multi-thread scheduler or
 //! async-std, these traits make the current-thread assumption explicit and keep
 //! the poll surface small rather than requiring `Send` transports. Doctest
 //! examples use [`crate::spawn`] followed by [`crate::run`] to execute async work
@@ -66,10 +67,65 @@ mod traits;
 
 pub use buf::{BufReader, BufWriter};
 pub use ext::{
-    AsyncReadExt, AsyncWriteExt, Copy, CopyBidirectional, Lines, copy, copy_bidirectional,
+    AsyncReadExt, AsyncWriteExt, Close, Copy, CopyBidirectional, Flush, Lines, Read, ReadExact,
+    ReadToEnd, Write, WriteAll, copy, copy_bidirectional,
 };
 pub use stream::{Collect, Filter, ForEach, Map, Next, Skip, Stream, StreamExt, Take};
 pub use traits::{AsyncRead, AsyncWrite};
+
+/// FIFO buffer holding read bytes that overflowed a caller's slice.
+///
+/// The completion-based backends submit a read sized for the buffer of the
+/// *first* `poll_read`; if that read is later completed against a *smaller*
+/// buffer (because the read future was dropped and re-issued, or a different
+/// caller polled with a shorter slice), the surplus bytes must be kept rather
+/// than discarded. Concrete I/O types stash one of these (boxed, so the common
+/// no-overflow case is just a null pointer) and drain it before submitting a new
+/// read. A cursor avoids repeatedly shifting the backing `Vec` on small reads.
+pub(crate) struct ReadOverflow {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl ReadOverflow {
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        Self {
+            data: bytes.to_vec(),
+            pos: 0,
+        }
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
+    pub(crate) fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    /// Copies up to `buf.len()` buffered bytes into `buf`, returning the count.
+    pub(crate) fn drain_into(&mut self, buf: &mut [u8]) -> usize {
+        let n = buf.len().min(self.remaining());
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        n
+    }
+
+    /// Returns up to `max` buffered bytes from the front without consuming them.
+    /// Pair with [`advance`](Self::advance) for sinks that take a slice rather
+    /// than a `&mut [u8]` (e.g. Hyper's `ReadBufCursor`).
+    #[cfg(feature = "hyper")]
+    pub(crate) fn front(&self, max: usize) -> &[u8] {
+        let n = max.min(self.remaining());
+        &self.data[self.pos..self.pos + n]
+    }
+
+    /// Advances the drain cursor by `n` bytes.
+    #[cfg(feature = "hyper")]
+    pub(crate) fn advance(&mut self, n: usize) {
+        self.pos = (self.pos + n).min(self.data.len());
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -21,9 +21,11 @@
 //! On Linux, child-exit waits use pidfd readability followed by
 //! `waitpid`; runite does not rely on `SIGCHLD` for this path. On macOS aarch64,
 //! waits register `EVFILT_PROC` with kqueue and poll it after a 1ms runtime
-//! sleep. Both approaches fit runite's event-loop-per-thread model: futures and
-//! handles remain on their creating runtime thread, and completions wake that
-//! same thread rather than moving tasks to a work-stealing scheduler.
+//! sleep. On Windows, `RegisterWaitForSingleObject` parks the process handle on
+//! the OS wait-thread pool, which completes a runtime completion when the
+//! process exits. Each approach fits runite's event-loop-per-thread model:
+//! futures and handles remain on their creating runtime thread, and completions
+//! wake that same thread rather than moving tasks to a work-stealing scheduler.
 //!
 //! # Examples
 //!
@@ -77,7 +79,7 @@ pub(crate) mod pipe;
 mod status;
 
 pub use child::Child;
-pub use command::{Command, Stdio};
+pub use command::{Command, Output, Stdio};
 pub use pipe::{ChildStderr, ChildStdin, ChildStdout};
 pub use status::ExitStatus;
 
@@ -204,11 +206,18 @@ mod tests {
                 {
                     *observed_for_task.lock().unwrap() = Some(status.signal());
                 }
+                #[cfg(windows)]
+                {
+                    *observed_for_task.lock().unwrap() = Some(status.code());
+                }
             });
         });
 
         run();
         #[cfg(unix)]
         assert_eq!(*observed.lock().unwrap(), Some(Some(libc::SIGKILL)));
+        // `TerminateProcess` sets exit code 1; there is no signal concept.
+        #[cfg(windows)]
+        assert_eq!(*observed.lock().unwrap(), Some(Some(1)));
     }
 }

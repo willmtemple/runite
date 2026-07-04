@@ -5,12 +5,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
+use super::future_task::FutureTask;
 use super::handles::QueueError;
 use super::scheduler::Runtime;
 use super::timer::TimerHeap;
@@ -90,6 +92,19 @@ pub(crate) struct ThreadState {
     /// map is what makes `cancel_interval` work uniformly across both states.
     pub(crate) live_intervals: LiveIntervals,
     pub(crate) next_timer_id: Cell<usize>,
+    /// Registry of every live spawned task on this thread, keyed by task id.
+    /// This holds the runtime's strong reference to each `FutureTask` from
+    /// spawn until it completes or is aborted, so a `Send + Sync` waker can
+    /// reschedule a task by id without holding an `Rc` across threads (see
+    /// [`FutureTask`](super::future_task::FutureTask)). Ids are never reused, so
+    /// a wake for a completed task simply finds no entry.
+    pub(crate) tasks: RefCell<HashMap<u64, Rc<FutureTask>>>,
+    pub(crate) next_task_id: Cell<u64>,
+    /// `true` while one of the driver loops (`run`, `run_until_stalled`,
+    /// `run_ready_tasks`) is active on this thread. Used to detect and reject
+    /// re-entrant driver calls (e.g. calling `run()` from inside a task poll),
+    /// which would double-drive the same queues and corrupt scheduling state.
+    pub(crate) in_event_loop: Cell<bool>,
     pub(crate) children: RefCell<Vec<ChildWorker>>,
     /// Unique generation token issued by `NEXT_GENERATION` when this state was
     /// installed on this thread. Used to detect stale `TimeoutHandle` and
@@ -114,6 +129,9 @@ impl ThreadState {
             timers: RefCell::new(TimerHeap::new()),
             live_intervals: RefCell::new(HashMap::new()),
             next_timer_id: Cell::new(1),
+            tasks: RefCell::new(HashMap::new()),
+            next_task_id: Cell::new(1),
+            in_event_loop: Cell::new(false),
             children: RefCell::new(Vec::new()),
             generation,
         }
@@ -167,7 +185,29 @@ impl ThreadShared {
         }
     }
 
+    /// Enqueues a cross-thread **user** macrotask, applying the bounded-queue
+    /// capacity limit as backpressure. Returns [`QueueError::Full`] when the
+    /// queue is at capacity.
     pub(crate) fn enqueue_macro(&self, task: SendTask) -> Result<(), QueueError> {
+        self.enqueue(task, true)
+    }
+
+    /// Enqueues an internal cross-thread **wake** (an I/O/channel completion
+    /// wake, or a spawned-task waker firing from another thread), bypassing the
+    /// capacity limit.
+    ///
+    /// These must never be dropped for backpressure: a completion stores its
+    /// result *before* queueing the wake, and a task waker's wake is a task's
+    /// only scheduling signal, so a dropped wake strands the target forever.
+    /// Unlike user macrotasks, their count is naturally bounded — one pending
+    /// wake per in-flight operation or per live task (each coalesced by its own
+    /// scheduled flag) — so the queue cannot grow without a matching amount of
+    /// genuine outstanding work. Only a `closed` thread rejects.
+    pub(crate) fn enqueue_internal_wake(&self, task: SendTask) -> Result<(), QueueError> {
+        self.enqueue(task, false)
+    }
+
+    fn enqueue(&self, task: SendTask, enforce_capacity: bool) -> Result<(), QueueError> {
         // Check `closed` under the queue lock so that the exit path can
         // atomically set `closed` while holding the same lock, eliminating
         // the window where a task is accepted but then stranded at shutdown.
@@ -175,7 +215,7 @@ impl ThreadShared {
         if self.closed.load(Ordering::Acquire) {
             return Err(QueueError::Closed);
         }
-        if queue.len() >= self.remote_macrotasks.capacity {
+        if enforce_capacity && queue.len() >= self.remote_macrotasks.capacity {
             if !self
                 .remote_macrotasks
                 .warned_full
@@ -228,6 +268,20 @@ pub(crate) struct WorkerCompletion {
 
 pub(crate) fn lock_queue(queue: &RemoteQueue) -> MutexGuard<'_, VecDeque<SendTask>> {
     queue.inner.lock().expect("runtime queue poisoned")
+}
+
+/// Best-effort extraction of a human-readable message from a caught panic
+/// payload (the `Box<dyn Any + Send>` returned by [`std::panic::catch_unwind`]).
+/// The standard library uses `&'static str` for `panic!("literal")` and
+/// `String` for formatted panics; anything else is opaque.
+pub(crate) fn describe_panic(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "Box<dyn Any>"
+    }
 }
 
 fn remote_queue_capacity() -> usize {

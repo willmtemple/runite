@@ -123,7 +123,31 @@ fn worker_loop(receiver: Arc<Mutex<mpsc::Receiver<BlockingTask>>>) {
             guard.recv()
         };
         match task {
-            Ok(task) => task(),
+            Ok(task) => {
+                // Isolate the job's panic so it cannot unwind out of the worker
+                // loop and silently retire a pool thread. Losing workers one
+                // panic at a time would shrink pool capacity until
+                // `spawn_blocking` starts failing. `spawn_blocking` itself
+                // converts a caught panic into `JoinError::Panicked` for the
+                // awaiter; this is the backstop for every internal caller (fs,
+                // dns, stdin offload). The panic is still reported through the
+                // process panic hook.
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
+                    let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
+                        message
+                    } else if let Some(message) = payload.downcast_ref::<String>() {
+                        message.as_str()
+                    } else {
+                        "Box<dyn Any>"
+                    };
+                    tracing::error!(
+                        target: "runite::runtime",
+                        event = "blocking_task_panicked",
+                        panic = message,
+                        "blocking task panicked; worker kept alive",
+                    );
+                }
+            }
             Err(_) => break,
         }
     }

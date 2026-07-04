@@ -41,18 +41,34 @@ fn output_drains_piped_stderr_without_deadlock() {
         time::timeout(Duration::from_secs(10), command.output()).await
     });
 
-    let bytes = result
+    let output = result
         .expect("output must not deadlock when stderr is piped")
         .expect("command should succeed");
-    assert_eq!(bytes, b"done");
+    assert_eq!(output.stdout, b"done");
+    // The 200KB written to stderr is captured, proving concurrent draining.
+    assert_eq!(output.stderr.len(), 200_000);
 }
 
 #[test]
 fn command_builder_applies_args_env_and_current_dir() {
     let work_dir = artifact_dir("current-dir");
-    let expected_dir = work_dir
+    let canonical_dir = work_dir
         .canonicalize()
         .expect("artifact directory should be canonical");
+    // MSYS `sh` reports a Unix-style `pwd` by default; `pwd -W` prints the
+    // Windows drive path with forward slashes. Normalize the canonicalized
+    // expectation the same way (dropping the `\\?\` verbatim prefix).
+    #[cfg(windows)]
+    let (pwd_command, expected_dir) = (
+        "$(pwd -W)",
+        canonical_dir
+            .display()
+            .to_string()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
+    );
+    #[cfg(unix)]
+    let (pwd_command, expected_dir) = ("$(pwd)", canonical_dir.display().to_string());
     let path = std::env::var_os("PATH").expect("PATH should be available for PATH-based programs");
 
     let output = block_on(move || async move {
@@ -66,7 +82,9 @@ fn command_builder_applies_args_env_and_current_dir() {
             .current_dir(work_dir)
             .args([
                 "-c",
-                "printf '%s|%s|%s|%s|%s' \"$1\" \"$2\" \"${RUNITE_PROCESS_VAR-unset}\" \"${RUNITE_PROCESS_REMOVED-unset}\" \"$(pwd)\"",
+                &format!(
+                    "printf '%s|%s|%s|%s|%s' \"$1\" \"$2\" \"${{RUNITE_PROCESS_VAR-unset}}\" \"${{RUNITE_PROCESS_REMOVED-unset}}\" \"{pwd_command}\""
+                ),
                 "runite-sh",
                 "first",
                 "second",
@@ -76,14 +94,14 @@ fn command_builder_applies_args_env_and_current_dir() {
     .expect("shell command should succeed");
 
     assert_eq!(
-        String::from_utf8(output).expect("output should be UTF-8"),
-        format!("first|second|visible|unset|{}", expected_dir.display())
+        String::from_utf8(output.stdout).expect("output should be UTF-8"),
+        format!("first|second|visible|unset|{expected_dir}")
     );
 }
 
 #[test]
 fn command_output_reports_success_bytes_and_nonzero_errors() {
-    let (echo, true_status, false_error_kind) = block_on(|| async {
+    let (echo, true_status, false_status) = block_on(|| async {
         let echo = Command::new("echo")
             .arg("hello")
             .output()
@@ -93,21 +111,22 @@ fn command_output_reports_success_bytes_and_nonzero_errors() {
             .status()
             .await
             .expect("true status should succeed");
-        let false_error_kind = Command::new("false")
+        // A non-zero exit is reported via `output.status`, not as an error.
+        let false_output = Command::new("false")
             .output()
             .await
-            .expect_err("false output should report non-success")
-            .kind();
+            .expect("false output should not be an error");
         (
             echo,
             (true_status.success(), true_status.code()),
-            false_error_kind,
+            (false_output.status.success(), false_output.status.code()),
         )
     });
 
-    assert_eq!(echo, b"hello\n");
+    assert_eq!(echo.stdout, b"hello\n");
+    assert!(echo.status.success());
     assert_eq!(true_status, (true, Some(0)));
-    assert_eq!(false_error_kind, std::io::ErrorKind::Other);
+    assert_eq!(false_status, (false, Some(1)));
 }
 
 #[test]
@@ -294,7 +313,12 @@ fn exit_status_accessors_report_success_failure_and_signal() {
     assert_eq!(statuses.0, (true, Some(0)));
     assert_eq!(statuses.1, (false, Some(1)));
     assert!(!statuses.2.0);
+    // A killed child reports no exit code on Unix (it died to a signal);
+    // Windows `TerminateProcess` sets exit code 1.
+    #[cfg(unix)]
     assert_eq!(statuses.2.1, None);
+    #[cfg(windows)]
+    assert_eq!(statuses.2.1, Some(1));
     #[cfg(unix)]
     assert_eq!(statuses.2.2, Some(libc::SIGKILL));
 }

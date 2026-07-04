@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -40,7 +40,18 @@ type CompletionHandler = Box<dyn FnOnce(IoUringCqe) + Send + 'static>;
 type CancelGuard = Box<dyn Any + Send + 'static>;
 
 struct NotifierInner {
-    ring_fd: RawFd,
+    /// A **dup** of the target driver's ring fd, owned by the notifier.
+    ///
+    /// Holding an [`OwnedFd`] (rather than a bare `RawFd` copy) closes a TOCTOU
+    /// hazard: after the target [`Driver`] drops and closes its own ring fd, the
+    /// raw number could be recycled by the kernel for an unrelated resource, and
+    /// an in-flight `notify` that already passed the `closed` check would then
+    /// target that resource. The dup keeps the fd number reserved (and the ring
+    /// object alive) for as long as any notifier exists, so a racing `notify`
+    /// can only ever reach the original — now draining — ring, never a
+    /// recycled fd. The kernel ring is fully released once the last notifier
+    /// (i.e. the last cross-thread handle) drops.
+    ring_fd: OwnedFd,
     closed: AtomicBool,
 }
 
@@ -50,7 +61,7 @@ impl NotifierInner {
         tracing::trace!(
             target: trace_targets::DRIVER,
             event = "notify",
-            ring_fd = self.ring_fd,
+            ring_fd = self.ring_fd.as_raw_fd(),
             "sending cross-thread driver wake"
         );
         if self.closed.load(Ordering::Acquire) {
@@ -62,7 +73,7 @@ impl NotifierInner {
 
         IoUring::with_submitter(|ring| {
             ring.submit_msg_ring(
-                self.ring_fd,
+                self.ring_fd.as_raw_fd(),
                 WAKE_TARGET_TOKEN,
                 1,
                 make_token(CompletionKind::NotifySend, 0),
@@ -71,20 +82,23 @@ impl NotifierInner {
     }
 }
 
+/// Duplicates `fd` with `O_CLOEXEC`, returning an owned handle to the copy.
+fn dup_cloexec(fd: RawFd) -> io::Result<OwnedFd> {
+    // F_DUPFD_CLOEXEC yields the lowest-numbered free fd >= 0, with the
+    // close-on-exec flag already set on the new descriptor.
+    let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `duplicated` is a fresh, exclusively-owned fd just returned by
+    // `fcntl(F_DUPFD_CLOEXEC)`; wrapping it transfers ownership to the `OwnedFd`.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+}
+
 #[derive(Clone)]
 /// Cross-thread notifier for a runtime thread's driver.
 pub struct ThreadNotifier {
     inner: Arc<NotifierInner>,
-}
-
-impl ThreadNotifier {
-    // TODO(roadmap): duplicate of the `Notifier` trait method (which is what
-    // callers use); a Linux agent will remove it before release. See ROADMAP.md.
-    /// Sends a wake notification to the target runtime thread.
-    #[allow(dead_code)]
-    pub fn notify(&self) -> io::Result<()> {
-        self.inner.notify()
-    }
 }
 
 impl Notifier for ThreadNotifier {
@@ -131,7 +145,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
     );
     let supported_ops = ring.supported_ops();
     let notifier = Arc::new(NotifierInner {
-        ring_fd: ring.ring_fd(),
+        ring_fd: dup_cloexec(ring.ring_fd())?,
         closed: AtomicBool::new(false),
     });
 
@@ -204,7 +218,11 @@ impl Driver {
         );
         match (self.active_timer_token.get(), deadline) {
             (Some(active), Some(deadline)) => {
-                self.ring.submit_timeout_update(active, deadline)?;
+                self.ring.submit_timeout_update(
+                    active,
+                    deadline,
+                    self.next_token(CompletionKind::TimerRemove),
+                )?;
             }
             (Some(active), None) => {
                 self.active_timer_token.set(None);
@@ -521,8 +539,9 @@ fn decode_token_kind(token: u64) -> Option<CompletionKind> {
 #[cfg(test)]
 mod tests {
     use super::super::uring::{IORING_OP_NOP, SupportedOps, override_supported_ops};
-    use super::{create_driver, monotonic_now};
+    use super::{Notifier as _, create_driver, monotonic_now};
     use std::io;
+    use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -601,6 +620,36 @@ mod tests {
         assert!(!ready.timer);
         assert_eq!(target.drain_wake(), Some(1));
         sender.unbind_current_thread();
+    }
+
+    #[test]
+    fn notifier_fd_survives_target_driver_drop() {
+        let (target, notifier) = create_driver().expect("target driver should initialize");
+        let dup_fd = notifier.inner.ring_fd.as_raw_fd();
+
+        // Dropping the target closes its own ring fd and marks the notifier
+        // closed. With a bare `RawFd` copy the notifier's number would now be
+        // dangling (recyclable); the owned dup keeps it reserved and the ring
+        // object alive.
+        drop(target);
+
+        let flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFD) };
+        assert!(
+            flags >= 0,
+            "notifier dup fd must remain valid after the target driver drops \
+             (got errno {})",
+            io::Error::last_os_error()
+        );
+
+        // notify() short-circuits on the closed flag rather than submitting to
+        // a stale/recycled fd.
+        assert_eq!(
+            notifier
+                .notify()
+                .expect_err("notify after drop should fail")
+                .kind(),
+            io::ErrorKind::BrokenPipe,
+        );
     }
 
     #[test]

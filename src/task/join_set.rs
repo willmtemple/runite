@@ -13,8 +13,14 @@ use crate::{JoinHandle, spawn};
 /// task's join output is `Result<T, JoinError>`, so callers should handle these
 /// errors when awaiting any join handle.
 ///
-/// Use [`JoinError::is_cancelled`] and [`JoinError::is_aborted`] when the caller
-/// only needs to distinguish the category.
+/// A queued future that **panics** while being polled resolves its join handle
+/// to [`JoinError::Panicked`] rather than unwinding the event loop: runite
+/// isolates task panics so one misbehaving task cannot take down the runtime
+/// thread (the panic is still reported through the process panic hook).
+///
+/// Use [`JoinError::is_cancelled`], [`JoinError::is_aborted`], and
+/// [`JoinError::is_panicked`] when the caller only needs to distinguish the
+/// category.
 ///
 /// # Examples
 ///
@@ -37,6 +43,7 @@ use crate::{JoinHandle, spawn};
 /// assert!(saw_abort.get());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinError {
     /// The worker exited without producing a value.
     ///
@@ -51,6 +58,15 @@ pub enum JoinError {
     /// [`AbortHandle`](crate::AbortHandle), or [`JoinSet::abort_all`] cancels
     /// the queued future.
     Aborted,
+    /// The task panicked while being polled.
+    ///
+    /// runite catches panics that unwind out of a spawned future so the panic
+    /// does not tear down the whole runtime thread; the joiner observes this
+    /// variant instead. The panic itself is still reported through the process
+    /// panic hook (message and, if enabled, backtrace on stderr). The panic
+    /// payload is not carried on the error, so that [`JoinError`] can stay
+    /// `Copy`.
+    Panicked,
 }
 
 impl JoinError {
@@ -96,6 +112,20 @@ impl JoinError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, JoinError::Cancelled)
     }
+
+    /// Returns `true` if the task panicked while being polled.
+    ///
+    /// This is true only for [`JoinError::Panicked`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(runite::task::JoinError::Panicked.is_panicked());
+    /// assert!(!runite::task::JoinError::Aborted.is_panicked());
+    /// ```
+    pub fn is_panicked(&self) -> bool {
+        matches!(self, JoinError::Panicked)
+    }
 }
 
 impl fmt::Display for JoinError {
@@ -103,6 +133,7 @@ impl fmt::Display for JoinError {
         match self {
             JoinError::Cancelled => f.write_str("blocking task was cancelled"),
             JoinError::Aborted => f.write_str("task was aborted"),
+            JoinError::Panicked => f.write_str("task panicked"),
         }
     }
 }

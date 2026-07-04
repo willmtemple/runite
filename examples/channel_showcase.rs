@@ -1,3 +1,12 @@
+//! # Channel tour: mpsc and oneshot, on and across threads
+//!
+//! Demonstrates bounded mpsc, oneshot request/response, and using channels to
+//! talk to a `spawn_worker` thread (runite's equivalent of a worker_threads
+//! instance: a second, fully independent event loop). A feature tour; the
+//! numbered log lines assert the exact expected ordering.
+//!
+//! Run it: `cargo run --example channel_showcase`
+
 use runite::channel::{mpsc, oneshot};
 use runite::{spawn, spawn_worker, time::sleep};
 use std::fmt;

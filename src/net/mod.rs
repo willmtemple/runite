@@ -3,7 +3,8 @@
 //! This module provides TCP and UDP sockets that integrate with runite's
 //! event-loop-per-thread runtime. The public surface follows the general shape
 //! of [`std::net`], but uses async methods for operations that would otherwise
-//! block the caller. Unix domain sockets are available from [`unix`] on Unix
+//! block the caller. Unix domain sockets are available from the `unix`
+//! submodule on Unix
 //! platforms and are re-exported from this module.
 //!
 //! # Network model
@@ -13,8 +14,10 @@
 //! current-thread values; drive them on the runtime thread that owns the
 //! operation, and move work to another thread by sending a macrotask to that
 //! thread rather than by migrating the socket future. Linux uses
-//! completion-based `io_uring` operations, while macOS aarch64 waits for
-//! readiness with `kqueue` and then performs nonblocking socket calls.
+//! completion-based `io_uring` operations, macOS aarch64 waits for
+//! readiness with `kqueue` and then performs nonblocking socket calls, and
+//! Windows drives overlapped Winsock operations (`ConnectEx`/`AcceptEx`,
+//! `WSASend`/`WSARecv`) through the thread's I/O completion port.
 //!
 //! This differs from Tokio's default scheduler and async-std: runite has no
 //! work-stealing socket executor, and split TCP halves are intended for separate
@@ -56,14 +59,15 @@ use core::time::Duration;
 
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
 use crate::io::{AsyncRead, AsyncWrite, Stream};
 use crate::op::net::NetOp;
+use crate::sys::handle::{OwnedSock, RawSock, owned_sock_from_raw, raw_sock};
 
 #[cfg(feature = "hyper")]
 mod hyper_impl;
+mod interop;
 #[cfg(unix)]
 pub mod unix;
 
@@ -72,18 +76,18 @@ pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 #[derive(Debug)]
 struct TcpStreamInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
     timeouts: Mutex<SocketTimeouts>,
 }
 
 #[derive(Debug)]
 struct TcpListenerInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
 }
 
 #[derive(Debug)]
 struct UdpSocketInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
     timeouts: Mutex<SocketTimeouts>,
 }
 
@@ -96,6 +100,8 @@ struct SocketTimeouts {
 type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
+
+use crate::io::ReadOverflow;
 
 /// Async TCP stream connected to a peer.
 ///
@@ -115,8 +121,28 @@ type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 pub struct TcpStream {
     inner: Arc<TcpStreamInner>,
     pending_read: Option<PendingRead>,
+    /// Bytes a completed read produced that did not fit the caller's buffer
+    /// (e.g. when a read future is dropped after being submitted with a large
+    /// buffer and a later `poll_read` presents a smaller one). Served before any
+    /// new read is submitted so no received bytes are ever lost. Boxed so the
+    /// common no-overflow case is just a null pointer.
+    read_overflow: Option<Box<ReadOverflow>>,
     pending_write: Option<PendingWrite>,
+    /// Identity `(ptr, len)` of the buffer that `pending_write` was submitted
+    /// for. A re-poll presenting a different buffer means the original write
+    /// future was dropped mid-flight and an unrelated write started; reporting
+    /// the in-flight op's byte count against the new buffer would corrupt the
+    /// stream, so that is rejected instead.
+    pending_write_ident: Option<(*const u8, usize)>,
     pending_shutdown: Option<PendingShutdown>,
+}
+
+impl std::fmt::Debug for TcpStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpStream")
+            .field("fd", &raw_sock(&self.inner.fd))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Async TCP listening socket.
@@ -124,7 +150,7 @@ pub struct TcpStream {
 /// A listener accepts inbound [`TcpStream`] connections from a bound local
 /// address. Use [`TcpListener::accept`] for one connection at a time or
 /// [`TcpListener::incoming`] for a [`Stream`] adapter.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TcpListener {
     inner: Arc<TcpListenerInner>,
 }
@@ -156,7 +182,7 @@ pub struct TcpListener {
 /// ```
 #[derive(Debug)]
 pub struct TcpSocket {
-    fd: OwnedFd,
+    fd: OwnedSock,
 }
 
 /// Async UDP socket.
@@ -384,12 +410,12 @@ impl TcpSocket {
         crate::sys::current::net::local_addr(self.raw_fd())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self { fd }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.fd)
     }
 }
 
@@ -448,23 +474,19 @@ impl TcpStream {
     /// than requested. A return value of `0` indicates EOF when `buf` is not
     /// empty. If a configured read timeout expires, the error kind is
     /// [`io::ErrorKind::TimedOut`].
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel-safe. If the returned future is dropped before it
+    /// resolves, bytes that the in-flight read already received are retained on
+    /// the stream and returned by the next read, so no data is lost — it is safe
+    /// to use in a `select!`.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let data = match self.read_timeout_value() {
-            Some(timeout) => {
-                crate::sys::current::net::recv_timeout(self.raw_fd(), buf.len(), 0, timeout).await?
-            }
-            None => {
-                crate::sys::current::net::recv(NetOp::Recv {
-                    fd: self.raw_fd(),
-                    len: buf.len(),
-                    flags: 0,
-                })
-                .await?
-            }
-        };
-        let read = data.len();
-        buf[..read].copy_from_slice(&data);
-        Ok(read)
+        // Delegate to the AsyncRead path so the in-flight recv is stashed on the
+        // stream: dropping this future retains the operation (cancel-safe — a
+        // completed-but-unclaimed read is served by the next read via the
+        // overflow buffer) and it cannot race a concurrent trait-based read.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
     }
 
     /// Reads exactly `buf.len()` bytes from the stream.
@@ -488,21 +510,19 @@ impl TcpStream {
     /// write timeout expires, the error kind is [`io::ErrorKind::TimedOut`]; use
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is **not** cancel-safe. Because the write is completion-based,
+    /// a future dropped mid-flight may have already committed bytes to the
+    /// kernel without reporting the count, and re-polling with a *different*
+    /// buffer afterward is rejected. Drive a write to completion (or use the same
+    /// buffer) rather than cancelling it in a `select!`.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self.write_timeout_value() {
-            Some(timeout) => {
-                crate::sys::current::net::send_timeout(self.raw_fd(), buf.to_vec(), 0, timeout)
-                    .await
-            }
-            None => {
-                crate::sys::current::net::send(NetOp::Send {
-                    fd: self.raw_fd(),
-                    data: buf.to_vec(),
-                    flags: 0,
-                })
-                .await
-            }
-        }
+        // Delegate to the AsyncWrite path so the in-flight send is stashed on the
+        // stream and the buffer-identity guard applies uniformly across the
+        // inherent and trait-based write APIs.
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
     }
 
     /// Writes the entire buffer to the stream.
@@ -560,13 +580,17 @@ impl TcpStream {
         let read = Self {
             inner: Arc::clone(&self.inner),
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         };
         let write = Self {
             inner: self.inner,
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         };
         (
@@ -579,6 +603,10 @@ impl TcpStream {
     /// [`into_split`](Self::into_split).
     ///
     /// Returns [`ReuniteError`] if the halves came from different streams.
+    // ReuniteError intentionally carries both halves (each a full TcpStream)
+    // so the caller gets them back, like tokio's ReuniteError; the large Err is
+    // by design and only materializes on the rare mismatch path.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<Self, ReuniteError> {
         if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
             drop(read);
@@ -669,20 +697,22 @@ impl TcpStream {
         Ok(())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(TcpStreamInner {
                 fd,
                 timeouts: Mutex::new(SocketTimeouts::default()),
             }),
             pending_read: None,
+            read_overflow: None,
             pending_write: None,
+            pending_write_ident: None,
             pending_shutdown: None,
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 
     fn read_timeout_value(&self) -> Option<Duration> {
@@ -705,6 +735,17 @@ impl AsyncRead for TcpStream {
         }
 
         let this = self.get_mut();
+
+        // Serve any bytes a previous read produced that overflowed a smaller
+        // caller buffer before submitting (or polling) a new read.
+        if let Some(overflow) = this.read_overflow.as_mut() {
+            let n = overflow.drain_into(buf);
+            if overflow.is_drained() {
+                this.read_overflow = None;
+            }
+            return Poll::Ready(Ok(n));
+        }
+
         if this.pending_read.is_none() {
             this.pending_read = Some(match this.read_timeout_value() {
                 Some(timeout) => Box::pin(crate::sys::current::net::recv_timeout(
@@ -727,15 +768,15 @@ impl AsyncRead for TcpStream {
             Poll::Ready(result) => {
                 this.pending_read = None;
                 let data = result?;
-                let read = data.len();
-                if read > buf.len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "read completed with more bytes than destination buffer can hold",
-                    )));
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                // If the completed read is larger than the current buffer (the
+                // submitted buffer shrank across polls), keep the surplus for the
+                // next read rather than discarding it.
+                if data.len() > n {
+                    this.read_overflow = Some(Box::new(ReadOverflow::new(&data[n..])));
                 }
-                buf[..read].copy_from_slice(&data);
-                Poll::Ready(Ok(read))
+                Poll::Ready(Ok(n))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -753,6 +794,7 @@ impl AsyncWrite for TcpStream {
         }
 
         let this = self.get_mut();
+        let ident = (buf.as_ptr(), buf.len());
         if this.pending_write.is_none() {
             this.pending_write = Some(match this.write_timeout_value() {
                 Some(timeout) => Box::pin(crate::sys::current::net::send_timeout(
@@ -763,6 +805,17 @@ impl AsyncWrite for TcpStream {
                 )),
                 None => crate::sys::current::net::send_future(this.raw_fd(), buf.to_vec()),
             });
+            this.pending_write_ident = Some(ident);
+        } else if this.pending_write_ident != Some(ident) {
+            // A write is in flight for a *different* buffer: the future that
+            // submitted it was dropped mid-flight and an unrelated write began.
+            // Those bytes are already committed to the kernel, so reporting this
+            // op's count against the new buffer would corrupt the stream. Reject
+            // instead. (The in-flight op keeps running; drive writes to
+            // completion, or reuse the same buffer, to resume cleanly.)
+            return Poll::Ready(Err(io::Error::other(
+                "write buffer changed while a previous write was still in flight",
+            )));
         }
 
         match this
@@ -774,6 +827,7 @@ impl AsyncWrite for TcpStream {
         {
             Poll::Ready(result) => {
                 this.pending_write = None;
+                this.pending_write_ident = None;
                 Poll::Ready(result)
             }
             Poll::Pending => Poll::Pending,
@@ -816,6 +870,7 @@ impl AsyncWrite for TcpStream {
 /// same runtime thread dedicated to receiving bytes. Recombine it with the
 /// matching [`OwnedWriteHalf`] through
 /// [`TcpStream::reunite`] when exclusive stream ownership is needed again.
+#[derive(Debug)]
 pub struct OwnedReadHalf {
     stream: TcpStream,
 }
@@ -827,6 +882,7 @@ pub struct OwnedReadHalf {
 /// same runtime thread dedicated to sending bytes. Use [`shutdown`](Self::shutdown)
 /// to half-close the write direction with [`std::net::Shutdown::Write`]
 /// without dropping the matching [`OwnedReadHalf`].
+#[derive(Debug)]
 pub struct OwnedWriteHalf {
     stream: TcpStream,
 }
@@ -846,6 +902,7 @@ impl OwnedReadHalf {
     ///
     /// Returns [`ReuniteError`] and both halves if `write` originated from a
     /// different stream.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(self, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(self, write)
     }
@@ -872,6 +929,7 @@ impl OwnedWriteHalf {
     ///
     /// Returns [`ReuniteError`] and both halves if `read` originated from a
     /// different stream.
+    #[allow(clippy::result_large_err)]
     pub fn reunite(self, read: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
         TcpStream::reunite(read, self)
     }
@@ -929,6 +987,21 @@ impl TcpListener {
     /// Binding to port `0` asks the OS to assign an available port, which can be
     /// retrieved with [`local_addr`](Self::local_addr).
     ///
+    /// Like [`std::net::TcpListener::bind`], this does **not** set `SO_REUSEADDR`.
+    /// To reuse a recently-closed address (or bind while a previous socket is in
+    /// `TIME_WAIT`), configure a [`TcpSocket`] and enable it before binding:
+    ///
+    /// ```
+    /// runite::spawn(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.set_reuseaddr(true).unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     let listener = socket.listen(1024).unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    ///
     /// # Examples
     ///
     /// ```
@@ -971,7 +1044,7 @@ impl TcpListener {
 
         // SAFETY: `accepted.fd` is the fresh descriptor returned by accept and
         // ownership is transferred to `OwnedFd` exactly once here.
-        let stream = TcpStream::from_owned_fd(unsafe { OwnedFd::from_raw_fd(accepted.fd) });
+        let stream = TcpStream::from_owned_fd(unsafe { owned_sock_from_raw(accepted.fd) });
         Ok((stream, accepted.peer_addr))
     }
 
@@ -982,7 +1055,7 @@ impl TcpListener {
     /// ending iteration.
     pub fn incoming(&self) -> Incoming {
         Incoming {
-            listener: self.clone(),
+            listener: self.share(),
             pending: None,
         }
     }
@@ -1002,14 +1075,23 @@ impl TcpListener {
         crate::sys::current::net::set_ttl(self.raw_fd(), ttl)
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(TcpListenerInner { fd }),
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    /// Internal fd-sharing clone (reference-counts the same socket). Not public:
+    /// callers who want an independent listener use [`try_clone`](Self::try_clone),
+    /// which duplicates the descriptor, mirroring `std::net::TcpListener`.
+    fn share(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 }
 
@@ -1021,6 +1103,14 @@ impl TcpListener {
 pub struct Incoming {
     listener: TcpListener,
     pending: Option<Pin<Box<dyn Future<Output = io::Result<TcpStream>>>>>,
+}
+
+impl std::fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Incoming")
+            .field("listener", &self.listener)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Stream for Incoming {
@@ -1035,7 +1125,7 @@ impl Stream for Incoming {
                 // SAFETY: `accepted.fd` is the fresh descriptor returned by
                 // accept; ownership is transferred to `OwnedFd` exactly once.
                 Ok(TcpStream::from_owned_fd(unsafe {
-                    OwnedFd::from_raw_fd(accepted.fd)
+                    owned_sock_from_raw(accepted.fd)
                 }))
             }));
         }
@@ -1180,7 +1270,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_timeout(
                     self.raw_fd(),
                     buf.len(),
-                    libc::MSG_PEEK,
+                    crate::sys::current::net::MSG_PEEK,
                     timeout,
                 )
                 .await?
@@ -1189,7 +1279,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv(NetOp::Recv {
                     fd: self.raw_fd(),
                     len: buf.len(),
-                    flags: libc::MSG_PEEK,
+                    flags: crate::sys::current::net::MSG_PEEK,
                 })
                 .await?
             }
@@ -1301,7 +1391,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_from_timeout(
                     self.raw_fd(),
                     buf.len(),
-                    libc::MSG_PEEK,
+                    crate::sys::current::net::MSG_PEEK,
                     timeout,
                 )
                 .await?
@@ -1310,7 +1400,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_from(NetOp::RecvFrom {
                     fd: self.raw_fd(),
                     len: buf.len(),
-                    flags: libc::MSG_PEEK,
+                    flags: crate::sys::current::net::MSG_PEEK,
                 })
                 .await?
             }
@@ -1395,7 +1485,7 @@ impl UdpSocket {
         Ok(())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(UdpSocketInner {
                 fd,
@@ -1404,8 +1494,8 @@ impl UdpSocket {
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 
     fn read_timeout_value(&self) -> Option<Duration> {

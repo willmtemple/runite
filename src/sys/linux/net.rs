@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use std::net::{
     Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs,
 };
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,38 +24,16 @@ use crate::op::completion::completion_for_current_thread;
 use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
 use crate::platform::linux::runtime::with_current_driver;
 use crate::platform::linux::uring::{
-    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CLOSE, IORING_OP_CONNECT, IORING_OP_LISTEN,
-    IORING_OP_RECV, IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN,
-    IORING_OP_SOCKET, IoUringCqe, IoUringSqe,
+    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN, IORING_OP_RECV,
+    IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN, IORING_OP_SOCKET,
+    IoUringCqe, IoUringSqe,
 };
 use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
-// TODO(roadmap): unwired io_uring net-close / op-classifier scaffolding; a Linux
-// agent will wire or remove it before release. See ROADMAP.md.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    IoUring,
-    Offload,
-}
-
-#[allow(dead_code)]
-pub fn execution_path(op: &NetOp) -> ExecutionPath {
-    match op {
-        NetOp::Socket { .. }
-        | NetOp::Connect { .. }
-        | NetOp::Bind { .. }
-        | NetOp::Listen { .. }
-        | NetOp::Accept { .. }
-        | NetOp::Send { .. }
-        | NetOp::Recv { .. }
-        | NetOp::Shutdown { .. }
-        | NetOp::Close { .. } => ExecutionPath::IoUring,
-        NetOp::SendTo { .. } | NetOp::RecvFrom { .. } => ExecutionPath::IoUring,
-    }
-}
+/// Peek flag for `recv`-family operations, re-exported for the public layer.
+pub const MSG_PEEK: i32 = libc::MSG_PEEK;
 
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
@@ -90,9 +68,15 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
         move |sqe| {
             sqe.opcode = IORING_OP_SOCKET;
             sqe.fd = domain;
-            sqe.off = socket_type as u64;
+            // IORING_OP_SOCKET reads the socket type — including the
+            // SOCK_CLOEXEC / SOCK_NONBLOCK bits — from `sqe.off`, exactly like
+            // the `type` argument of `socket(2)`. `op_flags` (`rw_flags`) must
+            // be 0: kernels that validate it reject the op, and those that do
+            // not would ignore flags placed there, losing SOCK_CLOEXEC. OR the
+            // flags into the type, mirroring `socket_sync`.
+            sqe.off = u64::from(socket_type as u32 | flags);
             sqe.len = protocol as u32;
-            sqe.op_flags = flags;
+            sqe.op_flags = 0;
         },
         // SAFETY: `fd` is the non-negative descriptor returned by a successful
         // socket CQE and ownership is transferred to `OwnedFd` exactly once.
@@ -204,15 +188,25 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
             sqe.fd = fd;
             sqe.addr = storage_ptr as u64;
             sqe.off = addr_len_ptr as u64;
+            // For IORING_OP_ACCEPT, op_flags carries the accept4(2) flags. Set
+            // SOCK_CLOEXEC so accepted connections are not leaked into child
+            // processes (matching the accept_sync fallback and std/tokio).
+            sqe.op_flags = libc::SOCK_CLOEXEC as u32;
         },
         move |cqe| {
             let accepted_fd = cqe_to_result(cqe)? as RawFd;
+            // Take ownership of the accepted fd immediately so that an error
+            // parsing the peer address below closes it via `OwnedFd`'s drop
+            // rather than leaking a live connection.
+            // SAFETY: `accepted_fd` is a fresh descriptor from a successful
+            // accept CQE, owned here exactly once.
+            let accepted = unsafe { OwnedFd::from_raw_fd(accepted_fd) };
             // SAFETY: a successful accept CQE means the kernel initialized
             // `*addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
             let peer_addr = socket_addr_from_storage(&storage, *addr_len)?;
             Ok(AcceptedSocket {
-                fd: accepted_fd,
+                fd: accepted.into_raw_fd(),
                 peer_addr,
             })
         },
@@ -437,27 +431,6 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     }
 }
 
-#[allow(dead_code)]
-pub async fn close(op: NetOp) -> io::Result<()> {
-    let NetOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    match submit_uring::<(), _>(
-        move |sqe| {
-            sqe.opcode = IORING_OP_CLOSE;
-            sqe.fd = fd;
-        },
-        move |cqe| cqe_to_result(cqe).map(|_| ()),
-    )
-    .await
-    {
-        // `close(2)` never blocks; run inline instead of bouncing to the blocking pool.
-        Err(error) if should_fallback_to_offload(&error) => close_sync(fd),
-        result => result,
-    }
-}
-
 pub async fn connect_stream(addr: SocketAddr) -> io::Result<OwnedFd> {
     let socket = socket(NetOp::Socket {
         domain: socket_domain(addr),
@@ -487,7 +460,8 @@ pub async fn bind_listener(addr: SocketAddr, backlog: Option<i32>) -> io::Result
     })
     .await?;
 
-    set_reuse_addr(listener.as_raw_fd(), true)?;
+    // Do not set SO_REUSEADDR implicitly (matches std::net::TcpListener::bind).
+    // Callers who want it opt in via `net::TcpSocket::set_reuseaddr` before bind.
 
     bind(NetOp::Bind {
         fd: listener.as_raw_fd(),
@@ -1260,7 +1234,7 @@ fn shutdown_sync(fd: RawFd, how: Shutdown) -> io::Result<()> {
 
 /// Marks `fd` non-blocking so the readiness-based fallback helpers can poll it
 /// without ever stalling the event loop. Idempotent.
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     // SAFETY: `F_GETFL`/`F_SETFL` take a valid fd and an integer flag set; no
     // user pointers are involved.
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
@@ -1476,5 +1450,117 @@ mod tests {
 
         let echoed = done.lock().expect("result mutex poisoned").take();
         assert_eq!(echoed.as_deref(), Some(&b"pong"[..]));
+    }
+
+    /// A socket accepted through the production io_uring `accept` path must have
+    /// `FD_CLOEXEC` set, so live connections are never leaked into child
+    /// processes. Regression test for the missing `SOCK_CLOEXEC` accept flag.
+    #[test]
+    fn accepted_socket_is_cloexec() {
+        let cloexec = Arc::new(Mutex::new(None));
+        let cloexec_task = Arc::clone(&cloexec);
+
+        spawn(async move {
+            let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("listener socket should be created");
+            let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            bind_sync(
+                listener.as_raw_fd(),
+                RawSocketAddr::from_socket_addr(loopback),
+            )
+            .expect("bind should succeed");
+            listen_sync(listener.as_raw_fd(), DEFAULT_LISTENER_BACKLOG)
+                .expect("listen should succeed");
+            let bound = local_addr(listener.as_raw_fd()).expect("local_addr should resolve");
+
+            let client = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
+                .expect("client socket should be created");
+            connect_ready(client.as_raw_fd(), RawSocketAddr::from_socket_addr(bound))
+                .await
+                .expect("connect should succeed");
+
+            // Drive the production io_uring accept path (not the fallback).
+            let server = accept(NetOp::Accept {
+                fd: listener.as_raw_fd(),
+            })
+            .await
+            .expect("accept should succeed");
+
+            // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
+            let flags = unsafe { libc::fcntl(server.fd, libc::F_GETFD) };
+            let is_cloexec = flags >= 0 && (flags & libc::FD_CLOEXEC) != 0;
+            let _ = close_sync(server.fd);
+            *cloexec_task.lock().expect("result mutex poisoned") = Some(is_cloexec);
+        });
+
+        run();
+
+        assert_eq!(
+            *cloexec.lock().expect("result mutex poisoned"),
+            Some(true),
+            "accepted socket must have FD_CLOEXEC set"
+        );
+    }
+
+    /// `TcpListener::bind` must not implicitly enable `SO_REUSEADDR` — it now
+    /// matches `std::net`, leaving the option off unless a caller opts in via
+    /// `TcpSocket`.
+    #[test]
+    fn bind_listener_does_not_set_reuseaddr() {
+        let observed = Arc::new(Mutex::new(None));
+        let observed_task = Arc::clone(&observed);
+
+        spawn(async move {
+            let listener = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
+                .await
+                .expect("listener should bind");
+            *observed_task.lock().expect("result mutex poisoned") =
+                Some(reuse_addr(listener.as_raw_fd()).expect("getsockopt should succeed"));
+        });
+
+        run();
+
+        assert_eq!(
+            *observed.lock().expect("result mutex poisoned"),
+            Some(false),
+            "TcpListener::bind must not implicitly set SO_REUSEADDR"
+        );
+    }
+
+    /// A socket created through the production io_uring `IORING_OP_SOCKET` path
+    /// must honour the requested `SOCK_CLOEXEC` flag. The flag rides in the
+    /// socket *type* field (`sqe.off`), not `op_flags`. Placing it in `op_flags`
+    /// (`rw_flags`) made kernels ≥5.19 reject the op with `EINVAL` — silently
+    /// falling back to `socket_sync` so the uring fast path was always dead —
+    /// and would drop `SOCK_CLOEXEC` outright on kernels that do not validate
+    /// `rw_flags`. This test locks the observable property across both paths.
+    #[test]
+    fn uring_socket_is_cloexec() {
+        let cloexec = Arc::new(Mutex::new(None));
+        let cloexec_task = Arc::clone(&cloexec);
+
+        spawn(async move {
+            let sock = socket(NetOp::Socket {
+                domain: libc::AF_INET,
+                socket_type: libc::SOCK_STREAM,
+                protocol: 0,
+                flags: libc::SOCK_CLOEXEC as u32,
+            })
+            .await
+            .expect("socket should be created");
+
+            // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
+            let flags = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFD) };
+            *cloexec_task.lock().expect("result mutex poisoned") =
+                Some(flags >= 0 && (flags & libc::FD_CLOEXEC) != 0);
+        });
+
+        run();
+
+        assert_eq!(
+            *cloexec.lock().expect("result mutex poisoned"),
+            Some(true),
+            "uring-created socket must have FD_CLOEXEC set"
+        );
     }
 }

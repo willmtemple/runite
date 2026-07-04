@@ -177,9 +177,14 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
     /// bytes from the returned slice.
     pub async fn fill_buf(&mut self) -> io::Result<&[u8]> {
         if self.pos == self.filled {
-            self.pos = 0;
-            self.filled =
+            // Assign `pos`/`filled` only after the read resolves. Mutating them
+            // before the await would leave `pos = 0, filled = <stale>` if the
+            // future is dropped (cancellation) or the read errors, causing the
+            // next call to re-serve already-consumed bytes.
+            let filled =
                 poll_fn(|cx| Pin::new(&mut self.inner).poll_read(cx, &mut self.buf)).await?;
+            self.pos = 0;
+            self.filled = filled;
         }
         Ok(self.buffer())
     }
@@ -250,8 +255,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
             return Pin::new(&mut this.inner).poll_read(cx, buf);
         }
 
+        // Assign `pos`/`filled` only after the inner read resolves. Setting
+        // `pos = 0` before `ready!` would, on a `Pending` inner read, leave
+        // `pos = 0, filled = <stale>` so the next poll re-serves the bytes
+        // already handed out (silent stream corruption on any real socket).
+        let filled = ready!(Pin::new(&mut this.inner).poll_read(cx, &mut this.buf))?;
         this.pos = 0;
-        this.filled = ready!(Pin::new(&mut this.inner).poll_read(cx, &mut this.buf))?;
+        this.filled = filled;
         let read = buf.len().min(this.filled);
         buf[..read].copy_from_slice(&this.buf[..read]);
         this.pos = read;
@@ -758,5 +768,93 @@ mod tests {
         run();
         assert_eq!(&*data.borrow(), b"abcde");
         assert_eq!(*writes.borrow(), 3);
+    }
+
+    /// A reader that returns `Poll::Pending` (self-waking) exactly once before
+    /// each chunk, modelling a real socket that parks between reads. This is the
+    /// case that exposes stale `pos`/`filled` state in `BufReader`.
+    struct ParkingReader {
+        chunks: std::collections::VecDeque<&'static [u8]>,
+        park_next: bool,
+    }
+
+    impl ParkingReader {
+        fn new(chunks: impl IntoIterator<Item = &'static [u8]>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+                park_next: false,
+            }
+        }
+    }
+
+    impl AsyncRead for ParkingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.park_next {
+                self.park_next = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            match self.chunks.pop_front() {
+                Some(chunk) => {
+                    self.park_next = true;
+                    let read = chunk.len().min(buf.len());
+                    buf[..read].copy_from_slice(&chunk[..read]);
+                    Poll::Ready(Ok(read))
+                }
+                None => Poll::Ready(Ok(0)),
+            }
+        }
+    }
+
+    /// Regression: after the buffer drains, a `Pending` inner read must not
+    /// cause the next `poll_read` to re-serve already-consumed bytes.
+    #[test]
+    fn buf_reader_does_not_replay_bytes_when_inner_parks() {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_task = Rc::clone(&observed);
+
+        spawn(async move {
+            let inner = ParkingReader::new([b"ab".as_slice(), b"cd".as_slice()]);
+            let mut reader = BufReader::with_capacity(2, inner);
+            // Read one byte at a time; each pair drains the buffer and forces a
+            // refill that parks before the next chunk arrives.
+            for _ in 0..4 {
+                let mut byte = [0u8; 1];
+                reader.read_exact(&mut byte).await.unwrap();
+                observed_for_task.borrow_mut().push(byte[0]);
+            }
+        });
+
+        run();
+        assert_eq!(&*observed.borrow(), b"abcd");
+    }
+
+    /// Regression: `fill_buf` (and thus `read_line`) must not expose stale
+    /// buffered bytes when the inner reader parks between fills.
+    #[test]
+    fn buf_reader_read_line_handles_parking_inner() {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_task = Rc::clone(&observed);
+
+        spawn(async move {
+            let inner = ParkingReader::new([b"foo\n".as_slice(), b"bar\n".as_slice()]);
+            let mut reader = BufReader::with_capacity(4, inner);
+            let mut first = String::new();
+            let mut second = String::new();
+            reader.read_line(&mut first).await.unwrap();
+            reader.read_line(&mut second).await.unwrap();
+            observed_for_task.borrow_mut().push(first);
+            observed_for_task.borrow_mut().push(second);
+        });
+
+        run();
+        assert_eq!(
+            &*observed.borrow(),
+            &["foo\n".to_string(), "bar\n".to_string()]
+        );
     }
 }

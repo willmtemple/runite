@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::future::poll_fn;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use std::task::{Context, Poll, Waker};
 
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, RawDirEntry, RawMetadata};
-use crate::platform::current::runtime::{QueueError, ThreadHandle, current_thread_handle};
+use crate::platform::current::runtime::{ThreadHandle, current_thread_handle};
 use crate::sys::blocking::spawn_blocking;
 
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
@@ -121,12 +121,34 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
     .await
 }
 
+/// Durably flushes a file to disk on macOS.
+///
+/// Plain `fsync(2)` on macOS does **not** flush the drive's write cache, so it
+/// is not a real durability barrier; `fcntl(F_FULLFSYNC)` is. `std::fs` uses
+/// `F_FULLFSYNC` for both `sync_all` and `sync_data` on Apple targets for this
+/// reason, falling back to `fsync` on filesystems (e.g. some network mounts)
+/// that do not support it. We match that behavior.
+fn full_fsync(fd: RawFd) -> io::Result<()> {
+    match cvt(unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) }) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOTTY)
+            ) =>
+        {
+            cvt(unsafe { libc::fsync(fd) }).map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn sync_all(op: FsOp) -> io::Result<()> {
     let FsOp::SyncAll { fd } = op else {
         unreachable!("sync_all backend called with non-sync_all op");
     };
 
-    offload(move || cvt(unsafe { libc::fsync(fd) }).map(|_| ())).await
+    offload(move || full_fsync(fd)).await
 }
 
 pub async fn sync_data(op: FsOp) -> io::Result<()> {
@@ -134,7 +156,7 @@ pub async fn sync_data(op: FsOp) -> io::Result<()> {
         unreachable!("sync_data backend called with non-sync_data op");
     };
 
-    offload(move || cvt(unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) }).map(|_| ())).await
+    offload(move || full_fsync(fd)).await
 }
 
 pub async fn set_len(op: FsOp) -> io::Result<()> {
@@ -143,6 +165,23 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
     };
 
     offload(move || cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())).await
+}
+
+/// Repositions the file's kernel cursor. `lseek(2)` on a regular file is a fast
+/// metadata operation that does not block, so it runs inline on the event loop.
+pub fn seek(fd: RawFd, pos: std::io::SeekFrom) -> io::Result<u64> {
+    let (whence, offset) = match pos {
+        std::io::SeekFrom::Start(n) => (libc::SEEK_SET, n as libc::off_t),
+        std::io::SeekFrom::End(n) => (libc::SEEK_END, n as libc::off_t),
+        std::io::SeekFrom::Current(n) => (libc::SEEK_CUR, n as libc::off_t),
+    };
+    // SAFETY: `lseek` takes only a descriptor and integer arguments.
+    let result = unsafe { libc::lseek(fd, offset, whence) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as u64)
+    }
 }
 
 pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
@@ -252,8 +291,16 @@ impl ReadDirState {
 
     fn finish(self: &Arc<Self>) {
         self.done.store(true, Ordering::Release);
-        self.release_pending();
+        // Enqueue the consumer's wake BEFORE releasing the pending op. In the
+        // reverse order there is a window where pending_ops is 0 and the
+        // remote queue is empty; run()'s exit protocol can commit `closed` in
+        // that window, after which the wake enqueue fails and the consumer is
+        // stranded (its task never resumes, and callers observe the stream's
+        // work as silently lost). With the wake enqueued first, the exit
+        // commit's remote-queue check sees it and keeps the loop alive.
+        // (Mirrors the ordering contract in op/completion.rs `finish`.)
         self.notify();
+        self.release_pending();
     }
 
     fn release_pending(&self) {
@@ -267,27 +314,22 @@ impl ReadDirState {
             return;
         }
 
+        // Internal wake: routed through the capacity-bypassing path (like
+        // completion and task wakes) so a full user queue can never drop it —
+        // a dropped stream wake strands the consumer. The only failure is a
+        // closed owner thread, where nothing can be scheduled anyway.
         let state = Arc::clone(self);
-        match self.owner.queue_macrotask(move || {
-            state.wake_queued.store(false, Ordering::Release);
-            if let Some(waker) = state.waker.lock().unwrap().take() {
-                waker.wake();
-            }
-        }) {
-            Ok(()) => {}
-            Err(QueueError::Closed) => {
-                self.wake_queued.store(false, Ordering::Release);
-            }
-            Err(QueueError::Full) => {
-                // Directory stream wakeups originate from blocking completion
-                // context; do not block or retry on overflow.
-                tracing::error!(
-                    target: crate::trace_targets::SCHEDULER,
-                    event = "dir_stream_wake_dropped",
-                    "dropping directory stream wake because the remote queue is full"
-                );
-                self.wake_queued.store(false, Ordering::Release);
-            }
+        if self
+            .owner
+            .queue_internal_wake(move || {
+                state.wake_queued.store(false, Ordering::Release);
+                if let Some(waker) = state.waker.lock().unwrap().take() {
+                    waker.wake();
+                }
+            })
+            .is_err()
+        {
+            self.wake_queued.store(false, Ordering::Release);
         }
     }
 
@@ -388,8 +430,11 @@ fn raw_metadata_from_std(metadata: &std::fs::Metadata) -> RawMetadata {
 
     RawMetadata {
         file_type: kind,
-        mode: (metadata.mode() & 0o7777) as u16,
+        // Full st_mode (type + permission bits), matching std and the Linux
+        // backend rather than masking to permission bits only.
+        mode: metadata.mode(),
         len: metadata.len(),
+        platform: Default::default(),
     }
 }
 
@@ -407,8 +452,9 @@ fn raw_metadata_from_stat(stat: &libc::stat) -> RawMetadata {
 
     RawMetadata {
         file_type: kind,
-        mode: stat.st_mode & 0o7777,
+        mode: u32::from(stat.st_mode),
         len: stat.st_size as u64,
+        platform: Default::default(),
     }
 }
 

@@ -10,6 +10,11 @@ use std::process::{Command, ExitCode};
 
 const CRATE: &str = "runite";
 const OUTPUT: &str = "docs/public-api.md";
+/// Exact nightly used for rustdoc-JSON generation. Pinned because the rendered
+/// item listing varies across rustdoc versions, so an unpinned nightly makes
+/// the committed report environment-dependent (local vs CI drift). Bump this
+/// deliberately and regenerate the report in the same change.
+const RUSTDOC_TOOLCHAIN: &str = "nightly-2026-07-01";
 const OMIT: &str = "blanket-impls,auto-trait-impls,auto-derived-impls";
 
 fn main() -> ExitCode {
@@ -71,7 +76,15 @@ fn api_report(args: &[String]) -> ExitCode {
 /// Invoke `cargo public-api` and return its flattened item listing.
 fn run_public_api() -> Result<String, String> {
     let output = Command::new("cargo")
-        .args(["public-api", "--all-features", "--omit", OMIT])
+        // The leading `+<toolchain>` is consumed by rustup's cargo shim, pinning
+        // the nightly rustdoc that cargo-public-api shells out to.
+        .args([
+            &format!("+{RUSTDOC_TOOLCHAIN}"),
+            "public-api",
+            "--all-features",
+            "--omit",
+            OMIT,
+        ])
         .output()
         .map_err(|e| {
             format!(

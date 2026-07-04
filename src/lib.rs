@@ -1,9 +1,10 @@
-//! Async runtime, I/O, and concurrency primitives for `runite`.
+//! An event-loop-per-thread async runtime with JavaScript-style scheduling,
+//! built for interactive applications.
 //!
-//! `runite` is an event-loop-per-thread async runtime. Each runtime thread owns
-//! a single-threaded event loop with JavaScript-style microtask/macrotask
-//! scheduling, backed by a platform-specific async I/O backend (io_uring on
-//! Linux, kqueue on macOS). Tasks on a thread are `!Send` and never migrate, so
+//! Each `runite` runtime thread owns a single-threaded event loop with
+//! JavaScript-style microtask/macrotask scheduling, backed by a
+//! platform-specific async I/O backend (io_uring on Linux, kqueue on macOS,
+//! IOCP on Windows). Tasks on a thread are `!Send` and never migrate, so
 //! most runtime state needs no locking; explicit [worker threads](spawn_worker)
 //! provide parallelism and communicate through [channels](channel) and
 //! [`ThreadHandle`]s.
@@ -89,14 +90,53 @@
 //! `runite` currently targets:
 //! - Linux (io_uring) on `x86_64` and `aarch64`
 //! - macOS `aarch64` (kqueue)
+//! - Windows (IOCP) on `x86_64`
 //!
-//! A Windows port (IOCP) is in progress. Building for any other target raises a
-//! compile error.
+//! Building for any other target raises a compile error. On Windows, sockets,
+//! files, and child-process pipes are driven by overlapped I/O through one
+//! completion port per runtime thread; `runite::fd` and `runite::net::unix`
+//! are Unix-only. See `docs/WINDOWS.md` in the repository for the backend
+//! design.
+//!
+//! ## Minimum Linux kernel
+//!
+//! The io_uring backend targets **Linux 6.1 or newer** (the current LTS line),
+//! which is what CI and the maintainers test against. It may run on older
+//! kernels subject to the feature notes below, but that is not tested.
+//!
+//! Hard requirements (no fallback — the runtime will not function without them):
+//! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
+//!   and friends, which every file and socket operation builds on.
+//! - **5.18** — `IORING_OP_MSG_RING`, used to wake one runtime thread from
+//!   another. A single-threaded runtime can run without it, but
+//!   [`spawn_worker`]-based multithreading (and any cross-thread
+//!   [`ThreadHandle`] wake) requires 5.18+.
+//!
+//! Soft requirements (a synchronous syscall fallback runs transparently on
+//! older kernels, so only native-io_uring performance is affected):
+//! - File truncation ([`OpenOptions::truncate`](fs::OpenOptions::truncate),
+//!   [`File::set_len`](fs::File::set_len)) uses `IORING_OP_FTRUNCATE` (6.9) and
+//!   falls back to `ftruncate(2)`.
+//! - The socket lifecycle operations — `socket` (5.19), `bind`/`listen` (6.11),
+//!   and `connect`/`accept`/`shutdown`/`send`/`recv` — fall back to their
+//!   blocking equivalents when the kernel lacks the opcode.
+//!
+//! So the recommended 6.1 LTS floor exercises every feature; the only hard
+//! lower bounds are 5.6 (single-threaded) and 5.18 (multithreaded).
 
 #![deny(missing_docs)]
+// docs.rs passes --cfg docsrs (see [package.metadata.docs.rs]); `doc_cfg`
+// (which subsumed `doc_auto_cfg` in nightly 1.92) then annotates feature-gated
+// items with their required feature in the rendered docs. Plain stable builds
+// never see this attribute, so the crate stays stable-Rust clean.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
-compile_error!("runite currently supports Linux (x86_64, aarch64) and macOS aarch64.");
+#[cfg(not(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+)))]
+compile_error!("runite currently supports Linux (x86_64, aarch64), macOS aarch64, and Windows.");
 
 extern crate alloc;
 
@@ -105,18 +145,23 @@ pub(crate) mod trace_targets {
     pub const RUNTIME: &str = "runite::runtime";
     pub const SCHEDULER: &str = "runite::scheduler";
 
-    #[cfg(debug_assertions)]
+    // Unconditional (not #[cfg(debug_assertions)]): always-on logging (e.g.
+    // the task-panic report) uses these too, and cfg-gated constants create a
+    // "compiles under dev, breaks under `cargo bench`/release" trap.
     pub const TIMER: &str = "runite::timer";
-    #[cfg(debug_assertions)]
     pub const ASYNC: &str = "runite::async";
 }
 
 pub mod channel;
+#[cfg(unix)]
 pub mod fd;
 pub mod fs;
+#[cfg(feature = "hyper")]
+pub mod hyper_rt;
 pub mod io;
 pub mod net;
 pub(crate) mod op;
+pub mod os;
 pub(crate) mod platform;
 pub mod process;
 pub mod signal;
@@ -129,15 +174,13 @@ pub mod time;
 #[doc(hidden)]
 pub mod macros;
 
-/// Marks `fn main` as the runtime entry point.
-///
-/// Works for both a synchronous `fn main()` and an `async fn main()`: the macro
-/// inspects the signature and dispatches accordingly. It generates a real Rust
-/// `main` that queues the function body (or its returned future) onto the main
-/// runtime thread before calling [`run`].
-pub use runite_proc_macros::main;
+pub use runite_proc_macros::{main, test};
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
 pub use runtime_api::*;
 
 /// The crate's core event-loop API.
@@ -146,7 +189,11 @@ pub use runtime_api::*;
 /// inheriting a single blanket summary from a grouped re-export) and so the
 /// per-platform `runtime.rs` shims stay free of duplicated doc comments. The
 /// items are glob-re-exported at the crate root, which is their public path.
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
 mod runtime_api {
     use core::future::Future;
 
@@ -348,6 +395,42 @@ mod runtime_api {
     /// ```
     pub fn run() {
         imp::run()
+    }
+
+    /// Drives the current thread's event loop until `future` completes, then
+    /// returns its output.
+    ///
+    /// This is the value-returning entry point: where [`run`] drives the loop to
+    /// quiescence and returns `()`, `block_on` returns as soon as the given
+    /// future resolves, leaving any other tasks you have spawned queued for a
+    /// later `run`/`block_on`. The future is driven in place rather than spawned,
+    /// so — unlike [`spawn`] — it may borrow local state and need not be `Send`
+    /// or `'static`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if runtime or driver initialization fails, if the driver returns
+    /// an unexpected error, or if called from within a task already running on
+    /// this thread (the event loop cannot be re-entered).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sum = runite::block_on(async {
+    ///     let mut total = 0;
+    ///     for value in 1..=4 {
+    ///         total += value;
+    ///         runite::yield_now().await;
+    ///     }
+    ///     total
+    /// });
+    /// assert_eq!(sum, 10);
+    /// ```
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: core::future::Future,
+    {
+        imp::block_on(future)
     }
 
     /// Drives the event loop until it would next block waiting on the I/O driver.

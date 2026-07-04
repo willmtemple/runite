@@ -1,11 +1,10 @@
 //! File-descriptor readiness helpers backed by the runtime driver.
 //!
 //! These helpers are useful when integrating custom descriptor types with
-//! `runite` without writing a full async wrapper. They operate on a borrowed raw
-//! file descriptor: runite does not take ownership of the descriptor, and
-//! `wait_readable` is a one-shot readiness wait rather than a persistent
-//! registration. The public API currently exposes readable readiness; writable
-//! readiness is used internally by runtime adapters such as child pipes.
+//! `runite` without writing a full async wrapper. They borrow a descriptor
+//! (anything implementing [`AsFd`]) rather than taking
+//! ownership, and [`wait_readable`]/[`wait_writable`] are one-shot readiness
+//! waits rather than persistent registrations.
 //!
 //! Readiness means "try the real I/O operation again." A readable notification
 //! can race with other consumers or report an error/hangup condition, so callers
@@ -25,18 +24,21 @@
 //! closed, cancellation completion is best-effort and driver cleanup may be left
 //! to runtime shutdown.
 //!
+//! This module is only available on Unix targets: readiness waits are inherently
+//! file-descriptor based and have no equivalent on the completion-based Windows
+//! backend.
+//!
 //! # Examples
 //!
 //! ```no_run
 //! use std::io::{Read, Write};
-//! use std::os::fd::AsRawFd;
+//! use std::os::fd::AsFd;
 //! use std::os::unix::net::UnixStream;
 //!
 //! let (mut reader, mut writer) = UnixStream::pair()?;
-//! let read_fd = reader.as_raw_fd();
 //!
 //! runite::spawn(async move {
-//!     runite::fd::wait_readable(read_fd)
+//!     runite::fd::wait_readable(reader.as_fd())
 //!         .await
 //!         .expect("reader should become readable");
 //!     let mut bytes = [0; 5];
@@ -53,16 +55,20 @@
 //! ```
 
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
-/// Waits until `fd` becomes readable or reports an error/hangup condition.
+/// Waits until the given descriptor becomes readable or reports an error/hangup
+/// condition.
 ///
-/// The descriptor should remain open and should not be reused for a different
-/// resource while the future is pending. Dropping the future requests
-/// cancellation, but cancellation is best-effort: on macOS it is queued back to
-/// the owner thread and may be dropped if that queue is full, with cleanup left
-/// to runtime shutdown. Avoid assumptions that an immediately reused raw fd is
-/// unrelated to an in-flight or just-cancelled wait.
+/// Accepts anything that borrows a file descriptor ([`AsFd`]) —
+/// for example `&std::net::TcpStream`, a [`BorrowedFd`](std::os::fd::BorrowedFd),
+/// or one of runite's own I/O types. The descriptor is kept borrowed for the
+/// lifetime of the returned future, so it cannot be closed out from under the
+/// wait.
+///
+/// Dropping the future requests cancellation, but cancellation is best-effort:
+/// on macOS it is queued back to the owner thread and may be dropped if that
+/// queue is full, with cleanup left to runtime shutdown.
 ///
 /// On readiness, callers must perform their own read and handle nonblocking
 /// errors according to the descriptor's mode.
@@ -71,14 +77,13 @@ use std::os::fd::RawFd;
 ///
 /// ```no_run
 /// use std::io::{Read, Write};
-/// use std::os::fd::AsRawFd;
+/// use std::os::fd::AsFd;
 /// use std::os::unix::net::UnixStream;
 ///
 /// let (mut reader, mut writer) = UnixStream::pair()?;
-/// let read_fd = reader.as_raw_fd();
 ///
 /// runite::spawn(async move {
-///     runite::fd::wait_readable(read_fd)
+///     runite::fd::wait_readable(reader.as_fd())
 ///         .await
 ///         .expect("reader should become readable");
 ///     let mut bytes = [0; 5];
@@ -93,14 +98,28 @@ use std::os::fd::RawFd;
 /// runite::run();
 /// # std::io::Result::Ok(())
 /// ```
-pub async fn wait_readable(fd: RawFd) -> io::Result<()> {
-    crate::sys::current::fd::wait_readable(fd).await
+pub async fn wait_readable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
+    let raw = fd.as_fd().as_raw_fd();
+    // `fd` is held across the await, keeping the descriptor borrowed (and, for an
+    // owned handle, open) for the whole wait.
+    crate::sys::current::fd::wait_readable(raw).await
+}
+
+/// Waits until the given descriptor becomes writable or reports an error/hangup
+/// condition.
+///
+/// The write-readiness counterpart of [`wait_readable`]; see it for the
+/// borrowing, cancellation, and readiness-retry semantics.
+pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
+    let raw = fd.as_fd().as_raw_fd();
+    crate::sys::current::fd::wait_writable(raw).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::wait_readable;
     use crate::{queue_macrotask, run, spawn};
+    use std::os::fd::BorrowedFd;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -119,7 +138,10 @@ mod tests {
             let observed = Arc::clone(&observed);
             move || {
                 spawn(async move {
-                    wait_readable(read_fd)
+                    // SAFETY: `read_fd` is the open read end and stays open until
+                    // this task closes it below, outliving the borrow.
+                    let borrowed = unsafe { BorrowedFd::borrow_raw(read_fd) };
+                    wait_readable(borrowed)
                         .await
                         .expect("pipe read end should become readable");
                     observed.store(true, Ordering::SeqCst);

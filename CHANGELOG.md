@@ -5,106 +5,102 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] — 2026-07-04
 
-### Added
+Initial public release of `runite`: an event-loop-per-thread async runtime for
+Rust, built on io_uring (Linux `x86_64`/`aarch64`), kqueue (macOS `aarch64`),
+and I/O completion ports (Windows `x86_64`), with JavaScript-style
+deterministic microtask/macrotask scheduling. Futures on a runtime thread are
+`!Send` and never migrate; explicit worker threads and channels provide
+parallelism.
 
-- Initial public release of `runite`, an event-loop-per-thread async runtime built on
-  io_uring (Linux `x86_64`) and kqueue (macOS `aarch64`).
-- `#[runite::main]` entry-point macro (supports both `fn main` and `async fn main`).
-- Async `fs`, `net` (TCP/UDP/Unix-domain sockets), `time`, and `channel` services.
-- Cross-thread worker spawning and task queueing.
-- Optional `hyper` client integration and `futures-io` compatibility adapters.
-- Reproducible toolchain via `mise`, Agent Cop static-analysis checks, GitHub CI
-  (Linux + macOS), code-coverage and benchmark jobs, and a tag-triggered crates.io
-  release workflow.
-- Integration test suites and criterion benchmarks for the runtime and I/O paths.
-  The benchmark suite covers scheduler scaling (`spawn_many`), bulk channel
-  throughput (`mpsc_throughput`), microtask/macrotask dispatch (`queueable`), and
-  the `RwLock`, `JoinSet`, `broadcast`, and `interval` primitives.
-- Task cancellation: `JoinHandle::abort`, `JoinHandle::is_finished`, and a cloneable
-  `AbortHandle` (via `JoinHandle::abort_handle`). Aborting drops the task's future, which
-  cancels any in-flight driver operation it is parked on.
-- Async subprocess support in `runite::process`: `Command`/`Child` with piped async stdio
-  (`ChildStdin`/`ChildStdout`/`ChildStderr`), `kill`, and `wait`. On Linux child exit is
-  awaited via a `pidfd` registered with io_uring readiness (no `SIGCHLD` handler, no
-  blocking-pool offload); the same `Command`/`Child` interface is provided on macOS.
-- `broadcast` and `watch` channels in `runite::channel`: multi-producer/multi-consumer
-  fan-out (with `RecvError::Lagged`) and a latest-value cell with `changed()` notifications.
-- Async `BufReader`/`BufWriter` adapters in `runite::io` to amortize syscalls over the
-  underlying `AsyncRead`/`AsyncWrite`.
-- Async `stdout()`/`stderr()` writers (alongside `stdin()`), and a `SignalKind::WindowChange`
-  (`SIGWINCH`) signal for terminal-resize-aware TUIs.
-- `TcpStream::into_split` producing owned `OwnedReadHalf`/`OwnedWriteHalf` (recombine with
-  `TcpStream::reunite`; `ReuniteError` on mismatch) so reads and writes can run in separate tasks.
-- `TcpListener::incoming` and `UnixListener::incoming`, returning a `Stream` of inbound
-  connections.
-- `sync::RwLock<T>`: an async reader-writer lock with `RwLockReadGuard`/`RwLockWriteGuard`,
-  `read`/`write`/`try_read`/`try_write`, and FIFO-fair wakeups (queued waiters block the
-  fast path), matching the single-threaded waiter model of the other `sync` primitives.
-- `io::copy` and `io::copy_bidirectional` for streaming between any `AsyncRead`/`AsyncWrite`,
-  with write-half shutdown propagated on EOF in the bidirectional case.
-- Awaitable `time::interval(period) -> Interval` with `tick().await -> Instant` and
-  `MissedTickBehavior` (`Burst`/`Delay`/`Skip`), complementing the callback-style
-  `time::set_interval`.
-- `net::TcpSocket`: a configurable socket builder exposing `SO_REUSEADDR`/`SO_REUSEPORT`
-  (set before `bind`), enabling per-core `SO_REUSEPORT` accept loops.
-- `task::JoinSet<T>`: a collection of spawned local tasks with `join_next().await`,
-  `abort_all`, and `detach_all`; dropping the set aborts its still-running tasks.
+### Runtime & scheduling
 
-### Fixed
+- JS-style event loop per thread: microtask checkpoints drain fully between
+  macrotasks (timers, I/O completions, cross-thread work), giving deterministic
+  flush points for reactive code. A `tracing` warning fires if a single
+  checkpoint runs 1000 microtasks without yielding while macrotasks wait.
+- Entry points: `block_on` (drive a borrowed, non-`Send` future to completion
+  and return its value), `run` (drive the loop to idle), `run_until_stalled` /
+  `run_ready_tasks` (pump the loop from a host frame loop without blocking),
+  and the `#[runite::main]` / `#[runite::test]` attribute macros. `main` and
+  `test` honor `Termination`, so an `async fn main() -> Result` that errors
+  exits non-zero; both accept `crate = "..."` for renamed dependencies.
+- `spawn` for `!Send` futures with `JoinHandle` (detach-on-drop), `abort` /
+  `AbortHandle`, `task::JoinSet` for structured ownership of local tasks, and
+  `task::spawn_blocking` for offloading blocking work to a bounded pool.
+- `spawn_worker` starts additional runtime threads (each with its own loop and
+  driver); `ThreadHandle::queue_macrotask` is the explicit, `Send`-bounded
+  cross-thread boundary, with a bounded remote queue that reports backpressure
+  instead of blocking or dropping. Internal completion and task wakes use a
+  reserved path that a full queue cannot starve.
+- Panic isolation: a panic in a spawned task resolves its `JoinHandle` to
+  `JoinError::Panicked` instead of unwinding the event loop; scheduled
+  callbacks and blocking-pool jobs are likewise firewalled, and a worker
+  thread that dies always notifies its parent. Re-entering the event loop
+  (`run` inside a task) is rejected.
+- Cancellation is `Drop`-driven and documented per method: reads on files,
+  sockets, and stdin are cancel-safe (bytes received by an in-flight operation
+  are retained for the next read); write cancellation semantics are documented
+  where they differ.
 
-- I/O completions now resume on a **macro turn** instead of a microtask, matching
-  JavaScript event-loop semantics (a completed read/write behaves like a Node
-  poll-phase callback). Previously a same-thread I/O completion woke its future as a
-  microtask, letting it preempt an in-flight microtask checkpoint and potentially
-  starve the timer/macrotask queues. In-process resolutions (channel sends, `Notify`,
-  `yield_now`) remain microtasks — the `Promise.resolve` analog. Each completion now
-  carries an explicit wake class (`WakeClass::Microtask`/`Macrotask`) set by its
-  creator. See the `event_loop_order` integration suite for the asserted contract.
-- `fs::create_dir_all` no longer returns `Ok(())` when the destination path already
-  exists as a non-directory (e.g. a regular file); it now reports `AlreadyExists`,
-  matching `std::fs::create_dir_all`.
-- `process::Command::output` now concurrently drains a caller-piped stderr, preventing a
-  deadlock where a child that fills the stderr pipe buffer would block while the runtime
-  waited to read stdout.
-- `sync::OnceCell::get_or_init` no longer becomes permanently stuck if the initializer
-  future is cancelled (dropped) or panics; the cell resets and a waiting caller retries
-  initialization.
-- `sync::Notify` no longer loses a `notify_one` notification when the selected waiter's
-  future is dropped before completing; the notification is forwarded to the next waiter
-  (or stored as a permit). Broadcast wakes from `notify_waiters` are unaffected.
+### I/O services
 
-### Changed
+- `net`: async TCP (`TcpStream`/`TcpListener` with owned split halves,
+  `TcpSocket` builder for `SO_REUSEADDR`/`SO_REUSEPORT`), UDP, and Unix-domain
+  sockets (stream, listener, datagram) implementing the crate's
+  `AsyncRead`/`AsyncWrite` traits. `TcpListener::bind` matches `std` (no
+  implicit `SO_REUSEADDR`). Optional Hyper integration (`hyper` feature):
+  transport impls for `TcpStream` **and** `UnixStream`, plus `hyper_rt`'s
+  `RuniteExecutor`/`RuniteTimer` runtime glue — hyper client *and server*,
+  http1 *and http2*, over TCP or Unix-domain sockets.
+- `fs`: async file open/read/write (cursor and positional), metadata and
+  `symlink_metadata`, `seek`, `set_len`, sync (`F_FULLFSYNC` on macOS),
+  directory create/remove/rename, and a streaming `read_dir`.
+- `process`: async `Command`/`Child` with piped async stdio, `kill`, `wait`,
+  and `std`-shaped `output()` returning `Output { status, stdout, stderr }`
+  (non-zero exit is data, not an error; stdout and stderr are drained
+  concurrently). Child exit on Linux is awaited via `pidfd` with io_uring —
+  no `SIGCHLD` handler.
+- `io`: poll-based `AsyncRead`/`AsyncWrite`/`Stream` traits with extension
+  combinators, `BufReader`/`BufWriter`, `copy`/`copy_bidirectional`, and
+  optional `futures-io` adapters (`futures-compat` feature).
+- `time`: `sleep`, `timeout`, awaitable `interval` with `MissedTickBehavior`,
+  and JS-style callback timers (`set_timeout`/`set_interval` returning
+  cloneable cancellation tokens).
+- `channel`: bounded/unbounded `mpsc`, `oneshot`, `broadcast` (with lag
+  reporting), and `watch` — all with cancel-safe `recv` and `Send + Sync`
+  wakers, usable from any thread while values resolve on their owning loop.
+- `sync`: async `Mutex`, `RwLock` (FIFO-fair), `Semaphore`, `Notify`, and
+  `OnceCell`; `signal`: Unix signal streams plus a cross-platform `ctrl_c`;
+  `stdio`: async stdin/stdout/stderr.
+- Descriptor/handle interop: on Unix, `AsFd`/`AsRawFd`/`From<OwnedFd>` and
+  `from_std` adopters on every fd-backed type plus
+  `fd::wait_readable`/`wait_writable` readiness helpers taking `impl AsFd`
+  (all `#[cfg(unix)]`); on Windows, the parallel
+  `AsHandle`/`AsRawHandle`/`AsSocket`/`AsRawSocket` impls with
+  `From<OwnedHandle>`/`From<OwnedSocket>`/`from_std` adoption (which associates
+  the handle with the completion port).
 
-- Breaking scheduling/timer API rename: `queue_future` → `spawn`,
-  `queue_task` → `queue_macrotask`, root `timeout`/`interval` closure timers →
-  `time::set_timeout`/`time::set_interval`, and `time::deadline` →
-  `time::timeout`. `time::interval` is now the awaitable interval. The
-  cross-thread `ThreadHandle::queue_task`/`WorkerHandle::queue_task` methods were
-  likewise renamed to `queue_macrotask` for naming consistency.
-- Awaiting a `JoinHandle<T>` now yields `Result<T, JoinError>` instead of `T`, resolving to
-  `Err(JoinError::Aborted)` when the task is aborted. `JoinError` gained an `Aborted` variant
-  alongside `Cancelled`.
-- Non-blocking control syscalls (socket/bind/listen/shutdown/close, fd duplication) now run
-  inline on the event loop instead of being offloaded to the blocking thread pool when their
-  io_uring opcode is unsupported.
-- Linux network data-path operations (connect/accept/send/recv/datagram recv) now fall back to a
-  non-blocking readiness path (`IORING_OP_POLL_ADD`) instead of the blocking thread pool when an
-  io_uring opcode is unsupported, so socket I/O is never offloaded.
-- The run loop now polls the driver **once per turn** (its poll phase) rather than after every
-  microtask. Because every externally-reaped event (I/O completion, expired timer, cross-thread
-  task, worker exit) is a macrotask and cannot run mid-checkpoint, the old per-microtask poll
-  issued one `kevent`/`io_uring` syscall per microtask without affecting ordering. Batching it
-  makes microtask-bound scheduling dramatically faster (e.g. `spawn`-fanout and `yield_now`
-  drop from a ~12 µs/turn syscall floor to tens of nanoseconds) while preserving JS-equivalent
-  micro/macro ordering.
+### Platform notes
 
-### Security
+- Linux: one io_uring ring per runtime thread; cross-thread wakes via
+  `IORING_OP_MSG_RING`. Recommended kernel floor is the 6.1 LTS line; hard
+  minimums are 5.6 (single-threaded) and 5.18 (multithreaded), with
+  synchronous fallbacks for newer opcodes (socket lifecycle ops, `ftruncate`).
+  CQ overflow and missing-feature conditions are detected and reported.
+- macOS `aarch64`: kqueue readiness plus a blocking pool for filesystem work;
+  `sync_all`/`sync_data` use `F_FULLFSYNC` for real durability.
+- Windows `x86_64` (MSVC): one I/O completion port per runtime thread;
+  overlapped `ReadFile`/`WriteFile` for files and child pipes; overlapped
+  Winsock (`ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom`)
+  for TCP/UDP; `CancelIoEx`-based drop-cancellation; blocking-pool offload for
+  open/metadata/directory scans/DNS/console stdio; `RegisterWaitForSingleObject`
+  child-exit waits; a waitable-timer APC for runtime timers;
+  `runite::signal::windows` console control events backing the portable
+  `signal::ctrl_c`; and `runite::os::windows::fs` extensions. See
+  `docs/WINDOWS.md` for the design. `runite::fd` and `runite::net::unix` are
+  Unix-only, and `TcpSocket::set_reuseport` reports `Unsupported` on Windows.
+- Stable Rust only (MSRV 1.88); no nightly features.
 
-- Fixed a latent use-after-free window in the Drop-cancellation path where a detached I/O
-  buffer guard could be released on the `IORING_OP_ASYNC_CANCEL` completion before the
-  original operation had finished with the buffer. Buffers are now released solely on the
-  original operation's completion.
-
-[Unreleased]: https://github.com/willmtemple/runite/commits/main
+[0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0

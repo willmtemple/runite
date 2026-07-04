@@ -109,6 +109,7 @@ pub struct Interval {
 /// | [`Delay`](Self::Delay) | At `now + p`, drifting the schedule forward. |
 /// | [`Skip`](Self::Skip) | At the first original schedule-grid deadline after `now`. |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum MissedTickBehavior {
     /// Fire missed ticks back-to-back until the interval catches up, then
     /// continue on the original schedule.
@@ -271,6 +272,12 @@ where
 ///
 /// If the wrapped future and the sleeper are both ready in the same poll,
 /// `future` wins: it is polled first and the result is `Ok(output)`.
+///
+/// # Cancel safety
+///
+/// `timeout` is as cancel-safe as the `future` it wraps: dropping the `timeout`
+/// future drops the inner future and cancels the timer, so it inherits whatever
+/// cancel-safety `future` has. It does not add or remove data on cancellation.
 ///
 /// # Examples
 ///

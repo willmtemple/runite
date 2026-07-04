@@ -31,7 +31,8 @@ use std::fmt;
 use std::future::poll_fn;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::task::{Context, Poll};
 
 use crate::op::completion::{CompletionFuture, CompletionHandle};
@@ -51,14 +52,16 @@ use crate::sys::current::channel::runtime_waiter;
 /// assert_eq!(*receiver.borrow(), 1);
 /// ```
 pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
-    let shared = Arc::new(Mutex::new(State {
-        value: initial,
-        version: 0,
-        sender_count: 1,
-        receiver_count: 1,
-        waiters: Vec::new(),
-        next_waiter_id: 1,
-    }));
+    let shared = Arc::new(Shared {
+        value: RwLock::new(initial),
+        version: AtomicU64::new(0),
+        book: Arc::new(Mutex::new(Book {
+            sender_count: 1,
+            receiver_count: 1,
+            waiters: Vec::new(),
+            next_waiter_id: 1,
+        })),
+    });
     (
         Sender {
             shared: Arc::clone(&shared),
@@ -78,7 +81,7 @@ pub fn channel<T: Send + 'static>(initial: T) -> (Sender<T>, Receiver<T>) {
 /// newer version on their owning runtime threads. Intermediate values coalesce:
 /// receivers observe that the version changed, then borrow the latest value.
 pub struct Sender<T: Send + 'static> {
-    shared: Arc<Mutex<State<T>>>,
+    shared: Arc<Shared<T>>,
 }
 
 /// Receiving half of a watch channel.
@@ -87,22 +90,45 @@ pub struct Sender<T: Send + 'static> {
 /// to wait for a newer value, then [`borrow_and_update`](Self::borrow_and_update)
 /// to access it and mark that version as seen.
 pub struct Receiver<T: Send + 'static> {
-    shared: Arc<Mutex<State<T>>>,
+    shared: Arc<Shared<T>>,
     version: u64,
     wait: Option<CompletionFuture<Result<u64, RecvError>>>,
 }
 
 /// Borrowed watch value.
 ///
-/// This guard dereferences to the current value and holds the channel lock while
-/// it is alive, so keep borrows short and avoid holding them across `.await`.
+/// This guard dereferences to the current value and holds a **read** lock on the
+/// value slot while it is alive. Multiple `Ref`s may be held at once — including
+/// several on the same thread — because reads are shared. Holding a `Ref` across
+/// a [`Sender::send`] (or any mutation) on the *same thread* will deadlock,
+/// because the send needs the write lock; keep borrows short and never hold one
+/// across `.await`.
 pub struct Ref<'a, T: Send + 'static> {
-    guard: MutexGuard<'a, State<T>>,
+    guard: RwLockReadGuard<'a, T>,
 }
 
-struct State<T: Send + 'static> {
-    value: T,
-    version: u64,
+/// Shared channel storage.
+///
+/// The value and the bookkeeping live behind **separate** locks so that a
+/// `Ref` (a value read lock) does not block, and is not blocked by, waiter
+/// bookkeeping. This is what lets two `Ref`s coexist on one thread — the old
+/// single-`Mutex` design deadlocked on the second borrow.
+struct Shared<T: Send + 'static> {
+    /// Current value, guarded by an `RwLock` so multiple `Ref` borrows can be
+    /// held concurrently.
+    value: RwLock<T>,
+    /// Monotonic version, bumped **under the `value` write lock** so a borrower
+    /// that reads the value and the version under the `value` read lock always
+    /// observes a consistent pair.
+    version: AtomicU64,
+    /// Waiter registry and reference counts. Held in its own `Arc<Mutex<_>>` so
+    /// the (`Send`) cancel closure can capture just the bookkeeping without
+    /// capturing `T`, keeping the channel usable with `Send`-but-not-`Sync`
+    /// values on a single thread.
+    book: Arc<Mutex<Book>>,
+}
+
+struct Book {
     sender_count: usize,
     receiver_count: usize,
     waiters: Vec<WatchWaiter>,
@@ -128,7 +154,7 @@ pub struct SendError<T>(pub T);
 /// dropped while the receiver was waiting for a newer version.
 pub struct RecvError;
 
-impl<T: Send + 'static> State<T> {
+impl Book {
     fn enqueue_waiter(
         &mut self,
         version: u64,
@@ -154,11 +180,14 @@ impl<T: Send + 'static> State<T> {
         }
     }
 
-    fn wake_changed(&mut self) -> Vec<CompletionHandle<Result<u64, RecvError>>> {
+    fn wake_changed(
+        &mut self,
+        current_version: u64,
+    ) -> Vec<CompletionHandle<Result<u64, RecvError>>> {
         let mut ready = Vec::new();
         let mut index = 0;
         while index < self.waiters.len() {
-            if self.waiters[index].version < self.version {
+            if self.waiters[index].version < current_version {
                 ready.push(self.waiters.swap_remove(index).handle);
             } else {
                 index += 1;
@@ -180,12 +209,31 @@ impl<T: Send + 'static> State<T> {
     }
 }
 
-impl<T: Send + 'static> Clone for Sender<T> {
-    fn clone(&self) -> Self {
-        self.shared
+impl<T: Send + 'static> Shared<T> {
+    fn lock_book(&self) -> std::sync::MutexGuard<'_, Book> {
+        self.book
             .lock()
             .expect("watch state should not be poisoned")
-            .sender_count += 1;
+    }
+
+    /// Replaces the value via `mutate` and bumps the version, both under the
+    /// value write lock so borrowers see a consistent (value, version) pair.
+    /// Returns the new version.
+    fn write_value(&self, mutate: impl FnOnce(&mut T)) -> u64 {
+        let mut slot = self
+            .value
+            .write()
+            .expect("watch state should not be poisoned");
+        mutate(&mut slot);
+        // Bump under the write lock: readers taking the value read lock cannot
+        // observe the new value with the old version, or vice versa.
+        self.version.fetch_add(1, Ordering::Release) + 1
+    }
+}
+
+impl<T: Send + 'static> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        self.shared.lock_book().sender_count += 1;
         Self {
             shared: Arc::clone(&self.shared),
         }
@@ -194,10 +242,7 @@ impl<T: Send + 'static> Clone for Sender<T> {
 
 impl<T: Send + 'static> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.shared
-            .lock()
-            .expect("watch state should not be poisoned")
-            .receiver_count += 1;
+        self.shared.lock_book().receiver_count += 1;
         Self {
             shared: Arc::clone(&self.shared),
             version: self.version,
@@ -225,16 +270,12 @@ impl<T: Send + 'static> Sender<T> {
     /// ```
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let waiters = {
-            let mut state = self
-                .shared
-                .lock()
-                .expect("watch state should not be poisoned");
-            if state.receiver_count == 0 {
+            let mut book = self.shared.lock_book();
+            if book.receiver_count == 0 {
                 return Err(SendError(value));
             }
-            state.value = value;
-            state.version = state.version.wrapping_add(1);
-            state.wake_changed()
+            let version = self.shared.write_value(|slot| *slot = value);
+            book.wake_changed(version)
         };
         self.complete_changed(waiters);
         Ok(())
@@ -256,13 +297,9 @@ impl<T: Send + 'static> Sender<T> {
     /// ```
     pub fn send_modify(&self, f: impl FnOnce(&mut T)) {
         let waiters = {
-            let mut state = self
-                .shared
-                .lock()
-                .expect("watch state should not be poisoned");
-            f(&mut state.value);
-            state.version = state.version.wrapping_add(1);
-            state.wake_changed()
+            let mut book = self.shared.lock_book();
+            let version = self.shared.write_value(f);
+            book.wake_changed(version)
         };
         self.complete_changed(waiters);
     }
@@ -286,15 +323,22 @@ impl<T: Send + 'static> Sender<T> {
     /// ```
     pub fn send_if_modified(&self, f: impl FnOnce(&mut T) -> bool) -> bool {
         let waiters = {
-            let mut state = self
-                .shared
-                .lock()
-                .expect("watch state should not be poisoned");
-            if !f(&mut state.value) {
-                return false;
-            }
-            state.version = state.version.wrapping_add(1);
-            state.wake_changed()
+            let mut book = self.shared.lock_book();
+            // Run `f` under the value write lock; only bump the version and
+            // collect waiters if it reports a modification, otherwise bail
+            // (dropping both guards) without advancing the version.
+            let version = {
+                let mut slot = self
+                    .shared
+                    .value
+                    .write()
+                    .expect("watch state should not be poisoned");
+                if !f(&mut slot) {
+                    return false;
+                }
+                self.shared.version.fetch_add(1, Ordering::Release) + 1
+            };
+            book.wake_changed(version)
         };
         self.complete_changed(waiters);
         true
@@ -302,7 +346,7 @@ impl<T: Send + 'static> Sender<T> {
 
     /// Borrows the current value from the sender side.
     ///
-    /// The returned [`Ref`] holds the channel lock until dropped.
+    /// The returned [`Ref`] holds a read lock on the value until dropped.
     ///
     /// # Examples
     ///
@@ -314,7 +358,8 @@ impl<T: Send + 'static> Sender<T> {
         Ref {
             guard: self
                 .shared
-                .lock()
+                .value
+                .read()
                 .expect("watch state should not be poisoned"),
         }
     }
@@ -333,12 +378,9 @@ impl<T: Send + 'static> Sender<T> {
     /// ```
     pub fn subscribe(&self) -> Receiver<T> {
         let version = {
-            let mut state = self
-                .shared
-                .lock()
-                .expect("watch state should not be poisoned");
-            state.receiver_count += 1;
-            state.version
+            let mut book = self.shared.lock_book();
+            book.receiver_count += 1;
+            self.shared.version.load(Ordering::Acquire)
         };
         Receiver {
             shared: Arc::clone(&self.shared),
@@ -358,18 +400,11 @@ impl<T: Send + 'static> Sender<T> {
     /// assert_eq!(sender.receiver_count(), 0);
     /// ```
     pub fn receiver_count(&self) -> usize {
-        self.shared
-            .lock()
-            .expect("watch state should not be poisoned")
-            .receiver_count
+        self.shared.lock_book().receiver_count
     }
 
     fn complete_changed(&self, waiters: Vec<CompletionHandle<Result<u64, RecvError>>>) {
-        let version = self
-            .shared
-            .lock()
-            .expect("watch state should not be poisoned")
-            .version;
+        let version = self.shared.version.load(Ordering::Acquire);
         for waiter in waiters {
             waiter.complete(Ok(version));
         }
@@ -399,6 +434,12 @@ impl<T: Send + 'static> Receiver<T> {
     /// runite::run();
     /// ```
     ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe: dropping the returned future before it resolves does not
+    /// advance the receiver's observed version, so a later `changed` still
+    /// reports the pending change.
+    ///
     /// # Panics
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
@@ -422,14 +463,15 @@ impl<T: Send + 'static> Receiver<T> {
         Ref {
             guard: self
                 .shared
-                .lock()
+                .value
+                .read()
                 .expect("watch state should not be poisoned"),
         }
     }
 
     /// Borrows the current value and marks it observed.
     ///
-    /// The returned [`Ref`] holds the channel lock until dropped.
+    /// The returned [`Ref`] holds a read lock on the value until dropped.
     ///
     /// # Examples
     ///
@@ -439,11 +481,14 @@ impl<T: Send + 'static> Receiver<T> {
     /// assert_eq!(*receiver.borrow_and_update(), 2);
     /// ```
     pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
+        // Read the value and the version under the same value read lock so the
+        // recorded version matches the value being returned.
         let guard = self
             .shared
-            .lock()
+            .value
+            .read()
             .expect("watch state should not be poisoned");
-        self.version = guard.version;
+        self.version = self.shared.version.load(Ordering::Acquire);
         Ref { guard }
     }
 
@@ -452,11 +497,21 @@ impl<T: Send + 'static> Receiver<T> {
             match Pin::new(future).poll(cx) {
                 Poll::Ready(result) => {
                     self.wait.take();
-                    if let Ok(version) = result {
-                        self.version = version;
-                        Poll::Ready(Ok(()))
-                    } else {
-                        Poll::Ready(Err(RecvError))
+                    match result {
+                        Ok(version) if version > self.version => {
+                            self.version = version;
+                            Poll::Ready(Ok(()))
+                        }
+                        Ok(_) => {
+                            // Stale completion: a waiter registered at an older
+                            // version fired, but `self.version` has since caught
+                            // up or passed it (e.g. via `borrow_and_update`).
+                            // Accepting it would regress `self.version` and
+                            // report a spurious change, so discard it and
+                            // re-register instead of moving the version backward.
+                            self.poll_changed(cx)
+                        }
+                        Err(_) => Poll::Ready(Err(RecvError)),
                     }
                 }
                 Poll::Pending => Poll::Pending,
@@ -464,17 +519,19 @@ impl<T: Send + 'static> Receiver<T> {
         } else {
             let (future, handle) = runtime_waiter::<Result<u64, RecvError>>();
             let immediate = {
-                let mut state = self
-                    .shared
-                    .lock()
-                    .expect("watch state should not be poisoned");
-                if state.version > self.version {
-                    Some(Ok(state.version))
-                } else if state.sender_count == 0 {
+                let mut book = self.shared.lock_book();
+                // Read the version under the book lock: `send` bumps the version
+                // (under the value lock) and then wakes waiters under this same
+                // book lock, so checking the version and enqueueing here cannot
+                // race with a send in a way that loses the wakeup.
+                let current = self.shared.version.load(Ordering::Acquire);
+                if current > self.version {
+                    Some(Ok(current))
+                } else if book.sender_count == 0 {
                     Some(Err(RecvError))
                 } else {
-                    let waiter_id = state.enqueue_waiter(self.version, handle.clone());
-                    set_cancel_waiter(&handle, &self.shared, waiter_id);
+                    let waiter_id = book.enqueue_waiter(self.version, handle.clone());
+                    set_cancel_waiter(&handle, &self.shared.book, waiter_id);
                     None
                 }
             };
@@ -493,23 +550,23 @@ impl<'a, T: Send + 'static> Deref for Ref<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard.value
+        &self.guard
     }
 }
 
-fn set_cancel_waiter<T: Send + 'static>(
+fn set_cancel_waiter(
     handle: &CompletionHandle<Result<u64, RecvError>>,
-    shared: &Arc<Mutex<State<T>>>,
+    book: &Arc<Mutex<Book>>,
     waiter_id: usize,
 ) {
-    let cancel_shared = Arc::clone(shared);
+    let cancel_book = Arc::clone(book);
     let cancel_handle = handle.clone();
     handle.set_cancel(move || {
-        let mut state = cancel_shared
+        let mut book = cancel_book
             .lock()
             .expect("watch state should not be poisoned");
-        state.remove_waiter(waiter_id);
-        drop(state);
+        book.remove_waiter(waiter_id);
+        drop(book);
         cancel_handle.finish(None);
     });
 }
@@ -517,11 +574,8 @@ fn set_cancel_waiter<T: Send + 'static>(
 impl<T: Send + 'static> Drop for Sender<T> {
     fn drop(&mut self) {
         let waiters = {
-            let mut state = self
-                .shared
-                .lock()
-                .expect("watch state should not be poisoned");
-            state.close_sender()
+            let mut book = self.shared.lock_book();
+            book.close_sender()
         };
         for waiter in waiters {
             waiter.complete(Err(RecvError));
@@ -531,11 +585,8 @@ impl<T: Send + 'static> Drop for Sender<T> {
 
 impl<T: Send + 'static> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut state = self
-            .shared
-            .lock()
-            .expect("watch state should not be poisoned");
-        state.receiver_count = state
+        let mut book = self.shared.lock_book();
+        book.receiver_count = book
             .receiver_count
             .checked_sub(1)
             .expect("receiver count underflow: more drops than creates");
@@ -570,6 +621,18 @@ mod tests {
     fn receiver_borrows_initial_value() {
         let (_sender, receiver) = channel(5usize);
         assert_eq!(*receiver.borrow(), 5);
+    }
+
+    #[test]
+    fn two_borrows_on_same_thread_do_not_deadlock() {
+        // Two live borrows on one thread must not deadlock: `Ref` holds a
+        // shared read lock on the value slot, not an exclusive channel lock,
+        // so any number of concurrent borrows coexist.
+        let (sender, receiver) = channel(7usize);
+        let a = receiver.borrow();
+        let b = sender.borrow();
+        let c = receiver.borrow();
+        assert_eq!((*a, *b, *c), (7, 7, 7));
     }
 
     #[test]

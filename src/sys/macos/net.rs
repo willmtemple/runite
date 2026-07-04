@@ -17,6 +17,9 @@ use crate::sys::blocking::spawn_blocking;
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
+/// Peek flag for `recv`-family operations, re-exported for the public layer.
+pub const MSG_PEEK: i32 = libc::MSG_PEEK;
+
 type RecvFuture = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type SendFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type ShutdownFuture = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
@@ -184,7 +187,8 @@ async fn bind_listener_inner(addr: SocketAddr, backlog: Option<i32>) -> io::Resu
     })
     .await?;
 
-    set_reuse_addr(listener.as_raw_fd(), true)?;
+    // Do not set SO_REUSEADDR implicitly (matches std::net::TcpListener::bind).
+    // Callers who want it opt in via `net::TcpSocket::set_reuseaddr` before bind.
 
     bind(NetOp::Bind {
         fd: listener.as_raw_fd(),
@@ -760,7 +764,7 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
     cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) })?;
     Ok(())

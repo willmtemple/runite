@@ -1,3 +1,11 @@
+//! # Async filesystem tour
+//!
+//! Reads metadata, file contents, and directory listings through the async
+//! `runite::fs` API — `io_uring`-backed on Linux. A feature tour rather than an
+//! application; see `command_center.rs` and friends for the model in action.
+//!
+//! Run it: `cargo run --example async_fs_showcase`
+
 use runite::fs::{self, File};
 use std::path::PathBuf;
 

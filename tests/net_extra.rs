@@ -7,8 +7,6 @@ use runite::io::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use runite::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -286,6 +284,139 @@ fn udp_peek_recv_and_truncation_on_connected_socket() {
     });
 }
 
+/// A read submitted with a large buffer that is then abandoned, and later polled
+/// with a smaller buffer, must not lose the received bytes: the surplus is
+/// retained and served by subsequent reads. Regression for the pending-op /
+/// buffer-shrink data loss.
+#[test]
+fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
+    use runite::io::AsyncRead;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    let received = block_on(|| async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Barrier: the client must not write until the 64-byte read has been
+        // submitted, or a readiness-based backend (macOS) could complete the
+        // first poll synchronously into the discarded `big` buffer and hang
+        // the test. (Completion-based recvs are always Pending on first poll,
+        // so io_uring never hits this window.)
+        let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
+
+        let server = runite::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+
+            // Submit a read with a large (64-byte) buffer, then abandon that
+            // poll so the recv stays stashed on the stream sized for 64 bytes.
+            poll_fn(|cx| {
+                let mut big = [0u8; 64];
+                // Nothing has been written yet (the client waits on the
+                // barrier), so this must leave the 64-byte recv in flight.
+                assert!(
+                    Pin::new(&mut stream).poll_read(cx, &mut big).is_pending(),
+                    "first poll must leave the large read in flight"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            let _ = registered_tx.send(());
+
+            // Read 4 bytes at a time. The first small read completes the stashed
+            // 64-byte recv and must keep the surplus; the overflow buffer serves
+            // the rest. No byte may be lost or spuriously error.
+            let mut out = Vec::new();
+            while out.len() < 10 {
+                let mut small = [0u8; 4];
+                let n = poll_fn(|cx| Pin::new(&mut stream).poll_read(cx, &mut small))
+                    .await
+                    .expect("read must not error on a shrunk buffer");
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&small[..n]);
+            }
+            out
+        });
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        registered_rx
+            .recv()
+            .await
+            .expect("server should register its large read");
+        client.write_all(b"0123456789").await.expect("write");
+        let out = server.await.expect("server task");
+        drop(client);
+        out
+    });
+
+    assert_eq!(&received, b"0123456789");
+}
+
+/// The inherent `read()` now stashes its operation on the stream (like the
+/// `AsyncRead` trait path), so abandoning a read and reading again does not lose
+/// bytes or leave two recvs racing. Regression for inherent-method cancellation.
+#[test]
+fn tcp_inherent_read_stashes_operation() {
+    use std::future::poll_fn;
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let received = block_on(|| async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Barrier: the client must not write until the server's first poll has
+        // registered its read. On readiness-based backends (macOS) a recv can
+        // complete *synchronously on the first poll* if data is already in the
+        // socket buffer, which would consume the bytes into the discarded
+        // scratch buffer and deadlock the test. (Completion-based recvs are
+        // always Pending on first poll, so io_uring never hits this window.)
+        let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
+
+        let server = runite::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+
+            // Submit an inherent read, then abandon it after a single poll. The
+            // recv is stashed on the stream rather than owned by this future.
+            {
+                let mut scratch = [0u8; 16];
+                let mut fut = pin!(stream.read(&mut scratch));
+                poll_fn(|cx| {
+                    // Nothing has been written yet (the client waits on the
+                    // barrier below), so the first poll must be Pending.
+                    assert!(
+                        fut.as_mut().poll(cx).is_pending(),
+                        "first poll must leave the read in flight"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            let _ = registered_tx.send(());
+
+            // The next read observes the peer's bytes via the stashed op.
+            let mut out = [0u8; 16];
+            let n = stream.read(&mut out).await.expect("read");
+            out[..n].to_vec()
+        });
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        registered_rx
+            .recv()
+            .await
+            .expect("server should register its read");
+        client.write_all(b"hello").await.expect("write");
+        let out = server.await.expect("server task");
+        drop(client);
+        out
+    });
+
+    assert_eq!(&received, b"hello");
+}
+
 #[cfg(feature = "hyper")]
 #[test]
 fn hyper_http1_client_uses_runite_tcp_stream() {
@@ -346,6 +477,9 @@ fn hyper_http1_client_uses_runite_tcp_stream() {
 
 #[cfg(unix)]
 mod unix_extra {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use runite::net::unix::{UnixDatagram, UnixListener, UnixStream};
     use std::path::Path;

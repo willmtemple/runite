@@ -14,51 +14,16 @@ use std::task::{Context, Poll, Waker};
 
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, OpenOptions, RawDirEntry, RawMetadata};
-use crate::platform::linux::runtime::{
-    QueueError, ThreadHandle, current_thread_handle, with_current_driver,
-};
+use crate::platform::linux::runtime::{ThreadHandle, current_thread_handle, with_current_driver};
 use crate::platform::linux::uring::{
-    IORING_FSYNC_DATASYNC, IORING_OP_CLOSE, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
-    IORING_OP_MKDIRAT, IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX,
-    IORING_OP_UNLINKAT, IORING_OP_WRITE, IoUringCqe,
+    IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE, IORING_OP_MKDIRAT,
+    IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX, IORING_OP_UNLINKAT,
+    IORING_OP_WRITE, IoUringCqe,
 };
 
 const STATX_BASIC_MASK: u32 =
     libc::STATX_TYPE | libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_NLINK;
 const FILE_CURSOR: u64 = u64::MAX;
-
-// TODO(roadmap): unwired io_uring fs-close / op-classifier scaffolding; a Linux
-// agent will wire or remove it before release. See ROADMAP.md.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    IoUring,
-    Offload,
-    Inline,
-}
-
-#[allow(dead_code)]
-pub fn execution_path(op: &FsOp) -> ExecutionPath {
-    match op {
-        // `getdents`/`std::fs::read_dir` can block on disk and has no io_uring
-        // opcode, so it streams on the blocking pool.
-        FsOp::ReadDir { .. } => ExecutionPath::Offload,
-        // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so it runs inline.
-        FsOp::Duplicate { .. } => ExecutionPath::Inline,
-        FsOp::Open { .. }
-        | FsOp::Read { .. }
-        | FsOp::Write { .. }
-        | FsOp::Metadata { .. }
-        | FsOp::SetLen { .. }
-        | FsOp::SyncAll { .. }
-        | FsOp::SyncData { .. }
-        | FsOp::CreateDir { .. }
-        | FsOp::RemoveFile { .. }
-        | FsOp::RemoveDir { .. }
-        | FsOp::Rename { .. }
-        | FsOp::Close { .. } => ExecutionPath::IoUring,
-    }
-}
 
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
     let FsOp::Open { path, options } = op else {
@@ -204,7 +169,7 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         unreachable!("set_len backend called with non-set_len op");
     };
 
-    submit_uring::<(), _>(
+    match submit_uring::<(), _>(
         move |sqe| {
             sqe.opcode = IORING_OP_FTRUNCATE;
             sqe.fd = fd;
@@ -213,6 +178,45 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         move |cqe| cqe_to_result(cqe).map(|_| ()),
     )
     .await
+    {
+        // IORING_OP_FTRUNCATE requires Linux 6.9. On older kernels fall back to
+        // a synchronous ftruncate(2): on a regular file it is a fast metadata
+        // update, so running it inline (like the socket lifecycle fallbacks) is
+        // acceptable rather than paying a blocking-pool hop.
+        Err(error) if fs_should_fallback(&error) => set_len_sync(fd, len),
+        result => result,
+    }
+}
+
+fn set_len_sync(fd: RawFd, len: u64) -> io::Result<()> {
+    // SAFETY: ftruncate takes only a descriptor and a length; no user pointers.
+    cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())
+}
+
+/// Whether an io_uring op error indicates the opcode is unavailable on this
+/// kernel and a synchronous-syscall fallback should be attempted.
+fn fs_should_fallback(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+    )
+}
+
+/// Repositions the file's kernel cursor. `lseek(2)` on a regular file is a fast
+/// metadata operation that does not block, so it runs inline on the event loop.
+pub fn seek(fd: RawFd, pos: std::io::SeekFrom) -> io::Result<u64> {
+    let (whence, offset) = match pos {
+        std::io::SeekFrom::Start(n) => (libc::SEEK_SET, n as libc::off_t),
+        std::io::SeekFrom::End(n) => (libc::SEEK_END, n as libc::off_t),
+        std::io::SeekFrom::Current(n) => (libc::SEEK_CUR, n as libc::off_t),
+    };
+    // SAFETY: `lseek` takes only a descriptor and integer arguments.
+    let result = unsafe { libc::lseek(fd, offset, whence) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as u64)
+    }
 }
 
 pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
@@ -295,22 +299,6 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
     .await
 }
 
-#[allow(dead_code)]
-pub async fn close(op: FsOp) -> io::Result<()> {
-    let FsOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    submit_uring::<(), _>(
-        move |sqe| {
-            sqe.opcode = IORING_OP_CLOSE;
-            sqe.fd = fd;
-        },
-        move |cqe| cqe_to_result(cqe).map(|_| ()),
-    )
-    .await
-}
-
 pub fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
     let FsOp::ReadDir { path } = op else {
         unreachable!("read_dir backend called with non-read_dir op");
@@ -374,8 +362,16 @@ impl ReadDirState {
 
     fn finish(self: &Arc<Self>) {
         self.done.store(true, Ordering::Release);
-        self.release_pending();
+        // Enqueue the consumer's wake BEFORE releasing the pending op. In the
+        // reverse order there is a window where pending_ops is 0 and the
+        // remote queue is empty; run()'s exit protocol can commit `closed` in
+        // that window, after which the wake enqueue fails and the consumer is
+        // stranded (its task never resumes, and callers observe the stream's
+        // work as silently lost). With the wake enqueued first, the exit
+        // commit's remote-queue check sees it and keeps the loop alive.
+        // (Mirrors the ordering contract in op/completion.rs `finish`.)
         self.notify();
+        self.release_pending();
     }
 
     fn release_pending(&self) {
@@ -389,27 +385,22 @@ impl ReadDirState {
             return;
         }
 
+        // Internal wake: routed through the capacity-bypassing path (like
+        // completion and task wakes) so a full user queue can never drop it —
+        // a dropped stream wake strands the consumer. The only failure is a
+        // closed owner thread, where nothing can be scheduled anyway.
         let state = Arc::clone(self);
-        match self.owner.queue_macrotask(move || {
-            state.wake_queued.store(false, Ordering::Release);
-            if let Some(waker) = state.waker.lock().unwrap().take() {
-                waker.wake();
-            }
-        }) {
-            Ok(()) => {}
-            Err(QueueError::Closed) => {
-                self.wake_queued.store(false, Ordering::Release);
-            }
-            Err(QueueError::Full) => {
-                // Directory stream wakeups originate from completion context; do
-                // not block or retry on overflow.
-                tracing::error!(
-                    target: crate::trace_targets::SCHEDULER,
-                    event = "dir_stream_wake_dropped",
-                    "dropping directory stream wake because the remote queue is full"
-                );
-                self.wake_queued.store(false, Ordering::Release);
-            }
+        if self
+            .owner
+            .queue_internal_wake(move || {
+                state.wake_queued.store(false, Ordering::Release);
+                if let Some(waker) = state.waker.lock().unwrap().take() {
+                    waker.wake();
+                }
+            })
+            .is_err()
+        {
+            self.wake_queued.store(false, Ordering::Release);
         }
     }
 
@@ -540,36 +531,53 @@ fn path_to_c_string(path: &Path) -> io::Result<CString> {
 }
 
 fn open_flags(options: &OpenOptions) -> io::Result<(i32, u32)> {
-    if !options.read && !options.write && !options.append {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "OpenOptions requires read, write, or append access",
-        ));
-    }
+    let access = access_mode(options)?;
+    let creation = creation_mode(options)?;
+    Ok((access | creation | libc::O_CLOEXEC, 0o666))
+}
 
-    let mut flags = if options.read {
-        if options.write || options.append {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
+/// Resolves the access-mode flags, mirroring `std::fs::OpenOptions` so that
+/// invalid access combinations fail with `EINVAL` on Linux exactly as they do
+/// on the std-backed macOS path.
+fn access_mode(options: &OpenOptions) -> io::Result<i32> {
+    match (options.read, options.write, options.append) {
+        (true, false, false) => Ok(libc::O_RDONLY),
+        (false, true, false) => Ok(libc::O_WRONLY),
+        (true, true, false) => Ok(libc::O_RDWR),
+        (false, _, true) => Ok(libc::O_WRONLY | libc::O_APPEND),
+        (true, _, true) => Ok(libc::O_RDWR | libc::O_APPEND),
+        (false, false, false) => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+    }
+}
+
+/// Resolves the creation-mode flags, mirroring `std::fs::OpenOptions`. In
+/// particular `truncate`/`create`/`create_new` without write access — e.g.
+/// `read(true).truncate(true)` — is rejected with `EINVAL` rather than being
+/// silently turned into `O_RDONLY | O_TRUNC`, which would truncate the file.
+fn creation_mode(options: &OpenOptions) -> io::Result<i32> {
+    match (options.write, options.append) {
+        (true, false) => {}
+        (false, false) => {
+            if options.truncate || options.create || options.create_new {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
         }
-    } else {
-        libc::O_WRONLY
-    };
-
-    if options.append {
-        flags |= libc::O_APPEND;
-    }
-    if options.truncate {
-        flags |= libc::O_TRUNC;
-    }
-    if options.create_new {
-        flags |= libc::O_CREAT | libc::O_EXCL;
-    } else if options.create {
-        flags |= libc::O_CREAT;
+        (_, true) => {
+            if options.truncate && !options.create_new {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+        }
     }
 
-    Ok((flags | libc::O_CLOEXEC, 0o666))
+    Ok(
+        match (options.create, options.truncate, options.create_new) {
+            (false, false, false) => 0,
+            (true, false, false) => libc::O_CREAT,
+            (false, true, false) => libc::O_TRUNC,
+            (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
+            (_, _, true) => libc::O_CREAT | libc::O_EXCL,
+        },
+    )
 }
 
 fn metadata_flags(follow_symlinks: bool) -> i32 {
@@ -583,8 +591,9 @@ fn metadata_flags(follow_symlinks: bool) -> i32 {
 fn raw_metadata_from_statx(statx: &libc::statx) -> RawMetadata {
     RawMetadata {
         file_type: file_type_from_mode(statx.stx_mode),
-        mode: statx.stx_mode,
+        mode: u32::from(statx.stx_mode),
         len: statx.stx_size,
+        platform: Default::default(),
     }
 }
 

@@ -166,6 +166,36 @@ pub enum TryRecvError {
     Disconnected,
 }
 
+impl<T> std::fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sending on a closed channel")
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+impl<T> std::fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrySendError::Full(_) => f.write_str("sending on a full channel"),
+            TrySendError::Closed(_) => f.write_str("sending on a closed channel"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for TrySendError<T> {}
+
+impl std::fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryRecvError::Empty => f.write_str("receiving on an empty channel"),
+            TryRecvError::Disconnected => f.write_str("receiving on a closed channel"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
+
 /// A wakeup deferred until the channel mutex has been released.
 ///
 /// Waking a waiter while holding the channel lock can be expensive (cross-thread
@@ -548,9 +578,13 @@ impl<T: Send + 'static> Receiver<T> {
     /// been drained. Receive waiters are single-consumer and FIFO with respect
     /// to queued messages and pending bounded senders.
     ///
-    /// Cancellation is not guaranteed to preserve a delivered value: once a
-    /// sender completes the receive waiter's runtime future, dropping `recv`
-    /// before it is polled ready drops that value.
+    /// # Cancel safety
+    ///
+    /// This method is cancel-safe. `recv` and the [`Stream`] implementation share
+    /// one persistent wait slot on the receiver, so a value delivered to a
+    /// `recv` future that is dropped before being polled ready is retained and
+    /// returned by the next `recv`/`poll_next` rather than lost. The two APIs may
+    /// therefore be interleaved freely without dropping or reordering messages.
     ///
     /// # Examples
     ///
@@ -570,9 +604,13 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
     pub async fn recv(&mut self) -> Option<T> {
-        let mut wait = None;
+        // Use the receiver's persistent wait slot (shared with the `Stream`
+        // impl) rather than a local one, so a value delivered to a cancelled
+        // `recv` future survives to the next call and `recv`/`poll_next` can
+        // never register two waiters at once.
         let shared = Arc::clone(&self.shared);
-        poll_fn(|cx| Self::poll_recv(&shared, cx, &mut wait)).await
+        let wait = &mut self.stream_wait;
+        poll_fn(move |cx| Self::poll_recv(&shared, cx, wait)).await
     }
 
     /// Attempts to receive a message immediately.
@@ -788,6 +826,52 @@ mod tests {
         run();
 
         assert_eq!(*observed.lock().unwrap(), Some((vec![0, 1, 2, 3, 4], None)));
+    }
+
+    /// `recv` and the `Stream` impl must share a single persistent wait slot so a
+    /// waiter registered (and possibly satisfied) by one is observed by the
+    /// other in FIFO order — never dropped or reordered. Regression for the
+    /// recv-vs-poll_next interleaving bug.
+    #[test]
+    fn recv_and_stream_share_wait_slot_fifo() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        use crate::io::StreamExt;
+
+        let observed = Arc::new(Mutex::new(None::<(Option<i32>, Option<i32>)>));
+        let observed_for_task = Arc::clone(&observed);
+
+        queue_macrotask(move || {
+            let (tx, mut rx) = channel(4);
+
+            // Poll the Stream once to register a waiter into the receiver's
+            // persistent slot, then abandon that `next()` future.
+            {
+                let mut cx = Context::from_waker(Waker::noop());
+                let mut next = std::pin::pin!(StreamExt::next(&mut rx));
+                assert!(next.as_mut().poll(&mut cx).is_pending());
+            }
+
+            // Deliver two values: the first satisfies the persisted waiter, the
+            // second queues behind it.
+            tx.try_send(1).unwrap();
+            tx.try_send(2).unwrap();
+
+            spawn(async move {
+                // `recv` shares the same slot as the abandoned stream poll, so
+                // it must observe the retained 1 first, then 2 — no reorder,
+                // no lost value, no double-registration panic.
+                let first = rx.recv().await;
+                let second = rx.recv().await;
+                *observed_for_task.lock().unwrap() = Some((first, second));
+                drop(tx);
+            });
+        });
+
+        run();
+
+        assert_eq!(*observed.lock().unwrap(), Some((Some(1), Some(2))));
     }
 
     #[test]

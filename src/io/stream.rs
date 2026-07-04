@@ -356,6 +356,7 @@ impl<S: Stream + Unpin + ?Sized> Stream for &mut S {
 }
 
 /// Future returned by [`StreamExt::next`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Next<'a, S: ?Sized> {
     stream: &'a mut S,
 }
@@ -369,6 +370,7 @@ impl<S: Stream + Unpin + ?Sized> Future for Next<'_, S> {
 }
 
 /// Stream returned by [`StreamExt::map`].
+#[must_use = "streams do nothing unless polled"]
 pub struct Map<S, F> {
     stream: S,
     f: F,
@@ -396,6 +398,7 @@ where
 }
 
 /// Stream returned by [`StreamExt::filter`].
+#[must_use = "streams do nothing unless polled"]
 pub struct Filter<S, F> {
     stream: S,
     predicate: F,
@@ -426,6 +429,7 @@ where
 }
 
 /// Future returned by [`StreamExt::collect`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Collect<S, C> {
     stream: S,
     collection: C,
@@ -453,6 +457,7 @@ where
 }
 
 /// Future returned by [`StreamExt::for_each`].
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct ForEach<S, F, Fut> {
     stream: S,
     f: F,
@@ -493,6 +498,7 @@ where
 }
 
 /// Stream returned by [`StreamExt::take`].
+#[must_use = "streams do nothing unless polled"]
 pub struct Take<S> {
     stream: S,
     remaining: usize,
@@ -532,6 +538,7 @@ where
 }
 
 /// Stream returned by [`StreamExt::skip`].
+#[must_use = "streams do nothing unless polled"]
 pub struct Skip<S> {
     stream: S,
     remaining: usize,

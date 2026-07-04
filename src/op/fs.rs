@@ -4,8 +4,9 @@
 //! backends pin, stage, or offload as needed.
 
 use std::ffi::OsString;
-use std::os::fd::RawFd;
 use std::path::PathBuf;
+
+use crate::sys::handle::RawFile;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OpenOptions {
@@ -15,14 +16,20 @@ pub struct OpenOptions {
     pub truncate: bool,
     pub create: bool,
     pub create_new: bool,
+    /// Extra platform-specific open parameters (e.g. Windows access/share
+    /// modes and flags).
+    pub platform: crate::sys::handle::PlatformOpenOptions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MetadataTarget {
     Path(PathBuf),
-    File(RawFd),
+    File(RawFile),
 }
 
+// The POSIX-only variants (block/char device, fifo, socket) are never
+// constructed by the Windows backend but remain part of the shared vocabulary.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileType {
     File,
@@ -38,8 +45,14 @@ pub enum FileType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawMetadata {
     pub file_type: FileType,
-    pub mode: u16,
+    /// Full POSIX `st_mode` (file-type bits and permission bits), matching
+    /// `std::os::unix::fs::MetadataExt::mode`. `u32` for parity with std even
+    /// though the current backends fit it in 16 bits. The Windows backend
+    /// synthesizes an equivalent value from the file attributes.
+    pub mode: u32,
     pub len: u64,
+    /// Extra platform-specific metadata (e.g. Windows file attributes).
+    pub platform: crate::sys::handle::PlatformMetadata,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,12 +68,12 @@ pub enum FsOp {
         options: OpenOptions,
     },
     Read {
-        fd: RawFd,
+        fd: RawFile,
         offset: Option<u64>,
         len: usize,
     },
     Write {
-        fd: RawFd,
+        fd: RawFile,
         offset: Option<u64>,
         data: Vec<u8>,
     },
@@ -69,17 +82,17 @@ pub enum FsOp {
         follow_symlinks: bool,
     },
     SetLen {
-        fd: RawFd,
+        fd: RawFile,
         len: u64,
     },
     SyncAll {
-        fd: RawFd,
+        fd: RawFile,
     },
     SyncData {
-        fd: RawFd,
+        fd: RawFile,
     },
     Duplicate {
-        fd: RawFd,
+        fd: RawFile,
     },
     CreateDir {
         path: PathBuf,
@@ -97,14 +110,5 @@ pub enum FsOp {
     },
     ReadDir {
         path: PathBuf,
-    },
-    /// Explicit asynchronous close of a file descriptor.
-    ///
-    /// Reserved for a future explicit async-close API. Today both backends rely
-    /// on synchronous `close(2)` via `OwnedFd`'s `Drop`, so this variant is
-    /// never constructed; see `docs/ROADMAP.md` ("Explicit async close").
-    #[allow(dead_code)]
-    Close {
-        fd: RawFd,
     },
 }
