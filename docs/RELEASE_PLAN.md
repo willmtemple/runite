@@ -292,7 +292,20 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   descriptor can't be closed underneath it). Tests in `tests/fd_interop.rs` (adopt a std
   listener + accept, `From<OwnedFd>`, adopt a std `File` + read); public API snapshot
   updated (+93 items).
-- [ ] **3.4 `UnixStream` implement `AsyncRead`/`AsyncWrite` + `shutdown` + split.**
+- [x] **3.4 `UnixStream` implement `AsyncRead`/`AsyncWrite` + `shutdown` + split.**
+  **Done:** brought `UnixStream` to parity with `TcpStream`. Re-shaped it to share the fd
+  via `Arc<UnixStreamInner>` (so split halves reference-count the same socket) and gave it
+  the same stashed pending-op fields (`pending_read`/`read_overflow`/`pending_write`/
+  `pending_write_ident`/`pending_shutdown`). Implemented `AsyncRead` + `AsyncWrite` with
+  the Tier-1 cancel-safety machinery (overflow retention on read, in-flight write-buffer
+  identity guard), added `shutdown(how)`, and `into_split` → `OwnedReadHalf`/
+  `OwnedWriteHalf` + `reunite`/`ReuniteError` (with `Display`+`Error`). The inherent
+  `read`/`write` now delegate to the trait poll paths (cancel-safe, like 1.7). Manual
+  `Debug` impl (the future fields can't derive it). So `copy`, `BufReader`, and the
+  `AsyncReadExt`/`AsyncWriteExt` combinators now work on `UnixStream`. Tests in
+  `tests/unix_stream.rs` (trait read/write + shutdown-to-EOF, concurrent split halves,
+  reunite origin check); public API snapshot updated. Closes the 1.7 note that UnixStream
+  gains cancel-safe inherent I/O once it implements the traits.
 - [ ] **3.5 `Command::output()` → `Output { status, stdout, stderr }`; don't error on
   non-zero exit; close child stdin.**
 - [x] **3.6 Panic story + `#[non_exhaustive]`.** `JoinError::Panicked`; mark `SignalKind`
