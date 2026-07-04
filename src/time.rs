@@ -109,6 +109,7 @@ pub struct Interval {
 /// | [`Delay`](Self::Delay) | At `now + p`, drifting the schedule forward. |
 /// | [`Skip`](Self::Skip) | At the first original schedule-grid deadline after `now`. |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum MissedTickBehavior {
     /// Fire missed ticks back-to-back until the interval catches up, then
     /// continue on the original schedule.
