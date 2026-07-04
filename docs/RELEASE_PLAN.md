@@ -386,8 +386,17 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   the hyper demo declared `content-length: 24` for an 18-byte body and had been
   failing invisibly under the old Result-discarding `#[runite::main]` (fixed).
 - [ ] **4.2 Merge the two ROADMAP files; rewrite CHANGELOG to a `0.1.0` narrative.**
-- [ ] **4.3 Packaging:** exclude `mise.lock`; `doc_auto_cfg` feature badges;
-  `cargo publish --dry-run -p runite` step in release.yml.
+- [x] **4.3 Packaging:** exclude `mise.lock`; `doc_auto_cfg` feature badges;
+  `cargo publish --dry-run -p runite` step in release.yml. **Done:** `exclude` now also
+  drops `mise.lock`, `/.claude`, and `ROADMAP.md` (verified with `cargo package --list`:
+  119 files — source/tests/examples/benches + README/CHANGELOG/ARCHITECTURE/CONTRIBUTING/
+  SECURITY/licenses, zero process files). docs.rs feature badges: `rustdoc-args =
+  ["--cfg", "docsrs"]` + `#![cfg_attr(docsrs, feature(doc_cfg))]` (`doc_auto_cfg` was
+  merged into `doc_cfg` in nightly 1.92); verified the "Available on crate feature …"
+  badges render on a nightly doc build. Publish dry-run: already covered by CI's
+  `publish-dry-run` job for `runite-proc-macros` (re-verified locally); `runite` itself
+  cannot be dry-run until its path+version dependency exists on crates.io — the release
+  workflow's verify build covers it, as its comment documents.
 - [ ] **4.4 Fix ARCHITECTURE.md drift** (4 stale claims) and move the microtask-starvation
   warning inside the drain loop (`scheduler.rs:376-388`).
 - [x] **4.5 Regression tests** for 1.1/1.2/1.3/1.7 + a non-`#[ignore]` signal e2e test.
