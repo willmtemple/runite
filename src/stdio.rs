@@ -900,10 +900,21 @@ mod tests {
             Some(b"tty output\n".len())
         );
 
+        // The line discipline may deliver the translated output (`\n` → `\r\n`)
+        // to the master in more than one chunk; read until the full line is in.
+        let expected = b"tty output\r\n";
         let mut buffer = [0u8; 64];
-        let read = imp::blocking_read(std::os::fd::AsRawFd::as_raw_fd(&master), &mut buffer)
+        let mut filled = 0;
+        while filled < expected.len() {
+            let read = imp::blocking_read(
+                std::os::fd::AsRawFd::as_raw_fd(&master),
+                &mut buffer[filled..],
+            )
             .expect("pty master should read");
-        assert_eq!(&buffer[..read], b"tty output\r\n");
+            assert_ne!(read, 0, "pty master hit EOF before the full line arrived");
+            filled += read;
+        }
+        assert_eq!(&buffer[..filled], expected);
         drop(slave_keepalive);
     }
 
