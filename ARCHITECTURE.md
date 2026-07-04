@@ -55,7 +55,8 @@ Lazy initialization contract:
 
 `runite` scales by running more independent event loops, not by making one scheduler shared. Each
 runtime thread owns its own scheduler queues, timer heap, and platform I/O driver (`io_uring` ring on
-Linux, `kqueue` on macOS). There is no work-stealing layer between runtime threads.
+Linux, `kqueue` on macOS, I/O completion port on Windows). There is no work-stealing layer between
+runtime threads.
 
 Futures are thread-local and deliberately `!Send`: a task queued on one runtime thread is always
 polled, woken, aborted, and joined on that same thread. Tasks never migrate between threads. This is a
@@ -298,7 +299,7 @@ The public API uses borrowed buffers:
 For v1, Linux does **not** point io_uring SQEs at arbitrary caller-owned `&mut [u8]` memory. That
 would be unsound on Drop: after the future is dropped, the caller's borrow ends, but the kernel may
 still write until the original CQE or an acknowledged `IORING_OP_ASYNC_CANCEL`. Instead, the runtime
-uses the conservative "option A" staging model:
+uses a conservative staging model:
 
 - Read operations allocate an internal boxed byte buffer, submit that stable allocation to io_uring,
   and copy the completed bytes into the caller's slice before returning.
@@ -331,9 +332,14 @@ the thread's io_uring driver before collecting the status with `waitpid`
 (`src/sys/linux/process.rs`, `src/sys/linux/fd.rs`). There is no SIGCHLD handler and no blocking-pool
 offload for child exit.
 
+On Windows, `Child::wait` parks the process handle on the OS wait-thread pool with
+`RegisterWaitForSingleObject`, whose callback completes a runtime completion; on macOS, the wait
+registers `EVFILT_PROC` and polls it (`src/sys/windows/process.rs`, `src/sys/macos/process.rs`).
+
 Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
-Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, while macOS uses the
-existing kqueue/blocking-pool split for its backend.
+Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, macOS uses the
+existing kqueue/blocking-pool split, and Windows adopts the overlapped named-pipe parent ends and
+drives them through the completion port.
 
 # Driver abstraction
 

@@ -19,7 +19,7 @@ parallelism.
 - JS-style event loop per thread: microtask checkpoints drain fully between
   macrotasks (timers, I/O completions, cross-thread work), giving deterministic
   flush points for reactive code. A `tracing` warning fires if a single
-  checkpoint runs 1000 microtasks without yielding.
+  checkpoint runs 1000 microtasks without yielding while macrotasks wait.
 - Entry points: `block_on` (drive a borrowed, non-`Send` future to completion
   and return its value), `run` (drive the loop to idle), `run_until_stalled` /
   `run_ready_tasks` (pump the loop from a host frame loop without blocking),

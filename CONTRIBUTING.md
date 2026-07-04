@@ -3,7 +3,7 @@
 Thanks for your interest in improving `runite`! This document covers the basics for getting
 a change merged.
 
-## Getting started
+## Building and running runite
 
 `runite` pins its toolchain with [mise](https://mise.jdx.dev/):
 
@@ -13,21 +13,12 @@ mise run check    # fmt + clippy + tests + cop — the full local gate
 ```
 
 If you do not use mise, a recent stable Rust toolchain (matching the `rust-version` /
-`rust-toolchain.toml` pin) works too; install [Agent Cop](https://github.com/KrzysztofCwalina/cop)
-separately to run the static-analysis checks.
+`rust-toolchain.toml` pin) works too.
 
-## Before you open a pull request
+## Reporting an issue or making a change to runite
 
-Please make sure the full gate passes:
-
-- `cargo fmt --all --check` — formatting.
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — lints.
-- `cargo test --workspace --all-features` — unit, integration, and doctests.
-- `cop cop-checks/main.cop -t .` — Agent Cop checks.
-
-CI additionally runs the macOS backend, `cargo-deny`, code coverage, and a benchmark
-smoke-run, so consider running `mise run bench` and `mise run coverage` locally for changes
-that touch hot paths or I/O.
+GitHub issues and pull requests are limited to collaborators. Please start by
+[opening a discussion](https://github.com/willmtemple/runite/discussions).
 
 ## Code conventions
 
@@ -35,15 +26,16 @@ that touch hot paths or I/O.
   invariant that makes it sound. Soundness-critical invariants (the io_uring buffer-ownership
   and cancellation model in particular) are documented in
   [ARCHITECTURE.md](./ARCHITECTURE.md); update it when you change them.
-- **Platform code** lives under `src/platform/` and `src/sys/`; keep the Linux and macOS
-  backends behind the existing `cfg` gates and mirror behavior where practical.
+- **Platform code** lives under `src/platform/` and `src/sys/`; keep the Linux, macOS, and
+  Windows backends behind the existing `cfg` gates and mirror behavior where practical.
 - **Public API** changes should update doctests, the README, the CHANGELOG, and (for runtime
-  semantics) ARCHITECTURE.md.
+  semantics) ARCHITECTURE.md, and regenerate the public API snapshot with
+  `mise run api-report` (CI fails on a stale `docs/public-api.md`).
 
-## Reporting bugs and security issues
+## Security issues
 
-Open a GitHub issue for ordinary bugs. For security-sensitive reports, follow
-[SECURITY.md](./SECURITY.md) instead of filing a public issue.
+For security-sensitive reports, follow [SECURITY.md](./SECURITY.md) instead of posting
+publicly.
 
 ## Licensing
 
