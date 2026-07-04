@@ -375,6 +375,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 ## Tier 4 — Release mechanics
 
 - [ ] **4.1 CI builds default (empty) feature set** + gate `docs/public-api.md` drift.
+  Also add example smoke-runs: every self-driving example plus `command_center --demo`
+  and `chat_server --demo` run to completion in CI (all 13 verified locally when the
+  example suite landed).
 - [ ] **4.2 Merge the two ROADMAP files; rewrite CHANGELOG to a `0.1.0` narrative.**
 - [ ] **4.3 Packaging:** exclude `mise.lock`; `doc_auto_cfg` feature badges;
   `cargo publish --dry-run -p runite` step in release.yml.

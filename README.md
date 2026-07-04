@@ -117,13 +117,28 @@ for the full threading and scaling model.
 
 ## Examples
 
+Start with these — each one demonstrates a reason the event-loop-per-thread
+model exists, not just an API:
+
+| Example | What it shows |
+| --- | --- |
+| [`reactive_state`](./examples/reactive_state.rs) | **The flagship.** Model→update→render with dirty-flag coalescing at the microtask checkpoint — why deterministic flush points make reactive UIs tractable. |
+| [`command_center`](./examples/command_center.rs) | An interactive terminal app: async stdin, background jobs, and shared `Rc<RefCell>` state on one loop that never blocks on you. Interactive, or `-- --demo`. |
+| [`chat_server`](./examples/chat_server.rs) | A collaborative-session backend whose entire room state is `Rc<RefCell<HashMap>>` — no `Arc`, no `Mutex`, no `Send` bounds — plus Ctrl-C graceful shutdown. Interactive (`nc` in!), or `-- --demo`. |
+| [`background_workers`](./examples/background_workers.rs) | The Web-Workers discipline: CPU work on the blocking pool while a heartbeat *measures* that the loop stayed responsive. Run with `-- --blocking` to see the jank, quantified. |
+| [`frame_loop_embedding`](./examples/frame_loop_embedding.rs) | runite as a guest inside a host frame loop (GUI/game shape): `run_until_stalled()` per frame, `requestAnimationFrame`-style tasks, render from settled state. |
+| [`build_pipeline`](./examples/build_pipeline.rs) | Dev-tool process orchestration: bounded-concurrency subprocess fan-out with `Command::output`, where a failing step is data, not a crash. |
+
+Feature tours of specific APIs:
+
 ```sh
-cargo run --example runtime_loop_showcase
-cargo run --example async_fs_showcase
-cargo run --example channel_showcase
-cargo run --example tcp_echo_server
-cargo run --example subprocess_pipeline
-cargo run --example broadcast_watch
+cargo run --example runtime_loop_showcase   # scheduling rules, asserted in order
+cargo run --example channel_showcase        # mpsc/oneshot, on and across threads
+cargo run --example broadcast_watch         # broadcast + watch channels
+cargo run --example async_fs_showcase       # async filesystem API
+cargo run --example tcp_echo_server         # TcpStream split halves
+cargo run --example subprocess_pipeline     # piped child stdin/stdout
+cargo run --example main_result             # #[runite::main] with Result
 cargo run --example hyper_http_client --features hyper
 ```
 
