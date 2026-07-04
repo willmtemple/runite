@@ -1,10 +1,9 @@
 //! Hyper runtime glue: an executor and a timer backed by runite.
 //!
 //! Hyper 1.x is runtime-agnostic: beyond the transport traits (implemented for
-//! [`TcpStream`](crate::net::TcpStream) and
-//! [`UnixStream`](crate::net::unix::UnixStream) under this same `hyper`
-//! feature), some of its machinery needs a way to *spawn* internal futures and
-//! a way to *sleep*:
+//! [`TcpStream`](crate::net::TcpStream) — and, on Unix, `net::unix::UnixStream`
+//! — under this same `hyper` feature), some of its machinery needs a way to
+//! *spawn* internal futures and a way to *sleep*:
 //!
 //! - HTTP/2 (client and server) multiplexes streams onto one connection and
 //!   spawns per-stream futures through a [`hyper::rt::Executor`] —
