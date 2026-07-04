@@ -14,9 +14,7 @@ use std::task::{Context, Poll, Waker};
 
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, OpenOptions, RawDirEntry, RawMetadata};
-use crate::platform::linux::runtime::{
-    QueueError, ThreadHandle, current_thread_handle, with_current_driver,
-};
+use crate::platform::linux::runtime::{ThreadHandle, current_thread_handle, with_current_driver};
 use crate::platform::linux::uring::{
     IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE, IORING_OP_MKDIRAT,
     IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX, IORING_OP_UNLINKAT,
@@ -364,8 +362,16 @@ impl ReadDirState {
 
     fn finish(self: &Arc<Self>) {
         self.done.store(true, Ordering::Release);
-        self.release_pending();
+        // Enqueue the consumer's wake BEFORE releasing the pending op. In the
+        // reverse order there is a window where pending_ops is 0 and the
+        // remote queue is empty; run()'s exit protocol can commit `closed` in
+        // that window, after which the wake enqueue fails and the consumer is
+        // stranded (its task never resumes, and callers observe the stream's
+        // work as silently lost). With the wake enqueued first, the exit
+        // commit's remote-queue check sees it and keeps the loop alive.
+        // (Mirrors the ordering contract in op/completion.rs `finish`.)
         self.notify();
+        self.release_pending();
     }
 
     fn release_pending(&self) {
@@ -379,27 +385,22 @@ impl ReadDirState {
             return;
         }
 
+        // Internal wake: routed through the capacity-bypassing path (like
+        // completion and task wakes) so a full user queue can never drop it —
+        // a dropped stream wake strands the consumer. The only failure is a
+        // closed owner thread, where nothing can be scheduled anyway.
         let state = Arc::clone(self);
-        match self.owner.queue_macrotask(move || {
-            state.wake_queued.store(false, Ordering::Release);
-            if let Some(waker) = state.waker.lock().unwrap().take() {
-                waker.wake();
-            }
-        }) {
-            Ok(()) => {}
-            Err(QueueError::Closed) => {
-                self.wake_queued.store(false, Ordering::Release);
-            }
-            Err(QueueError::Full) => {
-                // Directory stream wakeups originate from completion context; do
-                // not block or retry on overflow.
-                tracing::error!(
-                    target: crate::trace_targets::SCHEDULER,
-                    event = "dir_stream_wake_dropped",
-                    "dropping directory stream wake because the remote queue is full"
-                );
-                self.wake_queued.store(false, Ordering::Release);
-            }
+        if self
+            .owner
+            .queue_internal_wake(move || {
+                state.wake_queued.store(false, Ordering::Release);
+                if let Some(waker) = state.waker.lock().unwrap().take() {
+                    waker.wake();
+                }
+            })
+            .is_err()
+        {
+            self.wake_queued.store(false, Ordering::Release);
         }
     }
 
