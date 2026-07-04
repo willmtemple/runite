@@ -67,7 +67,13 @@ async fn serve(room: Room, id: usize, stream: TcpStream) {
 
     // Register. Mutating the shared room is just... mutating it.
     let (outbox, mut inbox) = mpsc::channel::<String>(32);
-    room.borrow_mut().insert(id, Peer { name: name.clone(), outbox });
+    room.borrow_mut().insert(
+        id,
+        Peer {
+            name: name.clone(),
+            outbox,
+        },
+    );
 
     // Writer: drains this peer's outbox onto the socket. Ends when the peer
     // is removed from the room (all senders to the inbox are gone).
@@ -96,7 +102,9 @@ async fn serve(room: Room, id: usize, stream: TcpStream) {
                     let names: Vec<String> =
                         room.borrow().values().map(|p| p.name.clone()).collect();
                     if let Some(peer) = room.borrow().get(&id) {
-                        let _ = peer.outbox.try_send(format!("* here: {}\n", names.join(", ")));
+                        let _ = peer
+                            .outbox
+                            .try_send(format!("* here: {}\n", names.join(", ")));
                     }
                 }
                 text => broadcast(&room, &format!("{name}: {text}")),
@@ -187,7 +195,10 @@ async fn main() -> std::io::Result<()> {
             let _ = shutdown_tx.send(true);
         });
     } else {
-        println!("chat server listening — connect with: nc 127.0.0.1 {}", addr.port());
+        println!(
+            "chat server listening — connect with: nc 127.0.0.1 {}",
+            addr.port()
+        );
         println!("Ctrl-C to shut down gracefully");
         // Ctrl-C flips the same watch channel the demo uses.
         spawn(async move {
