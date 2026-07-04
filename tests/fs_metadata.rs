@@ -1,5 +1,5 @@
-//! Tests for the fs semantic gaps closed in release plan 3.8:
-//! `symlink_metadata`, `File::seek`, and full-`st_mode` `Metadata::mode`.
+//! Filesystem semantics: `symlink_metadata`, `File::seek`, and
+//! full-`st_mode` `Metadata::mode`.
 
 #![cfg(unix)]
 

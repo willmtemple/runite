@@ -1,4 +1,4 @@
-//! Tests for the `block_on` entry point (release plan 3.1).
+//! Tests for the `block_on` entry point.
 //!
 //! `block_on` drives the current thread's event loop until the supplied future
 //! resolves and returns its output. Each test runs on a freshly spawned OS

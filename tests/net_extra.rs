@@ -302,7 +302,8 @@ fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
         // Barrier: the client must not write until the 64-byte read has been
         // submitted, or a readiness-based backend (macOS) could complete the
         // first poll synchronously into the discarded `big` buffer and hang
-        // the test (io_uring's always-Pending first poll masked this race).
+        // the test. (Completion-based recvs are always Pending on first poll,
+        // so io_uring never hits this window.)
         let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
 
         let server = runite::spawn(async move {
@@ -368,11 +369,11 @@ fn tcp_inherent_read_stashes_operation() {
         let addr = listener.local_addr().expect("local addr");
 
         // Barrier: the client must not write until the server's first poll has
-        // registered its read. On the readiness-based backends (macOS) a recv
-        // can complete *synchronously on the first poll* if data is already in
-        // the socket buffer — which would consume the bytes into the discarded
-        // scratch buffer and deadlock the test. (io_uring recvs always return
-        // Pending on first poll, which masked this race on Linux.)
+        // registered its read. On readiness-based backends (macOS) a recv can
+        // complete *synchronously on the first poll* if data is already in the
+        // socket buffer, which would consume the bytes into the discarded
+        // scratch buffer and deadlock the test. (Completion-based recvs are
+        // always Pending on first poll, so io_uring never hits this window.)
         let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
 
         let server = runite::spawn(async move {

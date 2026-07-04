@@ -1,5 +1,5 @@
-//! End-to-end tests for the hyper runtime glue (release plan H-1): serving
-//! HTTP with hyper on a runite thread using `RuniteExecutor` + `RuniteTimer`.
+//! End-to-end tests for the hyper runtime glue: serving HTTP with hyper on a
+//! runite thread using `RuniteExecutor` + `RuniteTimer`.
 
 #![cfg(feature = "hyper")]
 
@@ -103,9 +103,9 @@ async fn http2_client_server_round_trip() {
     server.await.expect("server task");
 }
 
-/// HTTP over a Unix-domain socket (release plan H-2): hyper http1 server on
-/// one end of a `UnixStream::pair`, hyper http1 client on the other — the
-/// Docker-socket / local-RPC shape. (`net::unix` is Unix-only.)
+/// HTTP over a Unix-domain socket: hyper http1 server on one end of a
+/// `UnixStream::pair`, hyper http1 client on the other — the Docker-socket /
+/// local-RPC shape. (`net::unix` is Unix-only.)
 #[cfg(unix)]
 #[runite::test]
 async fn http1_over_unix_stream() {

@@ -1,4 +1,4 @@
-//! Regression tests for the event-loop reentrancy guard (release plan task 2.2).
+//! Regression tests for the event-loop reentrancy guard.
 //!
 //! The driver loops (`run`, `run_until_stalled`, `run_ready_tasks`) drive the
 //! thread's microtask/macrotask queues. Re-entering any of them from inside a

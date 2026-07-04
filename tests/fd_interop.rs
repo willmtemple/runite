@@ -1,6 +1,6 @@
-//! Tests for file-descriptor interop (release plan 3.3): `AsFd`/`AsRawFd`,
-//! `From<OwnedFd>`, and `from_std` on the fd-backed I/O types, plus the
-//! `impl AsFd` readiness helpers. These are Unix-only.
+//! File-descriptor interop: `AsFd`/`AsRawFd`, `From<OwnedFd>`, and `from_std`
+//! on the fd-backed I/O types, plus the `impl AsFd` readiness helpers. These
+//! are Unix-only.
 
 #![cfg(unix)]
 

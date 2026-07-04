@@ -625,9 +625,9 @@ mod tests {
 
     #[test]
     fn two_borrows_on_same_thread_do_not_deadlock() {
-        // The old single-`Mutex` design deadlocked here: the second `borrow`
-        // re-locked a lock the first still held. With the value behind an
-        // `RwLock`, both read borrows coexist.
+        // Two live borrows on one thread must not deadlock: `Ref` holds a
+        // shared read lock on the value slot, not an exclusive channel lock,
+        // so any number of concurrent borrows coexist.
         let (sender, receiver) = channel(7usize);
         let a = receiver.borrow();
         let b = sender.borrow();
