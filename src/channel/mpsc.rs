@@ -166,6 +166,36 @@ pub enum TryRecvError {
     Disconnected,
 }
 
+impl<T> std::fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sending on a closed channel")
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+impl<T> std::fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrySendError::Full(_) => f.write_str("sending on a full channel"),
+            TrySendError::Closed(_) => f.write_str("sending on a closed channel"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for TrySendError<T> {}
+
+impl std::fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryRecvError::Empty => f.write_str("receiving on an empty channel"),
+            TryRecvError::Disconnected => f.write_str("receiving on a closed channel"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
+
 /// A wakeup deferred until the channel mutex has been released.
 ///
 /// Waking a waiter while holding the channel lock can be expensive (cross-thread

@@ -523,6 +523,14 @@ pub struct Incoming<'a> {
     pending: Option<Pin<Box<dyn Future<Output = io::Result<UnixStream>> + 'a>>>,
 }
 
+impl std::fmt::Debug for Incoming<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Incoming")
+            .field("listener", self.listener)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Stream for Incoming<'_> {
     type Item = io::Result<UnixStream>;
 
