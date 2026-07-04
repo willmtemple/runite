@@ -351,6 +351,14 @@ fn tcp_inherent_read_stashes_operation() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
 
+        // Barrier: the client must not write until the server's first poll has
+        // registered its read. On the readiness-based backends (macOS) a recv
+        // can complete *synchronously on the first poll* if data is already in
+        // the socket buffer — which would consume the bytes into the discarded
+        // scratch buffer and deadlock the test. (io_uring recvs always return
+        // Pending on first poll, which masked this race on Linux.)
+        let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
+
         let server = runite::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
 
@@ -360,11 +368,17 @@ fn tcp_inherent_read_stashes_operation() {
                 let mut scratch = [0u8; 16];
                 let mut fut = pin!(stream.read(&mut scratch));
                 poll_fn(|cx| {
-                    let _ = fut.as_mut().poll(cx);
+                    // Nothing has been written yet (the client waits on the
+                    // barrier below), so the first poll must be Pending.
+                    assert!(
+                        fut.as_mut().poll(cx).is_pending(),
+                        "first poll must leave the read in flight"
+                    );
                     Poll::Ready(())
                 })
                 .await;
             }
+            let _ = registered_tx.send(());
 
             // The next read observes the peer's bytes via the stashed op.
             let mut out = [0u8; 16];
@@ -373,6 +387,7 @@ fn tcp_inherent_read_stashes_operation() {
         });
 
         let mut client = TcpStream::connect(addr).await.expect("connect");
+        registered_rx.recv().await.expect("server should register its read");
         client.write_all(b"hello").await.expect("write");
         let out = server.await.expect("server task");
         drop(client);
