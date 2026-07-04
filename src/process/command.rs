@@ -13,14 +13,13 @@
 //!
 //! ```no_run
 //! # async fn example() -> std::io::Result<()> {
-//! use runite::process::{Command, Stdio};
+//! use runite::process::Command;
 //!
 //! let output = Command::new("echo")
 //!     .arg("hello")
-//!     .stdout(Stdio::piped())
 //!     .output()
 //!     .await?;
-//! assert_eq!(output, b"hello\n");
+//! assert_eq!(output.stdout, b"hello\n");
 //! # Ok(())
 //! # }
 //! ```
@@ -31,6 +30,20 @@ use std::path::{Path, PathBuf};
 
 use super::{Child, ExitStatus};
 use crate::io::AsyncReadExt;
+
+/// The captured result of a process run by [`Command::output`].
+///
+/// Mirrors [`std::process::Output`]: the exit status plus the fully-buffered
+/// standard output and standard error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Output {
+    /// The status (exit code) the process terminated with.
+    pub status: ExitStatus,
+    /// The bytes the process wrote to standard output.
+    pub stdout: Vec<u8>,
+    /// The bytes the process wrote to standard error.
+    pub stderr: Vec<u8>,
+}
 
 /// Subprocess standard I/O configuration.
 ///
@@ -362,17 +375,15 @@ impl Command {
         self.spawn()?.wait().await
     }
 
-    /// Spawns the command, captures stdout, and waits for it to exit.
+    /// Spawns the command, captures its output, and waits for it to exit.
     ///
-    /// The command's standard output is forced to [`Stdio::piped`]. The returned
-    /// bytes contain stdout only; a non-success exit status is reported as an
-    /// [`io::Error`].
-    ///
-    /// If you configure [`stderr`](Self::stderr) as [`Stdio::piped`] before
-    /// calling this, its output is drained and discarded concurrently so the
-    /// child cannot deadlock by filling the stderr pipe buffer. To capture
-    /// stderr yourself, spawn the child with [`spawn`](Self::spawn) and read the
-    /// streams directly instead.
+    /// Returns an [`Output`] with the exit status and the fully-buffered stdout
+    /// and stderr. Like [`std::process::Command::output`], this forces stdout and
+    /// stderr to [`Stdio::piped`] and redirects stdin to [`Stdio::null`] (so a
+    /// child that reads stdin sees EOF immediately rather than blocking). A
+    /// non-zero exit status is **not** an error — inspect
+    /// [`output.status`](Output::status) yourself. stdout and stderr are read
+    /// concurrently so a child cannot deadlock by filling one pipe's buffer.
     ///
     /// # Examples
     ///
@@ -381,37 +392,42 @@ impl Command {
     /// use runite::process::Command;
     ///
     /// let output = Command::new("echo").arg("hello").output().await?;
-    /// assert_eq!(output, b"hello\n");
+    /// assert!(output.status.success());
+    /// assert_eq!(output.stdout, b"hello\n");
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn output(&mut self) -> io::Result<Vec<u8>> {
+    pub async fn output(&mut self) -> io::Result<Output> {
+        self.stdin(Stdio::null());
         self.stdout(Stdio::piped());
+        self.stderr(Stdio::piped());
         let mut child = self.spawn()?;
 
-        // If the caller pre-configured a piped stderr, drain it concurrently.
-        // A child that writes enough to fill the stderr pipe buffer would
-        // otherwise block on `write`, while we block reading stdout, deadlocking
-        // the runtime thread. Reading both streams concurrently avoids this.
-        let stderr_drain = child.stderr.take().map(|mut stderr| {
+        // Drain stderr on a separate task while reading stdout here, so a child
+        // that fills one pipe's buffer while we block on the other cannot
+        // deadlock the runtime thread.
+        let stderr_reader = child.stderr.take().map(|mut stderr| {
             crate::spawn(async move {
-                let mut sink = Vec::new();
-                let _ = stderr.read_to_end(&mut sink).await;
+                let mut buf = Vec::new();
+                stderr.read_to_end(&mut buf).await.map(|_| buf)
             })
         });
 
-        let mut output = Vec::new();
-        if let Some(stdout) = child.stdout.as_mut() {
-            stdout.read_to_end(&mut output).await?;
+        let mut stdout = Vec::new();
+        if let Some(out) = child.stdout.as_mut() {
+            out.read_to_end(&mut stdout).await?;
         }
-        if let Some(drain) = stderr_drain {
-            let _ = drain.await;
-        }
+
+        let stderr = match stderr_reader {
+            Some(handle) => handle.await.expect("stderr reader task should not be aborted")?,
+            None => Vec::new(),
+        };
+
         let status = child.wait().await?;
-        if status.success() {
-            Ok(output)
-        } else {
-            Err(io::Error::other("process exited unsuccessfully"))
-        }
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }

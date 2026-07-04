@@ -77,7 +77,7 @@ pub(crate) mod pipe;
 mod status;
 
 pub use child::Child;
-pub use command::{Command, Stdio};
+pub use command::{Command, Output, Stdio};
 pub use pipe::{ChildStderr, ChildStdin, ChildStdout};
 pub use status::ExitStatus;
 
