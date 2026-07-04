@@ -204,7 +204,7 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         unreachable!("set_len backend called with non-set_len op");
     };
 
-    submit_uring::<(), _>(
+    match submit_uring::<(), _>(
         move |sqe| {
             sqe.opcode = IORING_OP_FTRUNCATE;
             sqe.fd = fd;
@@ -213,6 +213,28 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         move |cqe| cqe_to_result(cqe).map(|_| ()),
     )
     .await
+    {
+        // IORING_OP_FTRUNCATE requires Linux 6.9. On older kernels fall back to
+        // a synchronous ftruncate(2): on a regular file it is a fast metadata
+        // update, so running it inline (like the socket lifecycle fallbacks) is
+        // acceptable rather than paying a blocking-pool hop.
+        Err(error) if fs_should_fallback(&error) => set_len_sync(fd, len),
+        result => result,
+    }
+}
+
+fn set_len_sync(fd: RawFd, len: u64) -> io::Result<()> {
+    // SAFETY: ftruncate takes only a descriptor and a length; no user pointers.
+    cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())
+}
+
+/// Whether an io_uring op error indicates the opcode is unavailable on this
+/// kernel and a synchronous-syscall fallback should be attempted.
+fn fs_should_fallback(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+    )
 }
 
 pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {

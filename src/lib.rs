@@ -92,6 +92,32 @@
 //!
 //! A Windows port (IOCP) is in progress. Building for any other target raises a
 //! compile error.
+//!
+//! ## Minimum Linux kernel
+//!
+//! The io_uring backend targets **Linux 6.1 or newer** (the current LTS line),
+//! which is what CI and the maintainers test against. It may run on older
+//! kernels subject to the feature notes below, but that is not tested.
+//!
+//! Hard requirements (no fallback — the runtime will not function without them):
+//! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
+//!   and friends, which every file and socket operation builds on.
+//! - **5.18** — `IORING_OP_MSG_RING`, used to wake one runtime thread from
+//!   another. A single-threaded runtime can run without it, but
+//!   [`spawn_worker`]-based multithreading (and any cross-thread
+//!   [`ThreadHandle`] wake) requires 5.18+.
+//!
+//! Soft requirements (a synchronous syscall fallback runs transparently on
+//! older kernels, so only native-io_uring performance is affected):
+//! - File truncation ([`OpenOptions::truncate`](fs::OpenOptions::truncate),
+//!   [`File::set_len`](fs::File::set_len)) uses `IORING_OP_FTRUNCATE` (6.9) and
+//!   falls back to `ftruncate(2)`.
+//! - The socket lifecycle operations — `socket` (5.19), `bind`/`listen` (6.11),
+//!   and `connect`/`accept`/`shutdown`/`send`/`recv` — fall back to their
+//!   blocking equivalents when the kernel lacks the opcode.
+//!
+//! So the recommended 6.1 LTS floor exercises every feature; the only hard
+//! lower bounds are 5.6 (single-threaded) and 5.18 (multithreaded).
 
 #![deny(missing_docs)]
 
