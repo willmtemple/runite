@@ -110,6 +110,13 @@ pub fn run() {
     shared::run::<MacosRuntime>()
 }
 
+pub fn block_on<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    shared::block_on::<MacosRuntime, F>(future)
+}
+
 pub fn run_until_stalled() {
     shared::run_until_stalled::<MacosRuntime>()
 }

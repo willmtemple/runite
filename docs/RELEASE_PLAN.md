@@ -252,7 +252,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 
 ## Tier 3 — API shape (breaking window closes at 0.1)
 
-- [ ] **3.1 Add `block_on`.** Return a value from async code.
+- [x] **3.1 Add `block_on`.** Return a value from async code. **Done:** added
+  `runite::block_on(future) -> F::Output`, a value-returning driver alongside `run`. It
+  drives the current thread's loop (reusing the same turn machinery + panic firewall) and
+  returns as soon as the given future resolves, leaving other spawned tasks queued. The
+  future is driven **in place** (stack-pinned via a `std::task::Wake` waker), so it need
+  not be `Send` or `'static` and may borrow locals — matching Tokio's `block_on`
+  ergonomics. Trips the 2.2 reentrancy guard when nested (panic propagates, since
+  `block_on` is a direct driver). Wired through both platform shims. Tests in
+  `tests/block_on.rs` (value + borrow-locals, drives timers, returns before an unfinished
+  background task, nested-reject). Public API snapshot updated.
 - [ ] **3.2 `#[runite::main]` discards `Result` → exits 0 on error.** Honor `Termination`
   or reject signature. De-hardcode `::runite` (crate-rename support). Add `#[runite::test]`.
 - [ ] **3.3 fd interop.** `AsFd`/`AsRawFd`/`From<OwnedFd>`/`from_std` on fd-backed types;
