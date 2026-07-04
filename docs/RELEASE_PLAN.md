@@ -374,10 +374,17 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 
 ## Tier 4 — Release mechanics
 
-- [ ] **4.1 CI builds default (empty) feature set** + gate `docs/public-api.md` drift.
+- [x] **4.1 CI builds default (empty) feature set** + gate `docs/public-api.md` drift.
   Also add example smoke-runs: every self-driving example plus `command_center --demo`
   and `chat_server --demo` run to completion in CI (all 13 verified locally when the
-  example suite landed).
+  example suite landed). **Done:** lint job gained a `cargo check --workspace
+  --all-targets` default-features step; new `api-drift` job (mise-pinned
+  cargo-public-api + minimal nightly rustdoc) runs `mise run api-report-check`; the
+  Linux x86_64 test job smoke-runs all 14 examples via the new `mise run examples`
+  task (which doubles as a default-features runtime exercise, since examples build
+  without `--all-features`). The smoke task immediately caught a latent example bug:
+  the hyper demo declared `content-length: 24` for an 18-byte body and had been
+  failing invisibly under the old Result-discarding `#[runite::main]` (fixed).
 - [ ] **4.2 Merge the two ROADMAP files; rewrite CHANGELOG to a `0.1.0` narrative.**
 - [ ] **4.3 Packaging:** exclude `mise.lock`; `doc_auto_cfg` feature badges;
   `cargo publish --dry-run -p runite` step in release.yml.

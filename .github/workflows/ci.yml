@@ -35,6 +35,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Formatting
         run: cargo fmt --all --check
+      # The main test jobs build with --all-features; this catches breakage of
+      # the default (empty) feature set — e.g. code that accidentally depends
+      # on a feature-gated item.
+      - name: Check default features
+        run: cargo check --workspace --all-targets
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Docs
@@ -69,6 +74,11 @@ jobs:
         run: cargo build --workspace --all-targets --all-features
       - name: Test
         run: cargo test --workspace --all-features
+      # Every example runs to completion (interactive ones via --demo). Beyond
+      # keeping the examples honest, this exercises the runtime end-to-end with
+      # default features, since examples build without --all-features.
+      - name: Smoke-run examples
+        run: mise run examples
 
   test-linux-arm64:
     name: Test (Linux aarch64, io_uring)
@@ -165,6 +175,22 @@ jobs:
         run: cargo build --benches --all-features
       - name: Smoke-run benches
         run: cargo bench --bench runtime -- --warm-up-time 0.1 --measurement-time 0.3 --sample-size 10
+
+  api-drift:
+    name: Public API drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      # cargo-public-api (pinned in mise.toml/mise.lock) shells out to a nightly
+      # rustdoc to emit rustdoc JSON; install a minimal nightly for it.
+      - name: Install nightly rustdoc
+        run: mise exec -- rustup toolchain install nightly --profile minimal --no-self-update
+      - name: Check docs/public-api.md is current
+        run: mise run api-report-check
 
   publish-dry-run:
     name: Publish dry-run
