@@ -129,7 +129,6 @@ model exists, not just an API:
 
 | Example | What it shows |
 | --- | --- |
-| [`reactive_state`](./examples/reactive_state.rs) | **The flagship.** Model→update→render with dirty-flag coalescing at the microtask checkpoint — why deterministic flush points make reactive UIs tractable. |
 | [`command_center`](./examples/command_center.rs) | An interactive terminal app: async stdin, background jobs, and shared `Rc<RefCell>` state on one loop that never blocks on you. Interactive, or `-- --demo`. |
 | [`chat_server`](./examples/chat_server.rs) | A collaborative-session backend whose entire room state is `Rc<RefCell<HashMap>>` — no `Arc`, no `Mutex`, no `Send` bounds — plus Ctrl-C graceful shutdown. Interactive (`nc` in!), or `-- --demo`. |
 | [`background_workers`](./examples/background_workers.rs) | The Web-Workers discipline: CPU work on the blocking pool while a heartbeat *measures* that the loop stayed responsive. Run with `-- --blocking` to see the jank, quantified. |

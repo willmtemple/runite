@@ -3,8 +3,7 @@
 //! Walks through the JavaScript-style scheduling rules one by one — microtask
 //! checkpoints, macrotask turns, `set_timeout`/`set_interval`, `yield_now`,
 //! and cross-thread wakes — with numbered log lines asserting the exact
-//! delivery order. This is the reference demo for "when does my code run?";
-//! `reactive_state.rs` shows why these rules matter for applications.
+//! delivery order. This is the reference demo for "when does my code run?".
 //!
 //! Run it: `cargo run --example runtime_loop_showcase`
 

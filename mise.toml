@@ -64,7 +64,7 @@ description = "Smoke-run every example to completion (the interactive ones via -
 shell = "bash -c"
 run = """
 set -euo pipefail
-for ex in reactive_state background_workers frame_loop_embedding build_pipeline \
+for ex in background_workers frame_loop_embedding build_pipeline \
           runtime_loop_showcase channel_showcase broadcast_watch async_fs_showcase \
           tcp_echo_server subprocess_pipeline main_result; do
   echo "== example: $ex"
