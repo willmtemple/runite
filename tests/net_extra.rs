@@ -299,6 +299,12 @@ fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
 
+        // Barrier: the client must not write until the 64-byte read has been
+        // submitted, or a readiness-based backend (macOS) could complete the
+        // first poll synchronously into the discarded `big` buffer and hang
+        // the test (io_uring's always-Pending first poll masked this race).
+        let (registered_tx, mut registered_rx) = runite::channel::oneshot::channel::<()>();
+
         let server = runite::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
 
@@ -306,10 +312,16 @@ fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
             // poll so the recv stays stashed on the stream sized for 64 bytes.
             poll_fn(|cx| {
                 let mut big = [0u8; 64];
-                let _ = Pin::new(&mut stream).poll_read(cx, &mut big);
+                // Nothing has been written yet (the client waits on the
+                // barrier), so this must leave the 64-byte recv in flight.
+                assert!(
+                    Pin::new(&mut stream).poll_read(cx, &mut big).is_pending(),
+                    "first poll must leave the large read in flight"
+                );
                 Poll::Ready(())
             })
             .await;
+            let _ = registered_tx.send(());
 
             // Read 4 bytes at a time. The first small read completes the stashed
             // 64-byte recv and must keep the surplus; the overflow buffer serves
@@ -329,6 +341,10 @@ fn tcp_read_overflow_preserves_bytes_when_buffer_shrinks() {
         });
 
         let mut client = TcpStream::connect(addr).await.expect("connect");
+        registered_rx
+            .recv()
+            .await
+            .expect("server should register its large read");
         client.write_all(b"0123456789").await.expect("write");
         let out = server.await.expect("server task");
         drop(client);
@@ -387,7 +403,10 @@ fn tcp_inherent_read_stashes_operation() {
         });
 
         let mut client = TcpStream::connect(addr).await.expect("connect");
-        registered_rx.recv().await.expect("server should register its read");
+        registered_rx
+            .recv()
+            .await
+            .expect("server should register its read");
         client.write_all(b"hello").await.expect("write");
         let out = server.await.expect("server task");
         drop(client);

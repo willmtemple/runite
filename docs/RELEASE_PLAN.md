@@ -509,6 +509,11 @@ artificially fence off hyper server and http2.
 ## Discovered during work (not in the original review)
 
 - [ ] **D-1 `spawn_blocking` doctests flake (pre-existing, confirmed on baseline).**
+  **CI sighting (2026-07-04, PR #1 run 5):** `fs::tests::read_dir_stream_yields_entries`
+  failed on the Linux x86_64 job with "task should record entries" (+2 poisoned-lock
+  collaterals) — the same blocking-pool-vs-`run()`-exit race class (`read_dir` streams
+  from the pool). Unreproducible locally in 60 stress iterations; passed in the runs
+  before and after. Raises D-1's priority for 0.1.x.
   The merged doctest binary intermittently fails `src/task.rs` blocking examples
   with `JoinError::Cancelled` (~50% on a clean checkout). Root cause: `run()` can
   reach its exit commit while a blocking task is still in flight / before its
