@@ -60,6 +60,8 @@ run = "cargo run --quiet --package xtask -- api-report --check"
 
 [tasks.examples]
 description = "Smoke-run every example to completion (the interactive ones via --demo)"
+# mise runs tasks with `sh` by default; dash rejects `pipefail`, so pin bash.
+shell = "bash -c"
 run = """
 set -euo pipefail
 for ex in reactive_state background_workers frame_loop_embedding build_pipeline \

@@ -234,9 +234,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       # cargo-public-api (pinned in mise.toml/mise.lock) shells out to a nightly
-      # rustdoc to emit rustdoc JSON; install a minimal nightly for it.
-      - name: Install nightly rustdoc
-        run: mise exec -- rustup toolchain install nightly --profile minimal --no-self-update
+      # rustdoc to emit rustdoc JSON. The exact nightly is pinned in
+      # xtask/src/main.rs (RUSTDOC_TOOLCHAIN) because the rendered listing
+      # varies across rustdoc versions; install that same toolchain here.
+      - name: Install pinned nightly rustdoc
+        run: mise exec -- rustup toolchain install nightly-2026-07-01 --profile minimal --no-self-update
       - name: Check docs/public-api.md is current
         run: mise run api-report-check
 

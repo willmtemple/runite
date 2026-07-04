@@ -79,11 +79,11 @@ pub fn runite::run()
 pub fn runite::run_ready_tasks()
 pub fn runite::run_until_stalled()
 pub fn runite::spawn<F>(F) -> JoinHandle<<F as core::future::future::Future>::Output> where F: core::future::future::Future + 'static, <F as core::future::future::Future>::Output: 'static
-pub fn runite::spawn_blocking<F, R>(F) -> std::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
+pub fn runite::spawn_blocking<F, R>(F) -> core::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn runite::spawn_worker<Init, Exit>(Init, Exit) -> WorkerHandle where Init: core::ops::function::FnOnce() + core::marker::Send + 'static, Exit: core::ops::function::FnOnce() + 'static
-pub fn runite::stderr() -> std::io::error::Result<runite::stdio::Stderr>
-pub fn runite::stdin() -> std::io::error::Result<runite::stdio::Stdin>
-pub fn runite::stdout() -> std::io::error::Result<runite::stdio::Stdout>
+pub fn runite::stderr() -> core::io::error::Result<runite::stdio::Stderr>
+pub fn runite::stdin() -> core::io::error::Result<runite::stdio::Stdin>
+pub fn runite::stdout() -> core::io::error::Result<runite::stdio::Stdout>
 ```
 
 <a id="runitechannel"></a>
@@ -266,8 +266,8 @@ pub fn runite::channel::watch::channel<T: core::marker::Send + 'static>(T) -> (r
 
 ```rust
 pub mod runite::fd
-pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> std::io::error::Result<()>
-pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> std::io::error::Result<()>
+pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
+pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 ```
 
 <a id="runitefs"></a>
@@ -278,37 +278,37 @@ pub mod runite::fs
 pub struct runite::fs::DirEntry
 impl runite::fs::DirEntry
 pub fn runite::fs::DirEntry::file_name(&self) -> &std::ffi::os_str::OsStr
-pub async fn runite::fs::DirEntry::metadata(&self) -> std::io::error::Result<runite::fs::Metadata>
+pub async fn runite::fs::DirEntry::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
 pub fn runite::fs::DirEntry::path(&self) -> std::path::PathBuf
 pub struct runite::fs::File
 impl runite::fs::File
-pub async fn runite::fs::File::create(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
-pub async fn runite::fs::File::flush(&mut self) -> std::io::error::Result<()>
-pub async fn runite::fs::File::metadata(&self) -> std::io::error::Result<runite::fs::Metadata>
-pub async fn runite::fs::File::open(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
-pub async fn runite::fs::File::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::fs::File::read_at(&self, u64, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::fs::File::read_exact(&mut self, &mut [u8]) -> std::io::error::Result<()>
-pub async fn runite::fs::File::read_exact_at(&self, u64, &mut [u8]) -> std::io::error::Result<()>
-pub async fn runite::fs::File::read_to_end(&mut self, &mut alloc::vec::Vec<u8>) -> std::io::error::Result<usize>
-pub async fn runite::fs::File::read_to_string(&mut self, &mut alloc::string::String) -> std::io::error::Result<usize>
-pub async fn runite::fs::File::seek(&mut self, std::io::SeekFrom) -> std::io::error::Result<u64>
-pub async fn runite::fs::File::set_len(&self, u64) -> std::io::error::Result<()>
-pub async fn runite::fs::File::sync_all(&self) -> std::io::error::Result<()>
-pub async fn runite::fs::File::sync_data(&self) -> std::io::error::Result<()>
-pub async fn runite::fs::File::try_clone(&self) -> std::io::error::Result<Self>
-pub async fn runite::fs::File::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::fs::File::write_all(&mut self, &[u8]) -> std::io::error::Result<()>
-pub async fn runite::fs::File::write_all_at(&self, u64, &[u8]) -> std::io::error::Result<()>
-pub async fn runite::fs::File::write_at(&self, u64, &[u8]) -> std::io::error::Result<usize>
+pub async fn runite::fs::File::create(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
+pub async fn runite::fs::File::flush(&mut self) -> core::io::error::Result<()>
+pub async fn runite::fs::File::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
+pub async fn runite::fs::File::open(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
+pub async fn runite::fs::File::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::fs::File::read_at(&self, u64, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::fs::File::read_exact(&mut self, &mut [u8]) -> core::io::error::Result<()>
+pub async fn runite::fs::File::read_exact_at(&self, u64, &mut [u8]) -> core::io::error::Result<()>
+pub async fn runite::fs::File::read_to_end(&mut self, &mut alloc::vec::Vec<u8>) -> core::io::error::Result<usize>
+pub async fn runite::fs::File::read_to_string(&mut self, &mut alloc::string::String) -> core::io::error::Result<usize>
+pub async fn runite::fs::File::seek(&mut self, std::io::SeekFrom) -> core::io::error::Result<u64>
+pub async fn runite::fs::File::set_len(&self, u64) -> core::io::error::Result<()>
+pub async fn runite::fs::File::sync_all(&self) -> core::io::error::Result<()>
+pub async fn runite::fs::File::sync_data(&self) -> core::io::error::Result<()>
+pub async fn runite::fs::File::try_clone(&self) -> core::io::error::Result<Self>
+pub async fn runite::fs::File::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::fs::File::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
+pub async fn runite::fs::File::write_all_at(&self, u64, &[u8]) -> core::io::error::Result<()>
+pub async fn runite::fs::File::write_at(&self, u64, &[u8]) -> core::io::error::Result<usize>
 impl runite::fs::File
 pub fn runite::fs::File::from_std(std::fs::File) -> Self
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::fs::File
 pub fn runite::fs::File::from(std::os::fd::owned::OwnedFd) -> Self
-pub fn runite::fs::File::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::fs::File::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::fs::File::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::fs::File::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::fs::File::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::fs::File::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::fs::File::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::fs::File::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl std::os::fd::owned::AsFd for runite::fs::File
 pub fn runite::fs::File::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 impl std::os::fd::raw::AsRawFd for runite::fs::File
@@ -327,7 +327,7 @@ pub fn runite::fs::OpenOptions::append(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::create(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::create_new(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::new() -> Self
-pub async fn runite::fs::OpenOptions::open(&self, impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<runite::fs::File>
+pub async fn runite::fs::OpenOptions::open(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<runite::fs::File>
 pub fn runite::fs::OpenOptions::read(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::truncate(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::write(&mut self, bool) -> &mut Self
@@ -335,26 +335,26 @@ impl core::default::Default for runite::fs::OpenOptions
 pub fn runite::fs::OpenOptions::default() -> Self
 pub struct runite::fs::ReadDir
 impl runite::fs::ReadDir
-pub async fn runite::fs::ReadDir::next_entry(&mut self) -> std::io::error::Result<core::option::Option<runite::fs::DirEntry>>
-pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, std::io::error::Error>
+pub async fn runite::fs::ReadDir::next_entry(&mut self) -> core::io::error::Result<core::option::Option<runite::fs::DirEntry>>
+pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, core::io::error::Error>
 pub fn runite::fs::ReadDir::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::fs::ReadDir::size_hint(&self) -> (usize, core::option::Option<usize>)
-pub async fn runite::fs::create_dir(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub async fn runite::fs::create_dir_all(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub async fn runite::fs::metadata(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<runite::fs::Metadata>
-pub async fn runite::fs::read(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<alloc::vec::Vec<u8>>
-pub async fn runite::fs::read_dir(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<runite::fs::ReadDir>
-pub async fn runite::fs::read_to_string(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<alloc::string::String>
-pub async fn runite::fs::remove_dir(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub async fn runite::fs::remove_file(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub async fn runite::fs::rename(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub async fn runite::fs::symlink_metadata(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<runite::fs::Metadata>
-pub async fn runite::fs::write(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<[u8]>) -> std::io::error::Result<()>
-pub fn runite::fs::File::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::fs::File::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::fs::File::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::fs::File::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, std::io::error::Error>
+pub async fn runite::fs::create_dir(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub async fn runite::fs::create_dir_all(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub async fn runite::fs::metadata(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<runite::fs::Metadata>
+pub async fn runite::fs::read(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<alloc::vec::Vec<u8>>
+pub async fn runite::fs::read_dir(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<runite::fs::ReadDir>
+pub async fn runite::fs::read_to_string(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<alloc::string::String>
+pub async fn runite::fs::remove_dir(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub async fn runite::fs::remove_file(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub async fn runite::fs::rename(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub async fn runite::fs::symlink_metadata(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<runite::fs::Metadata>
+pub async fn runite::fs::write(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<[u8]>) -> core::io::error::Result<()>
+pub fn runite::fs::File::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::fs::File::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::fs::File::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::fs::File::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, core::io::error::Error>
 pub fn runite::fs::ReadDir::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::fs::ReadDir::size_hint(&self) -> (usize, core::option::Option<usize>)
 ```
@@ -389,8 +389,8 @@ impl<T: futures_io::if_std::AsyncWrite + core::marker::Unpin> runite::io::AsyncW
 pub struct runite::io::BufReader<R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::BufReader<R>
 pub fn runite::io::BufReader<R>::consume(&mut self, usize)
-pub async fn runite::io::BufReader<R>::fill_buf(&mut self) -> std::io::error::Result<&[u8]>
-pub async fn runite::io::BufReader<R>::read_line(&mut self, &mut alloc::string::String) -> std::io::error::Result<usize>
+pub async fn runite::io::BufReader<R>::fill_buf(&mut self) -> core::io::error::Result<&[u8]>
+pub async fn runite::io::BufReader<R>::read_line(&mut self, &mut alloc::string::String) -> core::io::error::Result<usize>
 impl<R: runite::io::AsyncRead> runite::io::BufReader<R>
 pub fn runite::io::BufReader<R>::buffer(&self) -> &[u8]
 pub fn runite::io::BufReader<R>::get_mut(&mut self) -> &mut R
@@ -399,11 +399,11 @@ pub fn runite::io::BufReader<R>::into_inner(self) -> R
 pub fn runite::io::BufReader<R>::new(R) -> Self
 pub fn runite::io::BufReader<R>::with_capacity(usize, R) -> Self
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::AsyncRead for runite::io::BufReader<R>
-pub fn runite::io::BufReader<R>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufReader<R>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl<R: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufReader<R>
-pub fn runite::io::BufReader<R>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufReader<R>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufReader<R>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufReader<R>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufReader<R>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufReader<R>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::io::BufWriter<W>
 impl<W: runite::io::AsyncWrite> runite::io::BufWriter<W>
 pub fn runite::io::BufWriter<W>::get_mut(&mut self) -> &mut W
@@ -412,12 +412,12 @@ pub fn runite::io::BufWriter<W>::into_inner(self) -> W
 pub fn runite::io::BufWriter<W>::new(W) -> Self
 pub fn runite::io::BufWriter<W>::with_capacity(usize, W) -> Self
 impl<W: runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufWriter<W>
-pub fn runite::io::BufWriter<W>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufWriter<W>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufWriter<W>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufWriter<W>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufWriter<W>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufWriter<W>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::io::Close<'a, W: ?core::marker::Sized>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Close<'_, W>
-pub type runite::io::Close<'_, W>::Output = core::result::Result<(), std::io::error::Error>
+pub type runite::io::Close<'_, W>::Output = core::result::Result<(), core::io::error::Error>
 pub fn runite::io::Close<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::Collect<S, C>
 impl<S, C> core::future::future::Future for runite::io::Collect<S, C> where S: runite::io::Stream + core::marker::Unpin, C: core::default::Default + core::iter::traits::collect::Extend<<S as runite::io::Stream>::Item>
@@ -426,11 +426,11 @@ pub fn runite::io::Collect<S, C>::poll(core::pin::Pin<&mut Self>, &mut core::tas
 impl<S, C> core::marker::Unpin for runite::io::Collect<S, C>
 pub struct runite::io::Copy<'a, R: ?core::marker::Sized, W: ?core::marker::Sized>
 impl<R, W> core::future::future::Future for runite::io::Copy<'_, R, W> where R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized, W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
-pub type runite::io::Copy<'_, R, W>::Output = core::result::Result<u64, std::io::error::Error>
+pub type runite::io::Copy<'_, R, W>::Output = core::result::Result<u64, core::io::error::Error>
 pub fn runite::io::Copy<'_, R, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::CopyBidirectional<'a, A: ?core::marker::Sized, B: ?core::marker::Sized>
 impl<A, B> core::future::future::Future for runite::io::CopyBidirectional<'_, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
-pub type runite::io::CopyBidirectional<'_, A, B>::Output = core::result::Result<(u64, u64), std::io::error::Error>
+pub type runite::io::CopyBidirectional<'_, A, B>::Output = core::result::Result<(u64, u64), core::io::error::Error>
 pub fn runite::io::CopyBidirectional<'_, A, B>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::Filter<S, F>
 impl<S, F> core::marker::Unpin for runite::io::Filter<S, F>
@@ -440,7 +440,7 @@ pub fn runite::io::Filter<S, F>::poll_next(core::pin::Pin<&mut Self>, &mut core:
 pub fn runite::io::Filter<S, F>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub struct runite::io::Flush<'a, W: ?core::marker::Sized>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Flush<'_, W>
-pub type runite::io::Flush<'_, W>::Output = core::result::Result<(), std::io::error::Error>
+pub type runite::io::Flush<'_, W>::Output = core::result::Result<(), core::io::error::Error>
 pub fn runite::io::Flush<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::ForEach<S, F, Fut>
 impl<S, F, Fut> core::future::future::Future for runite::io::ForEach<S, F, Fut> where S: runite::io::Stream + core::marker::Unpin, F: core::ops::function::FnMut(<S as runite::io::Stream>::Item) -> Fut, Fut: core::future::future::Future<Output = ()>
@@ -449,7 +449,7 @@ pub fn runite::io::ForEach<S, F, Fut>::poll(core::pin::Pin<&mut Self>, &mut core
 impl<S, F, Fut> core::marker::Unpin for runite::io::ForEach<S, F, Fut>
 pub struct runite::io::Lines<R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::Stream for runite::io::Lines<R>
-pub type runite::io::Lines<R>::Item = core::result::Result<alloc::string::String, std::io::error::Error>
+pub type runite::io::Lines<R>::Item = core::result::Result<alloc::string::String, core::io::error::Error>
 pub fn runite::io::Lines<R>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Lines<R>::size_hint(&self) -> (usize, core::option::Option<usize>)
 impl<R> core::marker::Unpin for runite::io::Lines<R>
@@ -465,15 +465,15 @@ pub type runite::io::Next<'_, S>::Output = core::option::Option<<S as runite::io
 pub fn runite::io::Next<'_, S>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::Read<'a, R: ?core::marker::Sized>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Read<'_, R>
-pub type runite::io::Read<'_, R>::Output = core::result::Result<usize, std::io::error::Error>
+pub type runite::io::Read<'_, R>::Output = core::result::Result<usize, core::io::error::Error>
 pub fn runite::io::Read<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::ReadExact<'a, R: ?core::marker::Sized>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadExact<'_, R>
-pub type runite::io::ReadExact<'_, R>::Output = core::result::Result<(), std::io::error::Error>
+pub type runite::io::ReadExact<'_, R>::Output = core::result::Result<(), core::io::error::Error>
 pub fn runite::io::ReadExact<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::ReadToEnd<'a, R: ?core::marker::Sized>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadToEnd<'_, R>
-pub type runite::io::ReadToEnd<'_, R>::Output = core::result::Result<usize, std::io::error::Error>
+pub type runite::io::ReadToEnd<'_, R>::Output = core::result::Result<usize, core::io::error::Error>
 pub fn runite::io::ReadToEnd<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::Skip<S>
 impl<S> core::marker::Unpin for runite::io::Skip<S>
@@ -489,14 +489,14 @@ pub fn runite::io::Take<S>::poll_next(core::pin::Pin<&mut Self>, &mut core::task
 pub fn runite::io::Take<S>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub struct runite::io::Write<'a, W: ?core::marker::Sized>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Write<'_, W>
-pub type runite::io::Write<'_, W>::Output = core::result::Result<usize, std::io::error::Error>
+pub type runite::io::Write<'_, W>::Output = core::result::Result<usize, core::io::error::Error>
 pub fn runite::io::Write<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub struct runite::io::WriteAll<'a, W: ?core::marker::Sized>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::WriteAll<'_, W>
-pub type runite::io::WriteAll<'_, W>::Output = core::result::Result<(), std::io::error::Error>
+pub type runite::io::WriteAll<'_, W>::Output = core::result::Result<(), core::io::error::Error>
 pub fn runite::io::WriteAll<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub trait runite::io::AsyncRead
-pub fn runite::io::AsyncRead::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::AsyncRead::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl runite::io::AsyncRead for runite::fs::File
 impl runite::io::AsyncRead for runite::net::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::TcpStream
@@ -506,7 +506,7 @@ impl runite::io::AsyncRead for runite::process::ChildStderr
 impl runite::io::AsyncRead for runite::process::ChildStdout
 impl runite::io::AsyncRead for runite::stdio::Stdin
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::AsyncRead for runite::io::BufReader<R>
-pub fn runite::io::BufReader<R>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufReader<R>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl<T: futures_io::if_std::AsyncRead + core::marker::Unpin> runite::io::AsyncRead for runite::io::compat::FuturesCompat<T>
 pub trait runite::io::AsyncReadExt: runite::io::AsyncRead
 pub fn runite::io::AsyncReadExt::lines(self) -> runite::io::Lines<Self> where Self: core::marker::Sized
@@ -519,9 +519,9 @@ pub fn R::read<'a>(&'a mut self, &'a mut [u8]) -> runite::io::Read<'a, Self> whe
 pub fn R::read_exact<'a>(&'a mut self, &'a mut [u8]) -> runite::io::ReadExact<'a, Self> where Self: core::marker::Unpin
 pub fn R::read_to_end<'a>(&'a mut self, &'a mut alloc::vec::Vec<u8>) -> runite::io::ReadToEnd<'a, Self> where Self: core::marker::Unpin
 pub trait runite::io::AsyncWrite
-pub fn runite::io::AsyncWrite::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::AsyncWrite::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::AsyncWrite::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::AsyncWrite::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::AsyncWrite::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::AsyncWrite::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl runite::io::AsyncWrite for runite::fs::File
 impl runite::io::AsyncWrite for runite::net::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::TcpStream
@@ -531,14 +531,14 @@ impl runite::io::AsyncWrite for runite::process::ChildStdin
 impl runite::io::AsyncWrite for runite::stdio::Stderr
 impl runite::io::AsyncWrite for runite::stdio::Stdout
 impl<R: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufReader<R>
-pub fn runite::io::BufReader<R>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufReader<R>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufReader<R>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufReader<R>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufReader<R>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufReader<R>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl<T: futures_io::if_std::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::compat::FuturesCompat<T>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufWriter<W>
-pub fn runite::io::BufWriter<W>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufWriter<W>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::BufWriter<W>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::BufWriter<W>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufWriter<W>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::BufWriter<W>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub trait runite::io::AsyncWriteExt: runite::io::AsyncWrite
 pub fn runite::io::AsyncWriteExt::close(&mut self) -> runite::io::Close<'_, Self> where Self: core::marker::Unpin
 pub fn runite::io::AsyncWriteExt::flush(&mut self) -> runite::io::Flush<'_, Self> where Self: core::marker::Unpin
@@ -557,7 +557,7 @@ impl runite::io::Stream for runite::fs::ReadDir
 impl runite::io::Stream for runite::net::Incoming
 impl runite::io::Stream for runite::net::unix::Incoming<'_>
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::Stream for runite::io::Lines<R>
-pub type runite::io::Lines<R>::Item = core::result::Result<alloc::string::String, std::io::error::Error>
+pub type runite::io::Lines<R>::Item = core::result::Result<alloc::string::String, core::io::error::Error>
 pub fn runite::io::Lines<R>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Lines<R>::size_hint(&self) -> (usize, core::option::Option<usize>)
 impl<S, F, B> runite::io::Stream for runite::io::Map<S, F> where S: runite::io::Stream + core::marker::Unpin, F: core::ops::function::FnMut(<S as runite::io::Stream>::Item) -> B
@@ -631,63 +631,63 @@ pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
 pub fn runite::io::compat::Compat<T>::new(T) -> Self
-pub fn runite::io::compat::Compat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::io::compat::Compat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::Compat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::compat::Compat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::io::compat::Compat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::Compat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
 pub fn runite::io::compat::FuturesCompat<T>::new(T) -> Self
-pub fn runite::io::compat::FuturesCompat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::io::compat::FuturesCompat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::io::compat::FuturesCompat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 ```
 
 <a id="runitenet"></a>
 ## `runite::net`
 
 ```rust
-pub fn runite::net::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::TcpStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub type runite::net::Incoming::Item = core::result::Result<runite::net::TcpStream, std::io::error::Error>
+pub fn runite::net::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::TcpStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub type runite::net::Incoming::Item = core::result::Result<runite::net::TcpStream, core::io::error::Error>
 pub fn runite::net::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub mod runite::net
 pub struct runite::net::Incoming
 impl core::fmt::Debug for runite::net::Incoming
 pub fn runite::net::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub type runite::net::Incoming::Item = core::result::Result<runite::net::TcpStream, std::io::error::Error>
+pub type runite::net::Incoming::Item = core::result::Result<runite::net::TcpStream, core::io::error::Error>
 pub fn runite::net::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub struct runite::net::OwnedReadHalf
 impl runite::net::OwnedReadHalf
-pub fn runite::net::OwnedReadHalf::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::OwnedReadHalf::peer_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::OwnedReadHalf::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::OwnedReadHalf::peer_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
 pub fn runite::net::OwnedReadHalf::reunite(self, runite::net::OwnedWriteHalf) -> core::result::Result<runite::net::TcpStream, runite::net::ReuniteError>
-pub fn runite::net::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::net::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::net::OwnedWriteHalf
 impl runite::net::OwnedWriteHalf
-pub fn runite::net::OwnedWriteHalf::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::OwnedWriteHalf::peer_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::OwnedWriteHalf::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::OwnedWriteHalf::peer_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
 pub fn runite::net::OwnedWriteHalf::reunite(self, runite::net::OwnedReadHalf) -> core::result::Result<runite::net::TcpStream, runite::net::ReuniteError>
-pub async fn runite::net::OwnedWriteHalf::shutdown(&self) -> std::io::error::Result<()>
-pub fn runite::net::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::net::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
+pub fn runite::net::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::net::ReuniteError(pub runite::net::OwnedReadHalf, pub runite::net::OwnedWriteHalf)
 impl core::error::Error for runite::net::ReuniteError
 impl core::fmt::Debug for runite::net::ReuniteError
@@ -696,14 +696,14 @@ impl core::fmt::Display for runite::net::ReuniteError
 pub fn runite::net::ReuniteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct runite::net::TcpListener
 impl runite::net::TcpListener
-pub async fn runite::net::TcpListener::accept(&self) -> std::io::error::Result<(runite::net::TcpStream, core::net::socket_addr::SocketAddr)>
-pub async fn runite::net::TcpListener::bind<A>(A) -> std::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub async fn runite::net::TcpListener::accept(&self) -> core::io::error::Result<(runite::net::TcpStream, core::net::socket_addr::SocketAddr)>
+pub async fn runite::net::TcpListener::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub fn runite::net::TcpListener::incoming(&self) -> runite::net::Incoming
-pub fn runite::net::TcpListener::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::TcpListener::set_ttl(&self, u32) -> std::io::error::Result<()>
-pub fn runite::net::TcpListener::ttl(&self) -> std::io::error::Result<u32>
+pub fn runite::net::TcpListener::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::TcpListener::set_ttl(&self, u32) -> core::io::error::Result<()>
+pub fn runite::net::TcpListener::ttl(&self) -> core::io::error::Result<u32>
 impl runite::net::TcpListener
-pub fn runite::net::TcpListener::from_std(std::net::tcp::TcpListener) -> std::io::error::Result<Self>
+pub fn runite::net::TcpListener::from_std(std::net::tcp::TcpListener) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::TcpListener
 pub fn runite::net::TcpListener::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::TcpListener
@@ -712,16 +712,16 @@ impl std::os::fd::raw::AsRawFd for runite::net::TcpListener
 pub fn runite::net::TcpListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub struct runite::net::TcpSocket
 impl runite::net::TcpSocket
-pub fn runite::net::TcpSocket::bind(&self, core::net::socket_addr::SocketAddr) -> std::io::error::Result<()>
-pub async fn runite::net::TcpSocket::connect(self, core::net::socket_addr::SocketAddr) -> std::io::error::Result<runite::net::TcpStream>
-pub fn runite::net::TcpSocket::listen(self, u32) -> std::io::error::Result<runite::net::TcpListener>
-pub fn runite::net::TcpSocket::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::TcpSocket::new_v4() -> std::io::error::Result<Self>
-pub fn runite::net::TcpSocket::new_v6() -> std::io::error::Result<Self>
-pub fn runite::net::TcpSocket::reuseaddr(&self) -> std::io::error::Result<bool>
-pub fn runite::net::TcpSocket::reuseport(&self) -> std::io::error::Result<bool>
-pub fn runite::net::TcpSocket::set_reuseaddr(&self, bool) -> std::io::error::Result<()>
-pub fn runite::net::TcpSocket::set_reuseport(&self, bool) -> std::io::error::Result<()>
+pub fn runite::net::TcpSocket::bind(&self, core::net::socket_addr::SocketAddr) -> core::io::error::Result<()>
+pub async fn runite::net::TcpSocket::connect(self, core::net::socket_addr::SocketAddr) -> core::io::error::Result<runite::net::TcpStream>
+pub fn runite::net::TcpSocket::listen(self, u32) -> core::io::error::Result<runite::net::TcpListener>
+pub fn runite::net::TcpSocket::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::TcpSocket::new_v4() -> core::io::error::Result<Self>
+pub fn runite::net::TcpSocket::new_v6() -> core::io::error::Result<Self>
+pub fn runite::net::TcpSocket::reuseaddr(&self) -> core::io::error::Result<bool>
+pub fn runite::net::TcpSocket::reuseport(&self) -> core::io::error::Result<bool>
+pub fn runite::net::TcpSocket::set_reuseaddr(&self, bool) -> core::io::error::Result<()>
+pub fn runite::net::TcpSocket::set_reuseport(&self, bool) -> core::io::error::Result<()>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::TcpSocket
 pub fn runite::net::TcpSocket::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::TcpSocket
@@ -730,69 +730,69 @@ impl std::os::fd::raw::AsRawFd for runite::net::TcpSocket
 pub fn runite::net::TcpSocket::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub struct runite::net::TcpStream
 impl runite::net::TcpStream
-pub async fn runite::net::TcpStream::connect<A>(A) -> std::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub async fn runite::net::TcpStream::connect_timeout(&core::net::socket_addr::SocketAddr, core::time::Duration) -> std::io::error::Result<Self>
+pub async fn runite::net::TcpStream::connect<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub async fn runite::net::TcpStream::connect_timeout(&core::net::socket_addr::SocketAddr, core::time::Duration) -> core::io::error::Result<Self>
 pub fn runite::net::TcpStream::into_split(self) -> (runite::net::OwnedReadHalf, runite::net::OwnedWriteHalf)
-pub fn runite::net::TcpStream::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::TcpStream::nodelay(&self) -> std::io::error::Result<bool>
-pub fn runite::net::TcpStream::peer_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub async fn runite::net::TcpStream::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::TcpStream::read_exact(&mut self, &mut [u8]) -> std::io::error::Result<()>
-pub fn runite::net::TcpStream::read_timeout(&self) -> std::io::error::Result<core::option::Option<core::time::Duration>>
+pub fn runite::net::TcpStream::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::TcpStream::nodelay(&self) -> core::io::error::Result<bool>
+pub fn runite::net::TcpStream::peer_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub async fn runite::net::TcpStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::TcpStream::read_exact(&mut self, &mut [u8]) -> core::io::error::Result<()>
+pub fn runite::net::TcpStream::read_timeout(&self) -> core::io::error::Result<core::option::Option<core::time::Duration>>
 pub fn runite::net::TcpStream::reunite(runite::net::OwnedReadHalf, runite::net::OwnedWriteHalf) -> core::result::Result<Self, runite::net::ReuniteError>
-pub fn runite::net::TcpStream::set_nodelay(&self, bool) -> std::io::error::Result<()>
-pub fn runite::net::TcpStream::set_read_timeout(&self, core::option::Option<core::time::Duration>) -> std::io::error::Result<()>
-pub fn runite::net::TcpStream::set_ttl(&self, u32) -> std::io::error::Result<()>
-pub fn runite::net::TcpStream::set_write_timeout(&self, core::option::Option<core::time::Duration>) -> std::io::error::Result<()>
-pub async fn runite::net::TcpStream::shutdown(&self, std::net::Shutdown) -> std::io::error::Result<()>
-pub async fn runite::net::TcpStream::try_clone(&self) -> std::io::error::Result<Self>
-pub fn runite::net::TcpStream::ttl(&self) -> std::io::error::Result<u32>
-pub async fn runite::net::TcpStream::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::TcpStream::write_all(&mut self, &[u8]) -> std::io::error::Result<()>
-pub fn runite::net::TcpStream::write_timeout(&self) -> std::io::error::Result<core::option::Option<core::time::Duration>>
+pub fn runite::net::TcpStream::set_nodelay(&self, bool) -> core::io::error::Result<()>
+pub fn runite::net::TcpStream::set_read_timeout(&self, core::option::Option<core::time::Duration>) -> core::io::error::Result<()>
+pub fn runite::net::TcpStream::set_ttl(&self, u32) -> core::io::error::Result<()>
+pub fn runite::net::TcpStream::set_write_timeout(&self, core::option::Option<core::time::Duration>) -> core::io::error::Result<()>
+pub async fn runite::net::TcpStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
+pub async fn runite::net::TcpStream::try_clone(&self) -> core::io::error::Result<Self>
+pub fn runite::net::TcpStream::ttl(&self) -> core::io::error::Result<u32>
+pub async fn runite::net::TcpStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::TcpStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
+pub fn runite::net::TcpStream::write_timeout(&self) -> core::io::error::Result<core::option::Option<core::time::Duration>>
 impl runite::net::TcpStream
-pub fn runite::net::TcpStream::from_std(std::net::tcp::TcpStream) -> std::io::error::Result<Self>
+pub fn runite::net::TcpStream::from_std(std::net::tcp::TcpStream) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::TcpStream
 pub fn runite::net::TcpStream::from(std::os::fd::owned::OwnedFd) -> Self
 impl core::fmt::Debug for runite::net::TcpStream
 pub fn runite::net::TcpStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl hyper::rt::io::Read for runite::net::TcpStream
-pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
+pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
 impl hyper::rt::io::Write for runite::net::TcpStream
-pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::TcpStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, std::io::error::Error>>
-pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::TcpStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::TcpStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, core::io::error::Error>>
+pub fn runite::net::TcpStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::TcpStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::TcpStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl std::os::fd::owned::AsFd for runite::net::TcpStream
 pub fn runite::net::TcpStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 impl std::os::fd::raw::AsRawFd for runite::net::TcpStream
 pub fn runite::net::TcpStream::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub struct runite::net::UdpSocket
 impl runite::net::UdpSocket
-pub async fn runite::net::UdpSocket::bind<A>(A) -> std::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub fn runite::net::UdpSocket::broadcast(&self) -> std::io::error::Result<bool>
-pub async fn runite::net::UdpSocket::connect<A>(&self, A) -> std::io::error::Result<()> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub fn runite::net::UdpSocket::local_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub async fn runite::net::UdpSocket::peek(&self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::UdpSocket::peek_from(&self, &mut [u8]) -> std::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
-pub fn runite::net::UdpSocket::peer_addr(&self) -> std::io::error::Result<core::net::socket_addr::SocketAddr>
-pub fn runite::net::UdpSocket::read_timeout(&self) -> std::io::error::Result<core::option::Option<core::time::Duration>>
-pub async fn runite::net::UdpSocket::recv(&self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::UdpSocket::recv_from(&self, &mut [u8]) -> std::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
-pub async fn runite::net::UdpSocket::send(&self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::UdpSocket::send_to<A>(&self, &[u8], A) -> std::io::error::Result<usize> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub fn runite::net::UdpSocket::set_broadcast(&self, bool) -> std::io::error::Result<()>
-pub fn runite::net::UdpSocket::set_read_timeout(&self, core::option::Option<core::time::Duration>) -> std::io::error::Result<()>
-pub fn runite::net::UdpSocket::set_ttl(&self, u32) -> std::io::error::Result<()>
-pub fn runite::net::UdpSocket::set_write_timeout(&self, core::option::Option<core::time::Duration>) -> std::io::error::Result<()>
-pub async fn runite::net::UdpSocket::try_clone(&self) -> std::io::error::Result<Self>
-pub fn runite::net::UdpSocket::ttl(&self) -> std::io::error::Result<u32>
-pub fn runite::net::UdpSocket::write_timeout(&self) -> std::io::error::Result<core::option::Option<core::time::Duration>>
+pub async fn runite::net::UdpSocket::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub fn runite::net::UdpSocket::broadcast(&self) -> core::io::error::Result<bool>
+pub async fn runite::net::UdpSocket::connect<A>(&self, A) -> core::io::error::Result<()> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub fn runite::net::UdpSocket::local_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub async fn runite::net::UdpSocket::peek(&self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::UdpSocket::peek_from(&self, &mut [u8]) -> core::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
+pub fn runite::net::UdpSocket::peer_addr(&self) -> core::io::error::Result<core::net::socket_addr::SocketAddr>
+pub fn runite::net::UdpSocket::read_timeout(&self) -> core::io::error::Result<core::option::Option<core::time::Duration>>
+pub async fn runite::net::UdpSocket::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::UdpSocket::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
+pub async fn runite::net::UdpSocket::send(&self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::UdpSocket::send_to<A>(&self, &[u8], A) -> core::io::error::Result<usize> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub fn runite::net::UdpSocket::set_broadcast(&self, bool) -> core::io::error::Result<()>
+pub fn runite::net::UdpSocket::set_read_timeout(&self, core::option::Option<core::time::Duration>) -> core::io::error::Result<()>
+pub fn runite::net::UdpSocket::set_ttl(&self, u32) -> core::io::error::Result<()>
+pub fn runite::net::UdpSocket::set_write_timeout(&self, core::option::Option<core::time::Duration>) -> core::io::error::Result<()>
+pub async fn runite::net::UdpSocket::try_clone(&self) -> core::io::error::Result<Self>
+pub fn runite::net::UdpSocket::ttl(&self) -> core::io::error::Result<u32>
+pub fn runite::net::UdpSocket::write_timeout(&self) -> core::io::error::Result<core::option::Option<core::time::Duration>>
 impl runite::net::UdpSocket
-pub fn runite::net::UdpSocket::from_std(std::net::udp::UdpSocket) -> std::io::error::Result<Self>
+pub fn runite::net::UdpSocket::from_std(std::net::udp::UdpSocket) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::UdpSocket
 pub fn runite::net::UdpSocket::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::UdpSocket
@@ -808,35 +808,35 @@ pub struct runite::net::UnixStream
 ## `runite::net::unix`
 
 ```rust
-pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::unix::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, std::io::error::Error>
+pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::unix::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
 pub fn runite::net::unix::Incoming<'_>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::unix::Incoming<'_>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub mod runite::net::unix
 pub struct runite::net::unix::Incoming<'a>
 impl core::fmt::Debug for runite::net::unix::Incoming<'_>
 pub fn runite::net::unix::Incoming<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, std::io::error::Error>
+pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
 pub fn runite::net::unix::Incoming<'_>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::unix::Incoming<'_>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub struct runite::net::unix::OwnedReadHalf
 impl runite::net::unix::OwnedReadHalf
 pub fn runite::net::unix::OwnedReadHalf::reunite(self, runite::net::unix::OwnedWriteHalf) -> core::result::Result<runite::net::unix::UnixStream, runite::net::unix::ReuniteError>
-pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::net::unix::OwnedWriteHalf
 impl runite::net::unix::OwnedWriteHalf
 pub fn runite::net::unix::OwnedWriteHalf::reunite(self, runite::net::unix::OwnedReadHalf) -> core::result::Result<runite::net::unix::UnixStream, runite::net::unix::ReuniteError>
-pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> std::io::error::Result<()>
-pub fn runite::net::unix::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
+pub fn runite::net::unix::OwnedWriteHalf::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::OwnedWriteHalf::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::OwnedWriteHalf::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::net::unix::ReuniteError(pub runite::net::unix::OwnedReadHalf, pub runite::net::unix::OwnedWriteHalf)
 impl core::error::Error for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::ReuniteError
@@ -845,16 +845,16 @@ impl core::fmt::Display for runite::net::unix::ReuniteError
 pub fn runite::net::unix::ReuniteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct runite::net::unix::UnixDatagram
 impl runite::net::unix::UnixDatagram
-pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
-pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub fn runite::net::unix::UnixDatagram::pair() -> std::io::error::Result<(Self, Self)>
-pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> std::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
-pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<usize>
-pub fn runite::net::unix::UnixDatagram::unbound() -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
+pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub fn runite::net::unix::UnixDatagram::pair() -> core::io::error::Result<(Self, Self)>
+pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
+pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
+pub fn runite::net::unix::UnixDatagram::unbound() -> core::io::error::Result<Self>
 impl runite::net::unix::UnixDatagram
-pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
 pub fn runite::net::unix::UnixDatagram::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixDatagram
@@ -863,12 +863,12 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 pub fn runite::net::unix::UnixDatagram::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub struct runite::net::unix::UnixListener
 impl runite::net::unix::UnixListener
-pub async fn runite::net::unix::UnixListener::accept(&self) -> std::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
-pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
+pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
+pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
-pub fn runite::net::unix::UnixListener::local_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
 impl runite::net::unix::UnixListener
-pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
 pub fn runite::net::unix::UnixListener::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixListener
@@ -877,47 +877,47 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub struct runite::net::unix::UnixStream
 impl runite::net::unix::UnixStream
-pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
+pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::into_split(self) -> (runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf)
-pub fn runite::net::unix::UnixStream::local_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
-pub fn runite::net::unix::UnixStream::pair() -> std::io::error::Result<(Self, Self)>
-pub fn runite::net::unix::UnixStream::peer_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
-pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
+pub fn runite::net::unix::UnixStream::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixStream::pair() -> core::io::error::Result<(Self, Self)>
+pub fn runite::net::unix::UnixStream::peer_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
-pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> std::io::error::Result<()>
-pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> std::io::error::Result<()>
+pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
+pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 impl runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::from(std::os::fd::owned::OwnedFd) -> Self
 impl core::fmt::Debug for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl hyper::rt::io::Read for runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
 impl hyper::rt::io::Write for runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 impl runite::net::unix::UnixDatagram
-pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
-pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<()>
-pub fn runite::net::unix::UnixDatagram::pair() -> std::io::error::Result<(Self, Self)>
-pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> std::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
-pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<usize>
-pub fn runite::net::unix::UnixDatagram::unbound() -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
+pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
+pub fn runite::net::unix::UnixDatagram::pair() -> core::io::error::Result<(Self, Self)>
+pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
+pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
+pub fn runite::net::unix::UnixDatagram::unbound() -> core::io::error::Result<Self>
 impl runite::net::unix::UnixDatagram
-pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
 pub fn runite::net::unix::UnixDatagram::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixDatagram
@@ -925,12 +925,12 @@ pub fn runite::net::unix::UnixDatagram::as_fd(&self) -> std::os::fd::owned::Borr
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 pub fn runite::net::unix::UnixDatagram::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 impl runite::net::unix::UnixListener
-pub async fn runite::net::unix::UnixListener::accept(&self) -> std::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
-pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
+pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
+pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
-pub fn runite::net::unix::UnixListener::local_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
 impl runite::net::unix::UnixListener
-pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
 pub fn runite::net::unix::UnixListener::from(std::os::fd::owned::OwnedFd) -> Self
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixListener
@@ -938,32 +938,32 @@ pub fn runite::net::unix::UnixListener::as_fd(&self) -> std::os::fd::owned::Borr
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 impl runite::net::unix::UnixStream
-pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<Self>
+pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::into_split(self) -> (runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf)
-pub fn runite::net::unix::UnixStream::local_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
-pub fn runite::net::unix::UnixStream::pair() -> std::io::error::Result<(Self, Self)>
-pub fn runite::net::unix::UnixStream::peer_addr(&self) -> std::io::error::Result<std::os::unix::net::addr::SocketAddr>
-pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
+pub fn runite::net::unix::UnixStream::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixStream::pair() -> core::io::error::Result<(Self, Self)>
+pub fn runite::net::unix::UnixStream::peer_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
-pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> std::io::error::Result<()>
-pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> std::io::error::Result<()>
+pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
+pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 impl runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> std::io::error::Result<Self>
+pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> core::io::error::Result<Self>
 impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::from(std::os::fd::owned::OwnedFd) -> Self
 impl core::fmt::Debug for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl hyper::rt::io::Read for runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, hyper::rt::io::ReadBufCursor<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
 impl hyper::rt::io::Write for runite::net::unix::UnixStream
-pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, std::io::error::Error>>
-pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_shutdown(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::result::Result<(), core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::result::Result<usize, core::io::error::Error>>
+pub fn runite::net::unix::UnixStream::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::net::unix::UnixStream::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl std::os::fd::owned::AsFd for runite::net::unix::UnixStream
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
@@ -981,11 +981,11 @@ pub mod runite::os
 ## `runite::process`
 
 ```rust
-pub fn runite::process::ChildStderr::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::process::ChildStdout::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::process::ChildStdin::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::process::ChildStdin::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::process::ChildStdin::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::process::ChildStderr::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::process::ChildStdout::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::process::ChildStdin::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::process::ChildStdin::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::process::ChildStdin::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub mod runite::process
 pub struct runite::process::Child
 pub runite::process::Child::stderr: core::option::Option<runite::process::ChildStderr>
@@ -993,17 +993,17 @@ pub runite::process::Child::stdin: core::option::Option<runite::process::ChildSt
 pub runite::process::Child::stdout: core::option::Option<runite::process::ChildStdout>
 impl runite::process::Child
 pub fn runite::process::Child::id(&self) -> core::option::Option<u32>
-pub fn runite::process::Child::kill(&mut self) -> std::io::error::Result<()>
-pub fn runite::process::Child::try_wait(&mut self) -> std::io::error::Result<core::option::Option<runite::process::ExitStatus>>
-pub async fn runite::process::Child::wait(&mut self) -> std::io::error::Result<runite::process::ExitStatus>
+pub fn runite::process::Child::kill(&mut self) -> core::io::error::Result<()>
+pub fn runite::process::Child::try_wait(&mut self) -> core::io::error::Result<core::option::Option<runite::process::ExitStatus>>
+pub async fn runite::process::Child::wait(&mut self) -> core::io::error::Result<runite::process::ExitStatus>
 pub struct runite::process::ChildStderr
-pub fn runite::process::ChildStderr::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::process::ChildStderr::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::process::ChildStdin
-pub fn runite::process::ChildStdin::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::process::ChildStdin::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::process::ChildStdin::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::process::ChildStdin::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::process::ChildStdin::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::process::ChildStdin::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::process::ChildStdout
-pub fn runite::process::ChildStdout::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::process::ChildStdout::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::process::Command
 impl runite::process::Command
 pub fn runite::process::Command::arg(&mut self, impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> &mut Self
@@ -1014,9 +1014,9 @@ pub fn runite::process::Command::env_clear(&mut self) -> &mut Self
 pub fn runite::process::Command::env_remove(&mut self, impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> &mut Self
 pub fn runite::process::Command::envs<I, K, V>(&mut self, I) -> &mut Self where I: core::iter::traits::collect::IntoIterator<Item = (K, V)>, K: core::convert::AsRef<std::ffi::os_str::OsStr>, V: core::convert::AsRef<std::ffi::os_str::OsStr>
 pub fn runite::process::Command::new(impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> Self
-pub async fn runite::process::Command::output(&mut self) -> std::io::error::Result<runite::process::Output>
-pub fn runite::process::Command::spawn(&mut self) -> std::io::error::Result<runite::process::Child>
-pub async fn runite::process::Command::status(&mut self) -> std::io::error::Result<runite::process::ExitStatus>
+pub async fn runite::process::Command::output(&mut self) -> core::io::error::Result<runite::process::Output>
+pub fn runite::process::Command::spawn(&mut self) -> core::io::error::Result<runite::process::Child>
+pub async fn runite::process::Command::status(&mut self) -> core::io::error::Result<runite::process::ExitStatus>
 pub fn runite::process::Command::stderr(&mut self, runite::process::Stdio) -> &mut Self
 pub fn runite::process::Command::stdin(&mut self, runite::process::Stdio) -> &mut Self
 pub fn runite::process::Command::stdout(&mut self, runite::process::Stdio) -> &mut Self
@@ -1041,7 +1041,7 @@ pub fn runite::process::Stdio::piped() -> Self
 
 ```rust
 pub mod runite::signal
-pub async fn runite::signal::ctrl_c() -> std::io::error::Result<()>
+pub async fn runite::signal::ctrl_c() -> core::io::error::Result<()>
 ```
 
 <a id="runitesignalunix"></a>
@@ -1062,55 +1062,55 @@ impl runite::signal::unix::Signal
 pub async fn runite::signal::unix::Signal::recv(&mut self) -> core::option::Option<()>
 impl core::ops::drop::Drop for runite::signal::unix::Signal
 pub fn runite::signal::unix::Signal::drop(&mut self)
-pub fn runite::signal::unix::signal(runite::signal::unix::SignalKind) -> std::io::error::Result<runite::signal::unix::Signal>
+pub fn runite::signal::unix::signal(runite::signal::unix::SignalKind) -> core::io::error::Result<runite::signal::unix::Signal>
 ```
 
 <a id="runitestdio"></a>
 ## `runite::stdio`
 
 ```rust
-pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub mod runite::stdio
 pub struct runite::stdio::Stderr
 impl runite::stdio::Stderr
-pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::stdio::Stdin
 impl runite::stdio::Stdin
-pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::stdio::Stdin::read_line(&mut self) -> std::io::error::Result<core::option::Option<alloc::string::String>>
-pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::stdio::Stdin::read_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
+pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub struct runite::stdio::Stdout
 impl runite::stdio::Stdout
-pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
-pub fn runite::stdio::stderr() -> std::io::error::Result<runite::stdio::Stderr>
-pub fn runite::stdio::stdin() -> std::io::error::Result<runite::stdio::Stdin>
-pub fn runite::stdio::stdout() -> std::io::error::Result<runite::stdio::Stdout>
+pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::stdio::stderr() -> core::io::error::Result<runite::stdio::Stderr>
+pub fn runite::stdio::stdin() -> core::io::error::Result<runite::stdio::Stdin>
+pub fn runite::stdio::stdout() -> core::io::error::Result<runite::stdio::Stdout>
 impl runite::stdio::Stderr
-pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl runite::stdio::Stdin
-pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub async fn runite::stdio::Stdin::read_line(&mut self) -> std::io::error::Result<core::option::Option<alloc::string::String>>
-pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub async fn runite::stdio::Stdin::read_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
+pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 impl runite::stdio::Stdout
-pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> std::io::error::Result<usize>
-pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<std::io::error::Result<()>>
-pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<std::io::error::Result<usize>>
+pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 ```
 
 <a id="runitesync"></a>
@@ -1207,7 +1207,7 @@ impl<T> core::default::Default for runite::task::JoinSet<T>
 pub fn runite::task::JoinSet<T>::default() -> Self
 impl<T> core::ops::drop::Drop for runite::task::JoinSet<T>
 pub fn runite::task::JoinSet<T>::drop(&mut self)
-pub fn runite::task::spawn_blocking<F, R>(F) -> std::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
+pub fn runite::task::spawn_blocking<F, R>(F) -> core::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 impl<R: core::marker::Send + 'static> core::future::future::Future for runite::task::BlockingJoinHandle<R>
 pub type runite::task::BlockingJoinHandle<R>::Output = core::result::Result<R, runite::JoinError>
 pub fn runite::task::BlockingJoinHandle<R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
