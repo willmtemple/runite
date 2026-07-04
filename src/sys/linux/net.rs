@@ -504,7 +504,8 @@ pub async fn bind_listener(addr: SocketAddr, backlog: Option<i32>) -> io::Result
     })
     .await?;
 
-    set_reuse_addr(listener.as_raw_fd(), true)?;
+    // Do not set SO_REUSEADDR implicitly (matches std::net::TcpListener::bind).
+    // Callers who want it opt in via `net::TcpSocket::set_reuseaddr` before bind.
 
     bind(NetOp::Bind {
         fd: listener.as_raw_fd(),
@@ -1542,6 +1543,32 @@ mod tests {
             *cloexec.lock().expect("result mutex poisoned"),
             Some(true),
             "accepted socket must have FD_CLOEXEC set"
+        );
+    }
+
+    /// `TcpListener::bind` must not implicitly enable `SO_REUSEADDR` — it now
+    /// matches `std::net`, leaving the option off unless a caller opts in via
+    /// `TcpSocket`.
+    #[test]
+    fn bind_listener_does_not_set_reuseaddr() {
+        let observed = Arc::new(Mutex::new(None));
+        let observed_task = Arc::clone(&observed);
+
+        spawn(async move {
+            let listener =
+                bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
+                    .await
+                    .expect("listener should bind");
+            *observed_task.lock().expect("result mutex poisoned") =
+                Some(reuse_addr(listener.as_raw_fd()).expect("getsockopt should succeed"));
+        });
+
+        run();
+
+        assert_eq!(
+            *observed.lock().expect("result mutex poisoned"),
+            Some(false),
+            "TcpListener::bind must not implicitly set SO_REUSEADDR"
         );
     }
 
