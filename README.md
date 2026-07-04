@@ -2,8 +2,8 @@
 
 `runite` is an **event-loop-per-thread**, non-work-stealing async runtime for Rust. Each
 runtime thread owns its own scheduler, timer heap, and platform I/O driver — `io_uring` on
-Linux and `kqueue` on macOS. It uses JavaScript-style microtask/macrotask scheduling to give
-deterministic flush points.
+Linux, `kqueue` on macOS, and IOCP on Windows. It uses JavaScript-style microtask/macrotask
+scheduling to give deterministic flush points.
 
 It is built for UI front-ends, embedded event loops, and fine-grained reactive systems — not
 as a general-purpose high-throughput server runtime. It deliberately prefers simple per-thread
@@ -19,12 +19,18 @@ ergonomics, and maximum I/O throughput.
 | Linux `x86_64`  | `io_uring`         | Primary   |
 | Linux `aarch64` | `io_uring`         | Supported |
 | macOS `aarch64` | `kqueue` + offload | Supported |
-| Windows `x86_64`| IOCP + offload     | In progress (not yet available) |
+| Windows `x86_64`| IOCP + offload     | Supported |
 
-A Windows backend built on IOCP (with thread offload where IOCP does not apply)
-is in progress. It is **not** part of the 0.1 release; on Windows `runite` does
-not yet compile. The other unsupported targets fail to compile with a clear
-error.
+The Windows backend drives sockets, files, and child-process pipes with
+overlapped I/O through one I/O completion port per runtime thread, offloading
+to the blocking pool only where Windows has no asynchronous form (open,
+metadata, directory scans, DNS, console stdio). See
+[docs/WINDOWS.md](./docs/WINDOWS.md) for the design. Windows-only differences:
+`runite::fd` (descriptor readiness) and `runite::net::unix` (Unix-domain
+sockets) are not available, `TcpSocket::set_reuseport` reports
+`ErrorKind::Unsupported`, and `runite::signal::windows` replaces
+`runite::signal::unix` (the portable `runite::signal::ctrl_c` works on all
+platforms). Unsupported targets fail to compile with a clear error.
 
 ### Minimum Linux kernel
 
@@ -84,21 +90,22 @@ fn main() {
 - **Timers:** `time::set_timeout` and `time::set_interval` (each returns a
   handle with `.cancel()`), plus `time::{sleep, timeout, interval}` where
   `time::interval` is the awaitable interval.
-- **I/O:** async `fs`, `net` (TCP/UDP/Unix-domain), `stdio`, and crate-local
+- **I/O:** async `fs`, `net` (TCP/UDP everywhere; Unix-domain sockets on Unix), `stdio`, and crate-local
   `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters; TCP split/reunite,
   listener `incoming()` streams, async stdin/stdout/stderr, and `BufReader`/`BufWriter`.
 - **Processes:** `process::{Command, Child}` with piped async stdio, `kill`, and `wait`.
 - **Channels & sync:** `channel::{mpsc, oneshot, broadcast, watch}`,
   `sync::{Mutex, Semaphore, Notify, OnceCell}`.
 - **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
-- **Signals:** async Unix signal handling, including SIGWINCH (`SignalKind::WindowChange`).
+- **Signals:** portable `signal::ctrl_c`, async Unix signal handling (including SIGWINCH
+  via `SignalKind::WindowChange`), and Windows console control events (`signal::windows`).
 
 ### Scaling across cores
 
 `runite` is event-loop-per-thread: each runtime thread drives its own local scheduler and
 accepts `!Send` futures. To scale CPU-bound or server workloads across cores, start one
-event loop per core with `spawn_worker`; servers should bind per-core accept loops with
-`SO_REUSEPORT` so the OS distributes inbound connections. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+event loop per core with `spawn_worker`; on Linux and macOS, servers should bind per-core accept
+loops with `SO_REUSEPORT` so the OS distributes inbound connections. See [ARCHITECTURE.md](./ARCHITECTURE.md)
 for the full threading and scaling model.
 
 ## Feature flags
@@ -191,7 +198,7 @@ latency investigation with any `tracing` subscriber:
 
 | Target              | Covers                                       |
 | ------------------- | -------------------------------------------- |
-| `runite::driver`    | io_uring / kqueue submission and completions |
+| `runite::driver`    | io_uring / kqueue / IOCP submission and completions |
 | `runite::runtime`   | runtime and worker lifecycle                 |
 | `runite::scheduler` | task scheduling and cross-thread queueing    |
 | `runite::timer`     | timer arming/firing (debug builds)           |

@@ -204,11 +204,18 @@ mod tests {
                 {
                     *observed_for_task.lock().unwrap() = Some(status.signal());
                 }
+                #[cfg(windows)]
+                {
+                    *observed_for_task.lock().unwrap() = Some(status.code());
+                }
             });
         });
 
         run();
         #[cfg(unix)]
         assert_eq!(*observed.lock().unwrap(), Some(Some(libc::SIGKILL)));
+        // `TerminateProcess` sets exit code 1; there is no signal concept.
+        #[cfg(windows)]
+        assert_eq!(*observed.lock().unwrap(), Some(Some(1)));
     }
 }

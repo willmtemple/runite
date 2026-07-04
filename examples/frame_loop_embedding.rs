@@ -138,6 +138,12 @@ fn main() {
         "{} frames; banner={:?}; {} timer pulses fired while the host owned the thread",
         FRAMES, scene.banner, scene.pulses
     );
-    assert_eq!(scene.banner, "data loaded", "the async load should have landed");
-    assert!(scene.pulses >= 4, "timer task should have pulsed during the run");
+    assert_eq!(
+        scene.banner, "data loaded",
+        "the async load should have landed"
+    );
+    assert!(
+        scene.pulses >= 4,
+        "timer task should have pulsed during the run"
+    );
 }

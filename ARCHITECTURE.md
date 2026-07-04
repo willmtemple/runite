@@ -19,6 +19,9 @@ work-stealing, `Send`-future ergonomics, and maximum I/O throughput.
   (`src/platform/linux/driver.rs`).
 - macOS `aarch64`: each runtime thread owns a `kqueue` plus a nonblocking wake pipe
   (`src/platform/macos_aarch64/driver.rs`).
+- Windows: each runtime thread owns an I/O completion port plus a waitable timer; the
+  notifier wakes the port with `PostQueuedCompletionStatus`
+  (`src/platform/windows/driver.rs`, `docs/WINDOWS.md`).
 - `ThreadHandle::queue_task` is the cross-thread boundary. It accepts only `Send` closures, pushes
   into the target thread's remote macrotask queue, and wakes the target driver
   (`src/platform/linux/runtime.rs`).
@@ -64,10 +67,12 @@ installs its own runtime state and runs independently. Cross-thread coordination
 through the `Send`-only boundary: `ThreadHandle::queue_task` accepts `FnOnce() + Send + 'static`,
 enqueues a macrotask on the target worker, and wakes that worker's driver.
 
-For network servers, the idiomatic multi-core shape is `SO_REUSEPORT`: start one worker per core, let
-each worker bind its own listener to the same address, and run an independent accept loop on each
-worker. The kernel then load-balances incoming connections across those per-core listeners without a
-shared accept lock or a userspace dispatch thread.
+For network servers, the idiomatic multi-core shape on Linux and macOS is `SO_REUSEPORT`: start one
+worker per core, let each worker bind its own listener to the same address, and run an independent
+accept loop on each worker. The kernel then load-balances incoming connections across those per-core
+listeners without a shared accept lock or a userspace dispatch thread. Windows has no `SO_REUSEPORT`
+(`TcpSocket::set_reuseport` reports `Unsupported` there); a single accept loop that distributes
+connections to workers over `ThreadHandle::queue_task` is the portable alternative.
 
 # Task scheduling — micro vs macro tasks
 
@@ -209,6 +214,9 @@ Dropping a `CompletionFuture`:
 - Linux cancel callbacks submit `IORING_OP_ASYNC_CANCEL` through the driver
   (`src/platform/linux/driver.rs`,
   `src/sys/linux/fs.rs`, `src/sys/linux/net.rs`).
+- Windows cancel callbacks call `CancelIoEx(handle, overlapped)`; the aborted operation's
+  completion packet still arrives and reclaims the operation context
+  (`src/sys/windows/overlapped.rs`).
 - If no cancel callback exists because submission failed before registration, the future decrements
   the pending operation count directly (`src/op/completion.rs`).
 
@@ -276,12 +284,17 @@ existing kqueue/blocking-pool split for its backend.
 
 Current:
 
-- Linux and macOS have parallel `Driver` types with similar surfaces but different internals.
+- Linux, macOS, and Windows have parallel `Driver` types with similar surfaces but different
+  internals.
 - Linux uses `io_uring` for timers, wake notifications, fs ops, network ops, fd readiness, and close
   where supported (`src/platform/linux/driver.rs`).
 - macOS uses `kqueue` for the runtime wait/wake path, timers, and fd readiness; filesystem work is
   offloaded to a blocking pool (`src/platform/macos_aarch64/driver.rs`,
   `src/sys/macos/fs.rs`).
+- Windows uses an I/O completion port for the wait/wake path and for dispatching overlapped
+  operation completions; the runtime timer is a waitable-timer APC that interrupts the
+  alertable port wait, and work with no overlapped form is offloaded to the blocking pool
+  (`src/platform/windows/driver.rs`, `src/sys/windows/`, `docs/WINDOWS.md`).
 - Both platform `runtime.rs` files duplicate scheduler, timer, JoinHandle, FutureTask, ThreadShared,
   and waker-vtable logic.
 
@@ -322,22 +335,22 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 
 # Platform parity matrix
 
-| Capability | Linux io_uring path | macOS path |
-| --- | --- | --- |
-| open | `IORING_OP_OPENAT` | blocking pool (`std::fs::OpenOptions`) |
-| read | `IORING_OP_READ` into guarded internal buffer, then copy into caller slice | blocking pool (`read`/`pread`) |
-| write | `IORING_OP_WRITE` from guarded internal buffer | blocking pool (`write`/`pwrite`) |
-| metadata | `IORING_OP_STATX` | blocking pool (`metadata`/`fstat`) |
-| sync | `IORING_OP_FSYNC` | blocking pool (`fsync`/`F_FULLFSYNC`) |
-| set_len | `IORING_OP_FTRUNCATE` | blocking pool (`ftruncate`) |
-| try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool |
-| read_dir | offloaded streaming producer (`getdents` can block, no io_uring opcode) | blocking pool producer |
-| close | `IORING_OP_CLOSE`, inline `close(2)` fallback | blocking pool / synchronous close helper |
-| network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls |
-| Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path |
-| stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path |
-| child exit | pidfd readiness via `IORING_OP_POLL_ADD`; no SIGCHLD handler or blocking-pool offload | process wait backend |
-| wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot |
+| Capability | Linux io_uring path | macOS path | Windows path |
+| --- | --- | --- | --- |
+| open | `IORING_OP_OPENAT` | blocking pool (`std::fs::OpenOptions`) | blocking pool (`CreateFileW` + `FILE_FLAG_OVERLAPPED`), then port association |
+| read | `IORING_OP_READ` into guarded internal buffer, then copy into caller slice | blocking pool (`read`/`pread`) | overlapped `ReadFile` at explicit offsets through the port |
+| write | `IORING_OP_WRITE` from guarded internal buffer | blocking pool (`write`/`pwrite`) | overlapped `WriteFile` at explicit offsets through the port |
+| metadata | `IORING_OP_STATX` | blocking pool (`metadata`/`fstat`) | blocking pool (`GetFileInformationByHandle`) |
+| sync | `IORING_OP_FSYNC` | blocking pool (`fsync`/`F_FULLFSYNC`) | blocking pool (`FlushFileBuffers`) |
+| set_len | `IORING_OP_FTRUNCATE` | blocking pool (`ftruncate`) | blocking pool (`SetFileInformationByHandle`) |
+| try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool | inline `DuplicateHandle` (never blocks) |
+| read_dir | offloaded streaming producer (`getdents` can block, no io_uring opcode) | blocking pool producer | blocking pool producer |
+| close | `IORING_OP_CLOSE`, inline `close(2)` fallback | blocking pool / synchronous close helper | synchronous `CloseHandle`/`closesocket` via owned-handle Drop |
+| network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls | overlapped `ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom`; control ops inline |
+| Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path | not provided (tracked in ROADMAP) |
+| stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path | blocking pool (console handles cannot overlap) |
+| child exit | pidfd readiness via `IORING_OP_POLL_ADD`; no SIGCHLD handler or blocking-pool offload | process wait backend | `RegisterWaitForSingleObject` on the process handle (OS wait-thread pool) |
+| wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot | not provided (readiness has no IOCP analogue; `runite::fd` is Unix-only) |
 
 Notes:
 
@@ -357,6 +370,13 @@ Notes:
   (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics
   differ substantially from Linux io_uring (`src/sys/macos/net.rs`).
+- Windows is completion-driven like Linux: every overlapped submission produces exactly one
+  completion packet, and the packet context owns the staging buffers, which is what makes the
+  buffer-ownership-across-Drop rules hold without a separate cancel-guard map
+  (`src/sys/windows/overlapped.rs`, `docs/WINDOWS.md`).
+- Windows child stdio pipes are the overlapped named-pipe parent ends std creates for
+  `Stdio::piped`; the backend adopts them and drives them like any other overlapped handle
+  (`src/sys/windows/process.rs`).
 
 # Cross-thread completion path
 
@@ -442,7 +462,7 @@ macrotask
 
 driver
 : The per-runtime-thread platform event backend. Linux uses `io_uring`; macOS uses `kqueue` plus a
-  wake pipe and blocking pools for fs.
+  wake pipe and blocking pools for fs; Windows uses an I/O completion port plus a waitable timer.
 
 ring
 : A Linux `io_uring` instance with submission and completion queues. Each Linux runtime thread owns
@@ -450,7 +470,7 @@ ring
 
 notifier
 : A cloneable handle that wakes another runtime thread's driver. Linux uses `MSG_RING`; macOS writes
-  to a wake pipe.
+  to a wake pipe; Windows posts a reserved-key packet with `PostQueuedCompletionStatus`.
 
 ThreadHandle
 : A cloneable, `Send`-capable handle for queueing a `Send` macrotask onto a specific runtime

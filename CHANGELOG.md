@@ -11,13 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release of `runite`, an event-loop-per-thread async runtime built on
   io_uring (Linux `x86_64`) and kqueue (macOS `aarch64`).
+- Windows support (`x86_64-pc-windows-msvc`) on an I/O-completion-port (IOCP) backend:
+  one completion port per runtime thread; overlapped `ReadFile`/`WriteFile` for files and
+  child-process pipes; overlapped Winsock (`ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/
+  `WSASendTo`/`WSARecvFrom`) for TCP/UDP; `CancelIoEx`-based drop-cancellation; blocking-pool
+  offload for open/metadata/directory scans/DNS/console stdio; `RegisterWaitForSingleObject`
+  child-exit waits; a waitable-timer APC for runtime timers; `runite::signal::windows`
+  console control events (`ctrl_c`, `ctrl_break`, `ctrl_close`, `ctrl_logoff`,
+  `ctrl_shutdown`) backing the portable `runite::signal::ctrl_c`;
+  `AsHandle`/`AsRawHandle`/`AsSocket`/`AsRawSocket` interop plus `From<OwnedHandle>`/
+  `From<OwnedSocket>`/`from_std` adoption; and `runite::os::windows::fs`
+  (`OpenOptionsExt`, `MetadataExt`). See `docs/WINDOWS.md` for the design. `runite::fd`
+  and `runite::net::unix` remain Unix-only, and `TcpSocket::set_reuseport` reports
+  `ErrorKind::Unsupported` on Windows.
 - `#[runite::main]` entry-point macro (supports both `fn main` and `async fn main`).
 - Async `fs`, `net` (TCP/UDP/Unix-domain sockets), `time`, and `channel` services.
 - Cross-thread worker spawning and task queueing.
 - Optional `hyper` client integration and `futures-io` compatibility adapters.
 - Reproducible toolchain via `mise`, Agent Cop static-analysis checks, GitHub CI
-  (Linux + macOS), code-coverage and benchmark jobs, and a tag-triggered crates.io
-  release workflow.
+  (Linux, macOS, and Windows, plus a Windows-target MSRV check), code-coverage and
+  benchmark jobs, and a tag-triggered crates.io release workflow.
 - Integration test suites and criterion benchmarks for the runtime and I/O paths.
   The benchmark suite covers scheduler scaling (`spawn_many`), bulk channel
   throughput (`mpsc_throughput`), microtask/macrotask dispatch (`queueable`), and

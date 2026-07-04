@@ -54,9 +54,8 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::ffi::OsStr;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(unix)]
-use std::os::fd::{AsFd, BorrowedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use crate::io::{AsyncRead, AsyncWrite, Stream};
@@ -65,9 +64,10 @@ use crate::op::fs::{
     RawDirEntry as OpDirEntry, RawMetadata,
 };
 use crate::sys::current::fs as sys_fs;
+use crate::sys::handle::{OwnedFile, RawFile, raw_file};
 
 struct FileInner {
-    fd: OwnedFd,
+    fd: OwnedFile,
 }
 
 type PendingFileRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
@@ -367,7 +367,7 @@ impl File {
             .map(File::from_owned_fd)
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedFile) -> Self {
         Self {
             inner: Arc::new(FileInner { fd }),
             pending_read: None,
@@ -376,8 +376,8 @@ impl File {
         }
     }
 
-    fn raw_fd(&self) -> i32 {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawFile {
+        raw_file(&self.inner.fd)
     }
 
     async fn read_impl(&self, offset: Option<u64>, buf: &mut [u8]) -> io::Result<usize> {
@@ -552,6 +552,13 @@ impl OpenOptions {
         self
     }
 
+    /// Mutable access to the platform open-options payload, for the
+    /// OS-specific extension traits in [`crate::os`].
+    #[cfg(windows)]
+    pub(crate) fn platform_options_mut(&mut self) -> &mut crate::sys::handle::PlatformOpenOptions {
+        &mut self.inner.platform
+    }
+
     /// Opens a file with the configured options.
     ///
     /// # Examples
@@ -616,12 +623,23 @@ impl Metadata {
     }
 
     /// Returns the full POSIX `st_mode` — file-type bits *and* permission bits —
-    /// matching [`std::os::unix::fs::MetadataExt::mode`].
+    /// matching `std::os::unix::fs::MetadataExt::mode`.
     ///
-    /// This is consistent across the Linux and macOS backends. To extract just
-    /// the permission bits, mask with `0o7777`.
+    /// This is consistent across the Linux and macOS backends. On Windows the
+    /// value is synthesized: the file-type bits are the `S_IFMT` equivalents
+    /// and the write permission bits reflect `FILE_ATTRIBUTE_READONLY`. Use
+    /// `runite::os::windows::fs::MetadataExt::file_attributes` for the native
+    /// attribute bits. To extract just the permission bits, mask with
+    /// `0o7777`.
     pub fn mode(&self) -> u32 {
         self.inner.mode
+    }
+
+    /// The platform metadata payload, for the OS-specific extension traits in
+    /// [`crate::os`].
+    #[cfg(windows)]
+    pub(crate) fn platform_metadata(&self) -> &crate::sys::handle::PlatformMetadata {
+        &self.inner.platform
     }
 }
 
@@ -759,6 +777,15 @@ pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
         if current.as_os_str().is_empty() {
             continue;
         }
+        // Drive prefixes (`C:`) and the root directory always exist and are
+        // not creatable; attempting them reports access errors on Windows
+        // rather than `AlreadyExists`.
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
 
         match create_dir(&current).await {
             Ok(()) => {}
@@ -872,6 +899,62 @@ impl File {
     /// transfers ownership of the descriptor.
     pub fn from_std(file: std::fs::File) -> Self {
         Self::from_owned_fd(OwnedFd::from(file))
+    }
+}
+
+// -- Handle interop (Windows only) --------------------------------------------
+//
+// The Windows analogs of the Unix fd-interop impls above: files are exposed
+// through `AsHandle`/`AsRawHandle`, and adoption binds the handle to the
+// current runtime thread's I/O completion port so overlapped reads and writes
+// can complete. Handles opened without `FILE_FLAG_OVERLAPPED` still work, but
+// each operation then completes synchronously on the event-loop thread.
+
+#[cfg(windows)]
+mod windows_interop {
+    use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle, RawHandle};
+
+    use super::File;
+
+    impl AsHandle for File {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            self.inner.fd.as_handle()
+        }
+    }
+
+    impl AsRawHandle for File {
+        fn as_raw_handle(&self) -> RawHandle {
+            self.inner.fd.as_raw_handle()
+        }
+    }
+
+    impl From<OwnedHandle> for File {
+        /// Adopts an open file handle as an async [`File`], associating it
+        /// with the current runtime thread's completion port (best-effort; a
+        /// handle whose file object is already bound to a port keeps its
+        /// original binding). Use [`File::from_std`] for a fallible adoption.
+        fn from(handle: OwnedHandle) -> Self {
+            let _ = crate::sys::windows::overlapped::associate_file_reused(
+                crate::sys::handle::raw_file(&handle),
+            );
+            Self::from_owned_fd(handle)
+        }
+    }
+
+    impl File {
+        /// Adopts a [`std::fs::File`], returning an async [`File`] that shares
+        /// the same open file object.
+        ///
+        /// The handle is associated with the current runtime thread's I/O
+        /// completion port. For fully asynchronous reads and writes, open the
+        /// file with the `FILE_FLAG_OVERLAPPED` custom flag (e.g. via
+        /// [`OpenOptionsExt::custom_flags`](std::os::windows::fs::OpenOptionsExt::custom_flags)
+        /// or runite's own [`OpenOptions`](super::OpenOptions), which sets it
+        /// automatically); a synchronous handle still completes every
+        /// operation correctly but blocks the event-loop thread while it runs.
+        pub fn from_std(file: std::fs::File) -> Self {
+            Self::from(OwnedHandle::from(file))
+        }
     }
 }
 

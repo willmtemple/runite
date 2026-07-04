@@ -372,6 +372,7 @@ dependencies = [
  "libc",
  "runite-proc-macros",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]

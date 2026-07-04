@@ -89,9 +89,13 @@
 //! `runite` currently targets:
 //! - Linux (io_uring) on `x86_64` and `aarch64`
 //! - macOS `aarch64` (kqueue)
+//! - Windows (IOCP) on `x86_64`
 //!
-//! A Windows port (IOCP) is in progress. Building for any other target raises a
-//! compile error.
+//! Building for any other target raises a compile error. On Windows, sockets,
+//! files, and child-process pipes are driven by overlapped I/O through one
+//! completion port per runtime thread; `runite::fd` and `runite::net::unix`
+//! are Unix-only. See `docs/WINDOWS.md` in the repository for the backend
+//! design.
 //!
 //! ## Minimum Linux kernel
 //!
@@ -121,8 +125,12 @@
 
 #![deny(missing_docs)]
 
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
-compile_error!("runite currently supports Linux (x86_64, aarch64) and macOS aarch64.");
+#[cfg(not(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+)))]
+compile_error!("runite currently supports Linux (x86_64, aarch64), macOS aarch64, and Windows.");
 
 extern crate alloc;
 
@@ -144,6 +152,7 @@ pub mod fs;
 pub mod io;
 pub mod net;
 pub(crate) mod op;
+pub mod os;
 pub(crate) mod platform;
 pub mod process;
 pub mod signal;
@@ -164,7 +173,11 @@ pub mod macros;
 /// runtime thread before calling [`run`].
 pub use runite_proc_macros::{main, test};
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
 pub use runtime_api::*;
 
 /// The crate's core event-loop API.
@@ -173,7 +186,11 @@ pub use runtime_api::*;
 /// inheriting a single blanket summary from a grouped re-export) and so the
 /// per-platform `runtime.rs` shims stay free of duplicated doc comments. The
 /// items are glob-re-exported at the crate root, which is their public path.
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
 mod runtime_api {
     use core::future::Future;
 

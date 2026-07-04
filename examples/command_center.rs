@@ -56,7 +56,11 @@ impl JobBoard {
         for (id, job) in self.jobs.iter().enumerate() {
             match job.state {
                 JobState::Running => {
-                    println!("  #{id} {:<12} running ({:?})", job.name, job.started.elapsed())
+                    println!(
+                        "  #{id} {:<12} running ({:?})",
+                        job.name,
+                        job.started.elapsed()
+                    )
                 }
                 JobState::Done(took) => println!("  #{id} {:<12} done in {took:?}", job.name),
             }
@@ -97,7 +101,10 @@ fn start_job(board: &Rc<RefCell<JobBoard>>, name: String, duration: Duration) {
         board.jobs[id].state = JobState::Done(took);
         // A completion notification lands whenever the prompt is idle —
         // the input read in progress is not disturbed.
-        println!("\u{2713} job #{id} `{}` finished in {took:?}", board.jobs[id].name);
+        println!(
+            "\u{2713} job #{id} `{}` finished in {took:?}",
+            board.jobs[id].name
+        );
     });
 }
 

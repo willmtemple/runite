@@ -24,7 +24,9 @@ async fn tcp_listener_from_std_accepts() {
         assert!(stream.as_raw_fd() >= 0);
     });
 
-    let _client = runite::net::TcpStream::connect(addr).await.expect("connect");
+    let _client = runite::net::TcpStream::connect(addr)
+        .await
+        .expect("connect");
     server.await.expect("server task");
 }
 
@@ -55,7 +57,9 @@ async fn file_from_std_reads() {
     assert!(file.as_raw_fd() >= 0);
 
     let mut contents = Vec::new();
-    file.read_to_end(&mut contents).await.expect("read adopted file");
+    file.read_to_end(&mut contents)
+        .await
+        .expect("read adopted file");
     assert_eq!(contents, b"adopted");
 
     std::fs::remove_file(&path).expect("cleanup");

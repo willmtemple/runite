@@ -39,6 +39,16 @@ before committing to either approach.
 
 ## Platform / hardening (from the 0.1 productionization pass)
 
+- Windows follow-ups (see `docs/WINDOWS.md`):
+  - Unix-domain sockets via `AF_UNIX` (Windows 10 1803+, stream-only) so
+    `runite::net::unix` can exist on Windows.
+  - High-resolution runtime timers by associating a
+    `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer with the completion port via
+    `NtAssociateWaitCompletionPacket` (the high-resolution timer kind rejects the
+    APC route used today, which is bounded by the ~15.6 ms interrupt period).
+  - `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` on sockets to elide completion packets
+    for synchronously-completed operations (needs the documented non-IFS-LSP
+    caveat handled).
 - Validate the macOS kqueue backend's `unsafe` on a real runner; run the macOS CI job.
 - Sanitizers (ASan/TSan) and Miri (needs a mock driver) for the logic crates.
 - Linux net data-path readiness fallback (epoll/io_uring hybrid for
