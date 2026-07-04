@@ -134,7 +134,7 @@ Drop remains the cancellation primitive. The cancel callback registered on each
 | stdin/stdout/stderr | blocking-pool offload (console handles do not support overlapped I/O) |
 | signals | `SetConsoleCtrlHandler` → `signal::windows::{ctrl_c, ctrl_break, …}`; `runite::signal::ctrl_c()` routes here |
 | fd readiness (`runite::fd`) | intentionally absent — readiness is a descriptor concept with no IOCP analogue |
-| Unix domain sockets | not yet provided (Windows AF_UNIX is stream-only; tracked in ROADMAP) |
+| Unix domain sockets | not yet provided (Windows AF_UNIX is stream-only; tracked in the project's GitHub issues) |
 | `SO_REUSEPORT` | unsupported; `TcpSocket::set_reuseport` returns `ErrorKind::Unsupported` |
 
 ## The handle façade

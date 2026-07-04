@@ -29,7 +29,6 @@ exclude = [
   "mise.lock",
   "rust-toolchain.toml",
   "AGENTS.md",
-  "ROADMAP.md",
   "deny.toml",
 ]
 

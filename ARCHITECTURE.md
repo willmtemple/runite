@@ -1,4 +1,4 @@
-*This document describes the runtime as implemented for 0.1. Forward-looking design intent lives in `ROADMAP.md`.*
+*This document describes the runtime as implemented for 0.1. Forward-looking work is tracked in the project's GitHub issues.*
 
 # Overview
 
@@ -284,7 +284,7 @@ Implication for buffer ownership:
   guards as described below.
 
 An explicit `CancellationToken` is a candidate post-0.1 addition so cancellation can be expressed
-without relying only on Drop; see `ROADMAP.md`.
+without relying only on Drop; tracked in the project's GitHub issues.
 
 # I/O buffer ownership rules
 
@@ -321,7 +321,7 @@ is in flight is rejected rather than misreporting that write's byte count agains
 
 This is sound for arbitrary borrowed buffers, but it is not zero-copy. A hot-path API that transfers
 ownership of a stable allocation to the operation (tokio-uring style) and registered buffers are
-roadmap items (`ROADMAP.md`).
+tracked in the project's GitHub issues.
 
 # Subprocesses
 
@@ -387,9 +387,9 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 | set_len | `IORING_OP_FTRUNCATE` (6.9+), inline `ftruncate(2)` fallback | blocking pool (`ftruncate`) | blocking pool (`SetFileInformationByHandle`) |
 | try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool | inline `DuplicateHandle` (never blocks) |
 | read_dir | offloaded streaming producer (`getdents` can block, no io_uring opcode) | blocking pool producer | blocking pool producer |
-| close | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `CloseHandle`/`closesocket` via owned-handle `Drop` (an awaitable close is a roadmap item on every platform) |
+| close | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `CloseHandle`/`closesocket` via owned-handle `Drop` (an awaitable close is tracked in the project's GitHub issues for every platform) |
 | network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls | overlapped `ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom`; control ops inline |
-| Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path | not provided (tracked in ROADMAP) |
+| Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path | not provided (tracked in the project's GitHub issues) |
 | stdin | Linux tries `IORING_OP_READ`, then per-call blocking fallback | blocking fallback path | blocking pool (console handles cannot overlap) |
 | child exit | pidfd readiness via `IORING_OP_POLL_ADD`; no SIGCHLD handler or blocking-pool offload | process wait backend | `RegisterWaitForSingleObject` on the process handle (OS wait-thread pool) |
 | wait_readable | `IORING_OP_POLL_ADD` | `kqueue` `EVFILT_READ` one-shot | not provided (readiness has no IOCP analogue; `runite::fd` is Unix-only) |
@@ -488,8 +488,8 @@ Load-bearing invariants:
 # What this runtime is NOT (and the reasons)
 
 - Not a general-purpose high-throughput server runtime.
-  - No registered buffers, fixed files, vectored I/O, or splice; these are roadmap items
-    (`ROADMAP.md`), not 0.1 goals.
+  - No registered buffers, fixed files, vectored I/O, or splice; these are tracked in the
+    project's GitHub issues, not 0.1 goals.
   - The design optimizes for interactive applications and deterministic scheduling first.
 - Not a multi-threaded work-stealing runtime.
   - Each runtime thread owns its own queues and driver.
