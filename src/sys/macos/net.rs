@@ -184,7 +184,8 @@ async fn bind_listener_inner(addr: SocketAddr, backlog: Option<i32>) -> io::Resu
     })
     .await?;
 
-    set_reuse_addr(listener.as_raw_fd(), true)?;
+    // Do not set SO_REUSEADDR implicitly (matches std::net::TcpListener::bind).
+    // Callers who want it opt in via `net::TcpSocket::set_reuseaddr` before bind.
 
     bind(NetOp::Bind {
         fd: listener.as_raw_fd(),

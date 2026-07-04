@@ -958,6 +958,21 @@ impl TcpListener {
     /// Binding to port `0` asks the OS to assign an available port, which can be
     /// retrieved with [`local_addr`](Self::local_addr).
     ///
+    /// Like [`std::net::TcpListener::bind`], this does **not** set `SO_REUSEADDR`.
+    /// To reuse a recently-closed address (or bind while a previous socket is in
+    /// `TIME_WAIT`), configure a [`TcpSocket`] and enable it before binding:
+    ///
+    /// ```
+    /// runite::spawn(async {
+    ///     let socket = runite::net::TcpSocket::new_v4().unwrap();
+    ///     socket.set_reuseaddr(true).unwrap();
+    ///     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    ///     let listener = socket.listen(1024).unwrap();
+    ///     assert!(listener.local_addr().unwrap().port() != 0);
+    /// });
+    /// runite::run();
+    /// ```
+    ///
     /// # Examples
     ///
     /// ```
