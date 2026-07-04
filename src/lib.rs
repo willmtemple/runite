@@ -161,7 +161,7 @@ pub mod macros;
 /// inspects the signature and dispatches accordingly. It generates a real Rust
 /// `main` that queues the function body (or its returned future) onto the main
 /// runtime thread before calling [`run`].
-pub use runite_proc_macros::main;
+pub use runite_proc_macros::{main, test};
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 pub use runtime_api::*;

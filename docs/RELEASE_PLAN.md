@@ -262,8 +262,22 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `block_on` is a direct driver). Wired through both platform shims. Tests in
   `tests/block_on.rs` (value + borrow-locals, drives timers, returns before an unfinished
   background task, nested-reject). Public API snapshot updated.
-- [ ] **3.2 `#[runite::main]` discards `Result` → exits 0 on error.** Honor `Termination`
+- [x] **3.2 `#[runite::main]` discards `Result` → exits 0 on error.** Honor `Termination`
   or reject signature. De-hardcode `::runite` (crate-rename support). Add `#[runite::test]`.
+  **Done:** rewrote the proc-macro. `#[runite::main]` now preserves the original return
+  type on the generated `fn main` and drives an async body with `block_on`, so
+  `async fn main() -> Result<…>` reports a non-zero exit via `Termination` instead of
+  silently exiting 0 (sync `main` runs its body, drains the loop with `run`, returns its
+  value). Added `crate = "…"` support (parsing the `crate` keyword) on both macros so a
+  renamed `runite` dependency works. Added `#[runite::test]`: generates a `#[test]`
+  wrapper that `block_on`s the async body, preserves the return type (so tests can `?`),
+  and forwards user attributes (`#[ignore]`, `#[should_panic]`) to the wrapper. Tests in
+  `tests/macros.rs` (async body, `Result` return, spawn, `should_panic` forwarding,
+  `crate =` path); `examples/main_result.rs` compiles the `main -> Result` path; all
+  existing examples still build under the new `block_on`-based codegen. **Note:** switching
+  `main` to `block_on` means a `#[runite::main]` returns when its future resolves
+  (detached tasks abandoned), matching `std`/Tokio `main` semantics rather than the old
+  run-to-idle behavior.
 - [ ] **3.3 fd interop.** `AsFd`/`AsRawFd`/`From<OwnedFd>`/`from_std` on fd-backed types;
   `fd::wait_writable`; `wait_readable` take `impl AsFd`.
 - [ ] **3.4 `UnixStream` implement `AsyncRead`/`AsyncWrite` + `shutdown` + split.**
