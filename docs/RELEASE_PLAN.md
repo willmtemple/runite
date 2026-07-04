@@ -1,5 +1,13 @@
 # runite 0.1 Release Plan
 
+> **What this file is:** the working tracker (and, as items complete, the
+> historical record) of the 0.1 release-readiness effort — issue tracking, not
+> documentation. It lives under `docs/` and is excluded from the published
+> crate. Forward-looking design intent lives in [`ROADMAP.md`](../ROADMAP.md);
+> user-facing behavior is documented in the rustdoc, `README.md`, and
+> `ARCHITECTURE.md`. After 0.1 ships, this file stays as the record of what
+> was found and fixed; new work should be tracked as issues.
+
 Tracking checklist derived from the pre-0.1 deep review (2026-07-03). Ordered by
 tier: Tier 0 (soundness) → Tier 1 (data corruption/loss) → Tier 2 (hangs/panics)
 → Tier 3 (API shape) → Tier 4 (release mechanics), then post-0.1.
@@ -385,7 +393,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   without `--all-features`). The smoke task immediately caught a latent example bug:
   the hyper demo declared `content-length: 24` for an 18-byte body and had been
   failing invisibly under the old Result-discarding `#[runite::main]` (fixed).
-- [ ] **4.2 Merge the two ROADMAP files; rewrite CHANGELOG to a `0.1.0` narrative.**
+- [x] **4.2 Merge the two ROADMAP files; rewrite CHANGELOG to a `0.1.0` narrative.**
+  **Done, as part of the docs/issue-tracking/process separation review:** merged root
+  `ROADMAP.md` + `docs/ROADMAP.md` + this plan's Post-0.1 section into one root
+  `ROADMAP.md` of pure forward-looking design intent (dropped the "Issues are disabled
+  so tracking lives here" framing, the agent process-speak, and the dead-code section —
+  resolved in code instead; updated the starvation section, which claimed the tracing
+  warning was unimplemented). Rewrote `CHANGELOG.md` as a 0.1.0 initial-release
+  narrative — the old `Fixed`/`Changed`/`Security` sections described pre-release
+  internal churn no user ever saw. Reframed this file's header to say what it is
+  (issue tracking, excluded from the package).
 - [x] **4.3 Packaging:** exclude `mise.lock`; `doc_auto_cfg` feature badges;
   `cargo publish --dry-run -p runite` step in release.yml. **Done:** `exclude` now also
   drops `mise.lock`, `/.claude`, and `ROADMAP.md` (verified with `cargo package --list`:
@@ -440,7 +457,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   **Done:** take the callback out and release the guard before invoking it.
   Confirmed on baseline; full suite green after the fix.
 
-## Post-0.1 (deferred)
+## Post-0.1 (deferred — expanded into `ROADMAP.md`, kept here for the record)
 
 - [-] Perf: buf_ring + multishot recv/accept → registered buffers (files) → owned-buffer
   API → `SEND_ZC`.
