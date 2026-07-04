@@ -297,7 +297,7 @@ impl Stdin {
         // handle. On the Linux io_uring path this makes the read cancel-safe (a
         // completed-but-unclaimed read is served next via the overflow buffer);
         // the blocking-offload fallback still cannot cancel an in-progress
-        // blocking read (see release-plan 2.10).
+        // blocking read (a cancel-safe buffered stdin reader is a roadmap item).
         core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
     }
 }

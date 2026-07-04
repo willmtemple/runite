@@ -729,7 +729,7 @@ impl IoUring {
                     //
                     // Sound because the current design submits immediately after
                     // each push, so every un-consumed SQE belongs to this failed
-                    // submission. A future batched submitter (release-plan P-1)
+                    // submission. A future batched submitter (see ROADMAP.md)
                     // must instead roll back only the un-consumed suffix and keep
                     // already-accepted ops' completions alive.
                     store_u32(self.sq_tail, head);

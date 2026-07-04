@@ -1,5 +1,4 @@
-//! Tests for the `#[runite::test]` / `#[runite::main]` attribute macros
-//! (release plan 3.2).
+//! Tests for the `#[runite::test]` / `#[runite::main]` attribute macros.
 
 use std::time::Duration;
 

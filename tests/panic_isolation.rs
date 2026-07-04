@@ -1,4 +1,4 @@
-//! Regression tests for runtime panic isolation (release plan task 2.1).
+//! Regression tests for runtime panic isolation.
 //!
 //! A panic that unwinds out of a spawned future, a scheduled closure, or a
 //! blocking-pool job must not tear down the event loop thread. Before this fix

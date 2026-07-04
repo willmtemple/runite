@@ -1,5 +1,5 @@
-//! Tests for `UnixStream` async I/O trait parity (release plan 3.4):
-//! `AsyncRead`/`AsyncWrite`, `shutdown`, and owned split halves.
+//! `UnixStream` async I/O trait parity with `TcpStream`: `AsyncRead`/
+//! `AsyncWrite`, `shutdown`, and owned split halves.
 
 #![cfg(unix)]
 

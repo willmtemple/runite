@@ -68,13 +68,12 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
         move |sqe| {
             sqe.opcode = IORING_OP_SOCKET;
             sqe.fd = domain;
-            // IORING_OP_SOCKET reads the socket type (including the
-            // SOCK_CLOEXEC / SOCK_NONBLOCK bits) from `sqe.off`, exactly like
-            // the `type` argument of `socket(2)`; it does NOT consume socket
-            // creation flags from `rw_flags` (`op_flags`), which must be 0.
-            // Placing the flags in `op_flags` silently dropped SOCK_CLOEXEC,
-            // leaking uring-created sockets across `exec`. OR them into the
-            // type instead, mirroring `socket_sync`.
+            // IORING_OP_SOCKET reads the socket type — including the
+            // SOCK_CLOEXEC / SOCK_NONBLOCK bits — from `sqe.off`, exactly like
+            // the `type` argument of `socket(2)`. `op_flags` (`rw_flags`) must
+            // be 0: kernels that validate it reject the op, and those that do
+            // not would ignore flags placed there, losing SOCK_CLOEXEC. OR the
+            // flags into the type, mirroring `socket_sync`.
             sqe.off = u64::from(socket_type as u32 | flags);
             sqe.len = protocol as u32;
             sqe.op_flags = 0;
