@@ -3,7 +3,8 @@
 //! This module provides TCP and UDP sockets that integrate with runite's
 //! event-loop-per-thread runtime. The public surface follows the general shape
 //! of [`std::net`], but uses async methods for operations that would otherwise
-//! block the caller. Unix domain sockets are available from [`unix`] on Unix
+//! block the caller. Unix domain sockets are available from the `unix`
+//! submodule on Unix
 //! platforms and are re-exported from this module.
 //!
 //! # Network model
@@ -56,14 +57,15 @@ use core::time::Duration;
 
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
 use crate::io::{AsyncRead, AsyncWrite, Stream};
 use crate::op::net::NetOp;
+use crate::sys::handle::{OwnedSock, RawSock, owned_sock_from_raw, raw_sock};
 
 #[cfg(feature = "hyper")]
 mod hyper_impl;
+mod interop;
 #[cfg(unix)]
 pub mod unix;
 
@@ -72,18 +74,18 @@ pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 #[derive(Debug)]
 struct TcpStreamInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
     timeouts: Mutex<SocketTimeouts>,
 }
 
 #[derive(Debug)]
 struct TcpListenerInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
 }
 
 #[derive(Debug)]
 struct UdpSocketInner {
-    fd: OwnedFd,
+    fd: OwnedSock,
     timeouts: Mutex<SocketTimeouts>,
 }
 
@@ -136,7 +138,7 @@ pub struct TcpStream {
 impl std::fmt::Debug for TcpStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpStream")
-            .field("fd", &self.inner.fd.as_raw_fd())
+            .field("fd", &raw_sock(&self.inner.fd))
             .finish_non_exhaustive()
     }
 }
@@ -178,7 +180,7 @@ pub struct TcpListener {
 /// ```
 #[derive(Debug)]
 pub struct TcpSocket {
-    fd: OwnedFd,
+    fd: OwnedSock,
 }
 
 /// Async UDP socket.
@@ -406,12 +408,12 @@ impl TcpSocket {
         crate::sys::current::net::local_addr(self.raw_fd())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self { fd }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.fd)
     }
 }
 
@@ -693,7 +695,7 @@ impl TcpStream {
         Ok(())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(TcpStreamInner {
                 fd,
@@ -707,8 +709,8 @@ impl TcpStream {
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 
     fn read_timeout_value(&self) -> Option<Duration> {
@@ -1040,7 +1042,7 @@ impl TcpListener {
 
         // SAFETY: `accepted.fd` is the fresh descriptor returned by accept and
         // ownership is transferred to `OwnedFd` exactly once here.
-        let stream = TcpStream::from_owned_fd(unsafe { OwnedFd::from_raw_fd(accepted.fd) });
+        let stream = TcpStream::from_owned_fd(unsafe { owned_sock_from_raw(accepted.fd) });
         Ok((stream, accepted.peer_addr))
     }
 
@@ -1071,7 +1073,7 @@ impl TcpListener {
         crate::sys::current::net::set_ttl(self.raw_fd(), ttl)
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(TcpListenerInner { fd }),
         }
@@ -1086,8 +1088,8 @@ impl TcpListener {
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 }
 
@@ -1121,7 +1123,7 @@ impl Stream for Incoming {
                 // SAFETY: `accepted.fd` is the fresh descriptor returned by
                 // accept; ownership is transferred to `OwnedFd` exactly once.
                 Ok(TcpStream::from_owned_fd(unsafe {
-                    OwnedFd::from_raw_fd(accepted.fd)
+                    owned_sock_from_raw(accepted.fd)
                 }))
             }));
         }
@@ -1266,7 +1268,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_timeout(
                     self.raw_fd(),
                     buf.len(),
-                    libc::MSG_PEEK,
+                    crate::sys::current::net::MSG_PEEK,
                     timeout,
                 )
                 .await?
@@ -1275,7 +1277,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv(NetOp::Recv {
                     fd: self.raw_fd(),
                     len: buf.len(),
-                    flags: libc::MSG_PEEK,
+                    flags: crate::sys::current::net::MSG_PEEK,
                 })
                 .await?
             }
@@ -1387,7 +1389,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_from_timeout(
                     self.raw_fd(),
                     buf.len(),
-                    libc::MSG_PEEK,
+                    crate::sys::current::net::MSG_PEEK,
                     timeout,
                 )
                 .await?
@@ -1396,7 +1398,7 @@ impl UdpSocket {
                 crate::sys::current::net::recv_from(NetOp::RecvFrom {
                     fd: self.raw_fd(),
                     len: buf.len(),
-                    flags: libc::MSG_PEEK,
+                    flags: crate::sys::current::net::MSG_PEEK,
                 })
                 .await?
             }
@@ -1481,7 +1483,7 @@ impl UdpSocket {
         Ok(())
     }
 
-    fn from_owned_fd(fd: OwnedFd) -> Self {
+    fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
             inner: Arc::new(UdpSocketInner {
                 fd,
@@ -1490,8 +1492,8 @@ impl UdpSocket {
         }
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
+    fn raw_fd(&self) -> RawSock {
+        raw_sock(&self.inner.fd)
     }
 
     fn read_timeout_value(&self) -> Option<Duration> {
@@ -1518,147 +1520,6 @@ fn validate_timeout(timeout: Duration) -> io::Result<()> {
         ));
     }
     Ok(())
-}
-
-// -- File-descriptor interop (Unix only) -------------------------------------
-//
-// These impls are `#[cfg(unix)]` because they expose raw/owned file
-// descriptors, a Unix concept with no equivalent on the completion-based
-// Windows backend (which would instead expose `AsSocket`/`AsRawSocket`).
-
-#[cfg(unix)]
-impl AsFd for TcpStream {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.inner.fd.as_fd()
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for TcpStream {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
-    }
-}
-
-#[cfg(unix)]
-impl From<OwnedFd> for TcpStream {
-    /// Adopts an already-connected TCP socket. The caller is responsible for the
-    /// descriptor being a valid, appropriately-configured stream socket; use
-    /// [`TcpStream::from_std`] to adopt a [`std::net::TcpStream`] and set the
-    /// mode runite's backend expects.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
-    }
-}
-
-#[cfg(unix)]
-impl AsFd for TcpListener {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.inner.fd.as_fd()
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for TcpListener {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
-    }
-}
-
-#[cfg(unix)]
-impl From<OwnedFd> for TcpListener {
-    /// Adopts an already-listening TCP socket. Use [`TcpListener::from_std`] to
-    /// adopt a [`std::net::TcpListener`] and set the expected mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
-    }
-}
-
-#[cfg(unix)]
-impl AsFd for UdpSocket {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.inner.fd.as_fd()
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for UdpSocket {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.fd.as_raw_fd()
-    }
-}
-
-#[cfg(unix)]
-impl From<OwnedFd> for UdpSocket {
-    /// Adopts an existing UDP socket. Use [`UdpSocket::from_std`] to adopt a
-    /// [`std::net::UdpSocket`] and set the expected mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
-    }
-}
-
-#[cfg(unix)]
-impl AsFd for TcpSocket {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for TcpSocket {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
-    }
-}
-
-#[cfg(unix)]
-impl From<OwnedFd> for TcpSocket {
-    /// Adopts an existing (typically unbound) TCP socket for configuration.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
-    }
-}
-
-#[cfg(unix)]
-impl TcpStream {
-    /// Adopts a blocking [`std::net::TcpStream`], returning an async
-    /// [`TcpStream`].
-    ///
-    /// The socket is switched to the non-blocking mode runite's driver expects.
-    /// Ownership of the descriptor transfers to the returned stream.
-    pub fn from_std(stream: std::net::TcpStream) -> io::Result<Self> {
-        let fd = OwnedFd::from(stream);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self::from_owned_fd(fd))
-    }
-}
-
-#[cfg(unix)]
-impl TcpListener {
-    /// Adopts a blocking [`std::net::TcpListener`], returning an async
-    /// [`TcpListener`].
-    ///
-    /// The socket is switched to non-blocking mode. Ownership of the descriptor
-    /// transfers to the returned listener.
-    pub fn from_std(listener: std::net::TcpListener) -> io::Result<Self> {
-        let fd = OwnedFd::from(listener);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self::from_owned_fd(fd))
-    }
-}
-
-#[cfg(unix)]
-impl UdpSocket {
-    /// Adopts a blocking [`std::net::UdpSocket`], returning an async
-    /// [`UdpSocket`].
-    ///
-    /// The socket is switched to non-blocking mode. Ownership of the descriptor
-    /// transfers to the returned socket.
-    pub fn from_std(socket: std::net::UdpSocket) -> io::Result<Self> {
-        let fd = OwnedFd::from(socket);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self::from_owned_fd(fd))
-    }
 }
 
 #[cfg(test)]
@@ -2036,4 +1897,3 @@ mod tests {
         assert_eq!(*count.lock().unwrap(), 3);
     }
 }
-

@@ -32,6 +32,9 @@ use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
+/// Peek flag for `recv`-family operations, re-exported for the public layer.
+pub const MSG_PEEK: i32 = libc::MSG_PEEK;
+
 // TODO(roadmap): unwired io_uring net-close / op-classifier scaffolding; a Linux
 // agent will wire or remove it before release. See ROADMAP.md.
 #[allow(dead_code)]
@@ -1555,10 +1558,9 @@ mod tests {
         let observed_task = Arc::clone(&observed);
 
         spawn(async move {
-            let listener =
-                bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
-                    .await
-                    .expect("listener should bind");
+            let listener = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
+                .await
+                .expect("listener should bind");
             *observed_task.lock().expect("result mutex poisoned") =
                 Some(reuse_addr(listener.as_raw_fd()).expect("getsockopt should succeed"));
         });

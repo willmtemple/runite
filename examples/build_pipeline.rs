@@ -38,10 +38,22 @@ struct Step {
 /// The "build graph": a compile phase (parallel, bounded) then a link phase.
 /// Each step is a real subprocess. `parser.c` is scripted to fail.
 const COMPILE_STEPS: &[Step] = &[
-    Step { name: "lexer.c", script: "sleep 0.12; echo 'lexer: 412 lines ok'" },
-    Step { name: "parser.c", script: "sleep 0.08; echo 'parser.c:88: unbalanced brace' >&2; exit 1" },
-    Step { name: "eval.c", script: "sleep 0.15; echo 'eval: 890 lines ok'" },
-    Step { name: "main.c", script: "sleep 0.05; echo 'main: 120 lines ok'" },
+    Step {
+        name: "lexer.c",
+        script: "sleep 0.12; echo 'lexer: 412 lines ok'",
+    },
+    Step {
+        name: "parser.c",
+        script: "sleep 0.08; echo 'parser.c:88: unbalanced brace' >&2; exit 1",
+    },
+    Step {
+        name: "eval.c",
+        script: "sleep 0.15; echo 'eval: 890 lines ok'",
+    },
+    Step {
+        name: "main.c",
+        script: "sleep 0.05; echo 'main: 120 lines ok'",
+    },
 ];
 const CONCURRENCY: usize = 2;
 
@@ -70,7 +82,10 @@ fn report(step: &Step, took: std::time::Duration, output: &Output) -> bool {
 #[runite::main]
 async fn main() -> std::io::Result<()> {
     let started = Instant::now();
-    println!("compiling {} units, {CONCURRENCY} at a time:", COMPILE_STEPS.len());
+    println!(
+        "compiling {} units, {CONCURRENCY} at a time:",
+        COMPILE_STEPS.len()
+    );
 
     // Bounded-concurrency executor: keep at most CONCURRENCY steps in the
     // JoinSet; every completion pulls the next step off the queue. This is the

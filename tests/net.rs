@@ -105,6 +105,7 @@ fn tcp_socket_accept_connect_smoke() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn tcp_socket_reuseport_allows_two_listeners_on_same_port() {
     block_on(|| async {
@@ -141,6 +142,24 @@ fn tcp_socket_reuseport_allows_two_listeners_on_same_port() {
             .connect(addr)
             .await
             .expect("connect shared port");
+    });
+}
+
+/// `SO_REUSEPORT` has no Windows equivalent; the builder must report
+/// `Unsupported` rather than silently misconfiguring the socket.
+#[cfg(windows)]
+#[test]
+fn tcp_socket_reuseport_reports_unsupported() {
+    block_on(|| async {
+        let socket = TcpSocket::new_v4().expect("create socket");
+        let error = socket
+            .set_reuseport(true)
+            .expect_err("set_reuseport should be unsupported on Windows");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        let error = socket
+            .reuseport()
+            .expect_err("reuseport should be unsupported on Windows");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     });
 }
 

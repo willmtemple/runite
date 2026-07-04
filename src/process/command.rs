@@ -419,7 +419,9 @@ impl Command {
         }
 
         let stderr = match stderr_reader {
-            Some(handle) => handle.await.expect("stderr reader task should not be aborted")?,
+            Some(handle) => handle
+                .await
+                .expect("stderr reader task should not be aborted")?,
             None => Vec::new(),
         };
 

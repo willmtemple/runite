@@ -7,8 +7,6 @@ use runite::io::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use runite::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -444,6 +442,9 @@ fn hyper_http1_client_uses_runite_tcp_stream() {
 
 #[cfg(unix)]
 mod unix_extra {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use runite::net::unix::{UnixDatagram, UnixListener, UnixStream};
     use std::path::Path;
