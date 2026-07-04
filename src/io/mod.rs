@@ -18,7 +18,8 @@
 //! The platform backend shapes what an I/O readiness point means. On Linux,
 //! runite submits completion-based operations to `io_uring`; on macOS
 //! aarch64, it waits for readiness through `kqueue` and then performs the
-//! nonblocking operation. Unlike Tokio's default multi-thread scheduler or
+//! nonblocking operation; on Windows, overlapped operations complete through
+//! the thread's I/O completion port. Unlike Tokio's default multi-thread scheduler or
 //! async-std, these traits make the current-thread assumption explicit and keep
 //! the poll surface small rather than requiring `Send` transports. Doctest
 //! examples use [`crate::spawn`] followed by [`crate::run`] to execute async work

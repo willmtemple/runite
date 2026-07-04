@@ -16,9 +16,12 @@
 //! On Linux, regular filesystem operations use the runtime's `io_uring`
 //! completion backend where an opcode exists. On macOS aarch64, filesystem work
 //! is offloaded to runite's blocking thread pool so slow disk or metadata calls
-//! do not block the event-loop thread. Directory iteration is also
-//! blocking-pool-backed on Linux because `std::fs::read_dir`/directory scanning
-//! can block and is not modeled as an `io_uring` operation here.
+//! do not block the event-loop thread. On Windows, file reads and writes run as
+//! overlapped operations on the thread's I/O completion port, while open,
+//! metadata, directory, flush, and truncation work is offloaded to the blocking
+//! pool. Directory iteration is also blocking-pool-backed on Linux because
+//! `std::fs::read_dir`/directory scanning can block and is not modeled as an
+//! `io_uring` operation here.
 //!
 //! This differs from Tokio's default multi-threaded scheduler and async-std:
 //! runite keeps tasks on a JavaScript-style, thread-local event loop and mixes

@@ -14,8 +14,10 @@
 //! current-thread values; drive them on the runtime thread that owns the
 //! operation, and move work to another thread by sending a macrotask to that
 //! thread rather than by migrating the socket future. Linux uses
-//! completion-based `io_uring` operations, while macOS aarch64 waits for
-//! readiness with `kqueue` and then performs nonblocking socket calls.
+//! completion-based `io_uring` operations, macOS aarch64 waits for
+//! readiness with `kqueue` and then performs nonblocking socket calls, and
+//! Windows drives overlapped Winsock operations (`ConnectEx`/`AcceptEx`,
+//! `WSASend`/`WSARecv`) through the thread's I/O completion port.
 //!
 //! This differs from Tokio's default scheduler and async-std: runite has no
 //! work-stealing socket executor, and split TCP halves are intended for separate
