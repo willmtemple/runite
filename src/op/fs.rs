@@ -38,7 +38,10 @@ pub enum FileType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawMetadata {
     pub file_type: FileType,
-    pub mode: u16,
+    /// Full POSIX `st_mode` (file-type bits and permission bits), matching
+    /// `std::os::unix::fs::MetadataExt::mode`. `u32` for parity with std even
+    /// though the current backends fit it in 16 bits.
+    pub mode: u32,
     pub len: u64,
 }
 

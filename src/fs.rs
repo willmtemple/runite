@@ -334,6 +334,17 @@ impl File {
         .await
     }
 
+    /// Seeks the file's cursor and returns the new position from the start.
+    ///
+    /// This repositions the kernel file cursor shared by this handle (and any
+    /// [`try_clone`](Self::try_clone)d handles), so it affects the sequential
+    /// [`read`](Self::read)/[`write`](Self::write) methods, not the positioned
+    /// [`read_at`](Self::read_at)/[`write_at`](Self::write_at) methods. Mirrors
+    /// [`std::io::Seek::seek`].
+    pub async fn seek(&mut self, pos: std::io::SeekFrom) -> io::Result<u64> {
+        sys_fs::seek(self.raw_fd(), pos)
+    }
+
     /// Duplicates the underlying file description.
     ///
     /// As with [`std::fs::File::try_clone`], the cloned handle shares
@@ -593,10 +604,12 @@ impl Metadata {
         self.inner.file_type == RawFileType::Symlink
     }
 
-    /// Returns the raw POSIX mode bits reported by the platform backend.
+    /// Returns the full POSIX `st_mode` — file-type bits *and* permission bits —
+    /// matching [`std::os::unix::fs::MetadataExt::mode`].
     ///
-    /// Non-POSIX platforms may report backend-specific compatibility bits.
-    pub fn mode(&self) -> u16 {
+    /// This is consistent across the Linux and macOS backends. To extract just
+    /// the permission bits, mask with `0o7777`.
+    pub fn mode(&self) -> u32 {
         self.inner.mode
     }
 }
@@ -693,6 +706,19 @@ pub async fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
     sys_fs::metadata(FsOp::Metadata {
         target: MetadataTarget::Path(path.as_ref().to_path_buf()),
         follow_symlinks: true,
+    })
+    .await
+    .map(Metadata::from_raw)
+}
+
+/// Returns metadata for a filesystem path **without** following symbolic links.
+///
+/// Unlike [`metadata`], if `path` is a symlink this reports the link itself, so
+/// [`Metadata::is_symlink`] can be `true`. Mirrors [`std::fs::symlink_metadata`].
+pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
+    sys_fs::metadata(FsOp::Metadata {
+        target: MetadataTarget::Path(path.as_ref().to_path_buf()),
+        follow_symlinks: false,
     })
     .await
     .map(Metadata::from_raw)

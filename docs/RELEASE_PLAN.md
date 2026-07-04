@@ -329,8 +329,23 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 - [ ] **3.7 Conventions sweep.** `Debug` on all public types; `#[must_use]` on guards/
   lazy futures/handles; `Display`+`Error` on mpsc/oneshot errors; export `io::ext` future
   types; drop `TcpListener: Clone` for `try_clone`.
-- [ ] **3.8 fs semantic gaps.** `symlink_metadata` (so `is_symlink` can be true); `File::seek`;
+- [x] **3.8 fs semantic gaps.** `symlink_metadata` (so `is_symlink` can be true); `File::seek`;
   document/drop implicit `SO_REUSEADDR`; unify `Metadata::mode()` across platforms.
+  **Done (all four):**
+  - **`SO_REUSEADDR`** — flipped `TcpListener::bind` to std's default-off, opt-in via the
+    existing cross-platform `TcpSocket` (committed separately).
+  - **`symlink_metadata`** — added `fs::symlink_metadata(path)` (the backend already
+    threaded `follow_symlinks`; it now passes `false`), so `Metadata::is_symlink()` can be
+    `true`. Regression test with a real symlink.
+  - **`File::seek`** — added `File::seek(SeekFrom) -> u64` (inline `lseek(2)`; both backends
+    drive sequential I/O off the kernel fd cursor, so seek composes with `read`/`write`).
+    Test covers Start/Current/End.
+  - **`Metadata::mode()` unification** — macOS was masking to `0o7777` (permission bits
+    only) while Linux returned the full `st_mode`; now both return the full `st_mode`
+    (file-type + permission bits, widened to `u32`) matching
+    `std::os::unix::fs::MetadataExt::mode`. Test asserts the `S_IFREG` type bits are
+    present.
+  Public API snapshot updated.
 - [x] **3.9 Pin proc-macro dep `=0.1.0`.** Done: `runite-proc-macros` dependency pinned to `=0.1.0` so the lockstep-versioned macro crate can never resolve to a mismatched version.
 - [ ] **3.10 Per-method cancel-safety docs.**
 

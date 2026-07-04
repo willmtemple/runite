@@ -167,6 +167,23 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
     offload(move || cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())).await
 }
 
+/// Repositions the file's kernel cursor. `lseek(2)` on a regular file is a fast
+/// metadata operation that does not block, so it runs inline on the event loop.
+pub fn seek(fd: RawFd, pos: std::io::SeekFrom) -> io::Result<u64> {
+    let (whence, offset) = match pos {
+        std::io::SeekFrom::Start(n) => (libc::SEEK_SET, n as libc::off_t),
+        std::io::SeekFrom::End(n) => (libc::SEEK_END, n as libc::off_t),
+        std::io::SeekFrom::Current(n) => (libc::SEEK_CUR, n as libc::off_t),
+    };
+    // SAFETY: `lseek` takes only a descriptor and integer arguments.
+    let result = unsafe { libc::lseek(fd, offset, whence) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as u64)
+    }
+}
+
 pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
     let FsOp::Duplicate { fd } = op else {
         unreachable!("try_clone backend called with non-duplicate op");
@@ -410,7 +427,9 @@ fn raw_metadata_from_std(metadata: &std::fs::Metadata) -> RawMetadata {
 
     RawMetadata {
         file_type: kind,
-        mode: (metadata.mode() & 0o7777) as u16,
+        // Full st_mode (type + permission bits), matching std and the Linux
+        // backend rather than masking to permission bits only.
+        mode: metadata.mode(),
         len: metadata.len(),
     }
 }
@@ -429,7 +448,7 @@ fn raw_metadata_from_stat(stat: &libc::stat) -> RawMetadata {
 
     RawMetadata {
         file_type: kind,
-        mode: stat.st_mode & 0o7777,
+        mode: u32::from(stat.st_mode),
         len: stat.st_size as u64,
     }
 }
