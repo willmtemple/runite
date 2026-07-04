@@ -1278,7 +1278,7 @@ fn shutdown_sync(fd: RawFd, how: Shutdown) -> io::Result<()> {
 
 /// Marks `fd` non-blocking so the readiness-based fallback helpers can poll it
 /// without ever stalling the event loop. Idempotent.
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     // SAFETY: `F_GETFL`/`F_SETFL` take a valid fd and an integer flag set; no
     // user pointers are involved.
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
