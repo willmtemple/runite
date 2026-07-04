@@ -49,8 +49,10 @@ threads and channels provide parallelism.
   `TcpSocket` builder for `SO_REUSEADDR`/`SO_REUSEPORT`), UDP, and Unix-domain
   sockets (stream, listener, datagram) implementing the crate's
   `AsyncRead`/`AsyncWrite` traits. `TcpListener::bind` matches `std` (no
-  implicit `SO_REUSEADDR`). Optional Hyper HTTP transport integration
-  (`hyper` feature).
+  implicit `SO_REUSEADDR`). Optional Hyper integration (`hyper` feature):
+  transport impls for `TcpStream` **and** `UnixStream`, plus `hyper_rt`'s
+  `RuniteExecutor`/`RuniteTimer` runtime glue — hyper client *and server*,
+  http1 *and http2*, over TCP or Unix-domain sockets.
 - `fs`: async file open/read/write (cursor and positional), metadata and
   `symlink_metadata`, `seek`, `set_len`, sync (`F_FULLFSYNC` on macOS),
   directory create/remove/rename, and a streaming `read_dir`.

@@ -49,7 +49,9 @@ futures-compat = ["dep:futures-io"]
 futures-io = { version = "0.3", optional = true }
 hyper = { version = "1.8", default-features = false, features = [
   "client",
+  "server",
   "http1",
+  "http2",
 ], optional = true }
 libc = "0.2"
 runite-proc-macros = { package = "runite-proc-macros", version = "=0.1.0", path = "./proc_macros" }

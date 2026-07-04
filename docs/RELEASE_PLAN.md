@@ -450,7 +450,7 @@ transport glue only. HTTP services are not runite's headline use case, but there
 reason it can't serve them (people run services on Node constantly), so 0.1 should not
 artificially fence off hyper server and http2.
 
-- [ ] **H-1 `hyper::rt::Executor` + `hyper::rt::Timer` impls.** `RuniteExecutor`
+- [x] **H-1 `hyper::rt::Executor` + `hyper::rt::Timer` impls.** `RuniteExecutor`
   (spawns hyper's internal futures — connection drivers, h2 streams — onto the current
   runite thread) unlocks the http2 client/server builders; `RuniteTimer` (a
   `Send + Sync` sleep built on the completion architecture + `set_timeout`, since
@@ -460,10 +460,22 @@ artificially fence off hyper server and http2.
   features to `server` + `http2`. E2E tests: an http1 server served by runite (timer
   armed via `header_read_timeout`), and an http2 client↔server round trip driven by
   both impls.
-- [ ] **H-2 hyper transport impls for `UnixStream`.** Mirror the `TcpStream`
+- [x] **H-2 hyper transport impls for `UnixStream`.** Mirror the `TcpStream`
   `hyper::rt::Read`/`Write` impls onto `UnixStream` (same stashed pending-op +
   `ReadOverflow` machinery since 3.4) so local HTTP over Unix-domain sockets — Docker
   socket, systemd services — works. E2E test over a socketpair.
+
+  **Both done:** new `runite::hyper_rt` module with `RuniteExecutor` (generic over any
+  `Future + 'static`, so hyper's `!Send` h2 stream futures spawn onto the current loop)
+  and `RuniteTimer` (whose `RuniteSleep` is the required `Send + Sync` future, built on
+  the completion primitive + `set_timeout` with a cancel-on-drop hook; documented
+  same-thread vs cross-thread drop semantics). Hyper dep features grown to
+  `server` + `http2`. `UnixStream` gained the mirrored `hyper::rt::Read`/`Write` impls
+  (in `net::unix` where its private fields are visible). E2E tests in `tests/hyper_rt.rs`:
+  http1 server with an **armed `header_read_timeout`** (panics without a timer, so it
+  genuinely validates `RuniteTimer`), a full http2 client↔server round trip on one loop
+  through `RuniteExecutor`, and http1 over a `UnixStream::pair`. Public API snapshot
+  updated (+`hyper_rt` module).
 
 ## Performance (0.1-eligible)
 
