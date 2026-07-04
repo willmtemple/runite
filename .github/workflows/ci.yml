@@ -111,8 +111,12 @@ jobs:
         run: cargo build --workspace --all-targets --all-features
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # TEMPORARY DIAGNOSTIC (revert once the macOS hang is fixed): run the
+      # suite serially so the log shows which test hangs, and kill it after 25
+      # minutes so the job fails crisply instead of stalling to the 6h limit.
+      # macOS runners have no GNU `timeout`; perl's alarm is the portable kill.
       - name: Test
-        run: cargo test --workspace --all-features
+        run: perl -e 'alarm 1500; $rc = system(@ARGV); exit($rc ? 1 : 0)' -- cargo test --workspace --all-features --no-fail-fast -- --test-threads=1
 
   test-windows:
     name: Test (Windows x86_64, IOCP)
