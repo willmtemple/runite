@@ -34,9 +34,6 @@ pub(crate) const IORING_OP_ACCEPT: u8 = 13;
 pub(crate) const IORING_OP_ASYNC_CANCEL: u8 = 14;
 pub(crate) const IORING_OP_CONNECT: u8 = 16;
 pub(crate) const IORING_OP_OPENAT: u8 = 18;
-// TODO(roadmap): only referenced by the unwired io_uring close path. See ROADMAP.md.
-#[allow(dead_code)]
-pub(crate) const IORING_OP_CLOSE: u8 = 19;
 pub(crate) const IORING_OP_STATX: u8 = 21;
 pub(crate) const IORING_OP_READ: u8 = 22;
 pub(crate) const IORING_OP_WRITE: u8 = 23;

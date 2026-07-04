@@ -24,38 +24,13 @@ use crate::op::completion::completion_for_current_thread;
 use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
 use crate::platform::linux::runtime::with_current_driver;
 use crate::platform::linux::uring::{
-    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CLOSE, IORING_OP_CONNECT, IORING_OP_LISTEN,
+    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN,
     IORING_OP_RECV, IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN,
     IORING_OP_SOCKET, IoUringCqe, IoUringSqe,
 };
 use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
-
-// TODO(roadmap): unwired io_uring net-close / op-classifier scaffolding; a Linux
-// agent will wire or remove it before release. See ROADMAP.md.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    IoUring,
-    Offload,
-}
-
-#[allow(dead_code)]
-pub fn execution_path(op: &NetOp) -> ExecutionPath {
-    match op {
-        NetOp::Socket { .. }
-        | NetOp::Connect { .. }
-        | NetOp::Bind { .. }
-        | NetOp::Listen { .. }
-        | NetOp::Accept { .. }
-        | NetOp::Send { .. }
-        | NetOp::Recv { .. }
-        | NetOp::Shutdown { .. }
-        | NetOp::Close { .. } => ExecutionPath::IoUring,
-        NetOp::SendTo { .. } | NetOp::RecvFrom { .. } => ExecutionPath::IoUring,
-    }
-}
 
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
@@ -450,27 +425,6 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     {
         // `shutdown(2)` never blocks; run inline instead of bouncing to the blocking pool.
         Err(error) if should_fallback_to_offload(&error) => shutdown_sync(fd, fallback_how),
-        result => result,
-    }
-}
-
-#[allow(dead_code)]
-pub async fn close(op: NetOp) -> io::Result<()> {
-    let NetOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    match submit_uring::<(), _>(
-        move |sqe| {
-            sqe.opcode = IORING_OP_CLOSE;
-            sqe.fd = fd;
-        },
-        move |cqe| cqe_to_result(cqe).map(|_| ()),
-    )
-    .await
-    {
-        // `close(2)` never blocks; run inline instead of bouncing to the blocking pool.
-        Err(error) if should_fallback_to_offload(&error) => close_sync(fd),
         result => result,
     }
 }
