@@ -20,6 +20,7 @@ use crate::trace_targets;
 /// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime is shutting
 /// down or its cross-thread macrotask queue is full.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum QueueError {
     /// The target thread has finished shutting down; no further work can be queued.
     Closed,

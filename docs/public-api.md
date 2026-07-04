@@ -54,7 +54,7 @@ pub fn runite::JoinError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt
 pub macro runite::join!
 pub macro runite::select!
 pub macro runite::try_join!
-pub enum runite::JoinError
+#[non_exhaustive] pub enum runite::JoinError
 pub runite::JoinError::Aborted
 pub runite::JoinError::Cancelled
 pub runite::JoinError::Panicked
@@ -816,7 +816,7 @@ pub async fn runite::signal::ctrl_c() -> std::io::error::Result<()>
 
 ```rust
 pub mod runite::signal::unix
-pub enum runite::signal::unix::SignalKind
+#[non_exhaustive] pub enum runite::signal::unix::SignalKind
 pub runite::signal::unix::SignalKind::Hangup
 pub runite::signal::unix::SignalKind::Interrupt
 pub runite::signal::unix::SignalKind::Quit
@@ -953,7 +953,7 @@ pub fn runite::sync::Semaphore::try_acquire(&self) -> core::option::Option<runit
 
 ```rust
 pub mod runite::task
-pub enum runite::task::JoinError
+#[non_exhaustive] pub enum runite::task::JoinError
 pub runite::task::JoinError::Aborted
 pub runite::task::JoinError::Cancelled
 pub runite::task::JoinError::Panicked
@@ -985,7 +985,7 @@ pub fn runite::task::BlockingJoinHandle<R>::poll(core::pin::Pin<&mut Self>, &mut
 
 ```rust
 pub mod runite::time
-pub enum runite::time::MissedTickBehavior
+#[non_exhaustive] pub enum runite::time::MissedTickBehavior
 pub runite::time::MissedTickBehavior::Burst
 pub runite::time::MissedTickBehavior::Delay
 pub runite::time::MissedTickBehavior::Skip

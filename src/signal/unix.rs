@@ -75,6 +75,7 @@ thread_local! {
 /// let kind = SignalKind::WindowChange;
 /// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum SignalKind {
     /// `SIGINT`, commonly sent by Ctrl-C.
     Interrupt,

@@ -43,6 +43,7 @@ use crate::{JoinHandle, spawn};
 /// assert!(saw_abort.get());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinError {
     /// The worker exited without producing a value.
     ///

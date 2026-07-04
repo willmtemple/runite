@@ -283,8 +283,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
 - [ ] **3.4 `UnixStream` implement `AsyncRead`/`AsyncWrite` + `shutdown` + split.**
 - [ ] **3.5 `Command::output()` → `Output { status, stdout, stderr }`; don't error on
   non-zero exit; close child stdin.**
-- [ ] **3.6 Panic story + `#[non_exhaustive]`.** `JoinError::Panicked`; mark `SignalKind`
+- [x] **3.6 Panic story + `#[non_exhaustive]`.** `JoinError::Panicked`; mark `SignalKind`
   (or make opaque w/ `from_raw`), `JoinError`, `QueueError`, `MissedTickBehavior`.
+  **Done:** `JoinError::Panicked` landed in 2.1 (the panic story). Added
+  `#[non_exhaustive]` to the four growable public enums — `JoinError`, `QueueError`,
+  `SignalKind`, `MissedTickBehavior` — so future variants (new signal kinds, new join
+  failure modes, new tick behaviors) are additive rather than breaking. Internal
+  exhaustive matches are unaffected; no external test needed a wildcard arm. API snapshot
+  updated. Kept `SignalKind` as an enum (rather than opaque + `from_raw`) since it now
+  grows non-breakingly.
 - [ ] **3.7 Conventions sweep.** `Debug` on all public types; `#[must_use]` on guards/
   lazy futures/handles; `Display`+`Error` on mpsc/oneshot errors; export `io::ext` future
   types; drop `TcpListener: Clone` for `try_clone`.
