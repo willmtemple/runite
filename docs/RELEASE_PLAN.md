@@ -443,6 +443,28 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   suite now has zero ignored lib tests. Also fixed the signal module doc still claiming
   the reader runs on the blocking pool (stale since 2.7's dedicated thread).
 
+## 0.1 addenda — complete the Hyper integration (added 2026-07-04)
+
+Scoped in after the feature-flag review: the `hyper` feature shipped client/http1
+transport glue only. HTTP services are not runite's headline use case, but there is no
+reason it can't serve them (people run services on Node constantly), so 0.1 should not
+artificially fence off hyper server and http2.
+
+- [ ] **H-1 `hyper::rt::Executor` + `hyper::rt::Timer` impls.** `RuniteExecutor`
+  (spawns hyper's internal futures — connection drivers, h2 streams — onto the current
+  runite thread) unlocks the http2 client/server builders; `RuniteTimer` (a
+  `Send + Sync` sleep built on the completion architecture + `set_timeout`, since
+  hyper's `Sleep` trait demands `Send + Sync` and runite's own `Sleep` is `Rc`-based)
+  unlocks `header_read_timeout`, http2 keep-alive, and every other timed hyper option
+  that currently panics with "no timer configured". Grow the optional hyper dep
+  features to `server` + `http2`. E2E tests: an http1 server served by runite (timer
+  armed via `header_read_timeout`), and an http2 client↔server round trip driven by
+  both impls.
+- [ ] **H-2 hyper transport impls for `UnixStream`.** Mirror the `TcpStream`
+  `hyper::rt::Read`/`Write` impls onto `UnixStream` (same stashed pending-op +
+  `ReadOverflow` machinery since 3.4) so local HTTP over Unix-domain sockets — Docker
+  socket, systemd services — works. E2E test over a socketpair.
+
 ## Performance (0.1-eligible)
 
 - [ ] **P-1 Batched/deferred submission** (also fixes 0.2). Flush once per turn via
