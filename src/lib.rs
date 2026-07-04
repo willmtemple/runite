@@ -1,9 +1,10 @@
-//! Async runtime, I/O, and concurrency primitives for `runite`.
+//! An event-loop-per-thread async runtime with JavaScript-style scheduling,
+//! built for interactive applications.
 //!
-//! `runite` is an event-loop-per-thread async runtime. Each runtime thread owns
-//! a single-threaded event loop with JavaScript-style microtask/macrotask
-//! scheduling, backed by a platform-specific async I/O backend (io_uring on
-//! Linux, kqueue on macOS). Tasks on a thread are `!Send` and never migrate, so
+//! Each `runite` runtime thread owns a single-threaded event loop with
+//! JavaScript-style microtask/macrotask scheduling, backed by a
+//! platform-specific async I/O backend (io_uring on Linux, kqueue on macOS,
+//! IOCP on Windows). Tasks on a thread are `!Send` and never migrate, so
 //! most runtime state needs no locking; explicit [worker threads](spawn_worker)
 //! provide parallelism and communicate through [channels](channel) and
 //! [`ThreadHandle`]s.
@@ -173,12 +174,6 @@ pub mod time;
 #[doc(hidden)]
 pub mod macros;
 
-/// Marks `fn main` as the runtime entry point.
-///
-/// Works for both a synchronous `fn main()` and an `async fn main()`: the macro
-/// inspects the signature and dispatches accordingly. It generates a real Rust
-/// `main` that queues the function body (or its returned future) onto the main
-/// runtime thread before calling [`run`].
 pub use runite_proc_macros::{main, test};
 
 #[cfg(any(
