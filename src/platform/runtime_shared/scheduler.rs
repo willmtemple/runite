@@ -407,19 +407,7 @@ pub fn run<R: Runtime>() {
     loop {
         drain_all::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            run_guarded(task);
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -524,19 +512,7 @@ pub fn run_until_stalled<R: Runtime>() {
     loop {
         drain_all::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            run_guarded(task);
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -569,19 +545,7 @@ pub fn run_ready_tasks<R: Runtime>() {
         drain_remote_tasks::<R>();
         drain_completed_workers::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            run_guarded(task);
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -643,19 +607,7 @@ pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
         // probe: `block_on` exits on the future, not on loop quiescence.
         drain_all::<R>();
 
-        let mut microtasks_run: u64 = 0;
-        while let Some(task) = pop_microtask() {
-            run_guarded(task);
-            microtasks_run += 1;
-        }
-        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
-            tracing::warn!(
-                target: trace_targets::SCHEDULER,
-                event = "microtask_starvation",
-                count = microtasks_run,
-                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
-            );
-        }
+        drain_microtasks();
 
         if let Some(task) = pop_macrotask::<R>() {
             run_guarded(task);
@@ -703,6 +655,29 @@ impl Wake for BlockOnWaker {
 }
 
 // -- Internal scheduler primitives ------------------------------------------
+
+/// Runs the microtask queue to exhaustion (one checkpoint), warning the moment
+/// a single checkpoint crosses the starvation threshold.
+///
+/// The warning fires from *inside* the loop, once, on crossing: a checkpoint
+/// that never empties — a task chain that keeps scheduling new microtasks
+/// without ever yielding to a macro turn, the exact pathology this warning
+/// exists to flag — would never reach an after-the-loop check at all.
+fn drain_microtasks() {
+    let mut microtasks_run: u64 = 0;
+    while let Some(task) = pop_microtask() {
+        run_guarded(task);
+        microtasks_run += 1;
+        if microtasks_run == MICROTASK_STARVATION_THRESHOLD {
+            tracing::warn!(
+                target: trace_targets::SCHEDULER,
+                event = "microtask_starvation",
+                threshold = MICROTASK_STARVATION_THRESHOLD,
+                "a single microtask checkpoint has run {MICROTASK_STARVATION_THRESHOLD} tasks without yielding; macrotask handlers (timers, I/O) are being starved",
+            );
+        }
+    }
+}
 
 /// Runs one scheduled unit of work (a macrotask or microtask closure) with a
 /// panic firewall.
