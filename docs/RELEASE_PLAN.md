@@ -414,8 +414,27 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `publish-dry-run` job for `runite-proc-macros` (re-verified locally); `runite` itself
   cannot be dry-run until its path+version dependency exists on crates.io — the release
   workflow's verify build covers it, as its comment documents.
-- [ ] **4.4 Fix ARCHITECTURE.md drift** (4 stale claims) and move the microtask-starvation
-  warning inside the drain loop (`scheduler.rs:376-388`).
+- [x] **4.4 Fix ARCHITECTURE.md drift** (4 stale claims) and move the microtask-starvation
+  warning inside the drain loop (`scheduler.rs:376-388`). **Done — the drift was far wider
+  than 4 claims.** Starvation warning: extracted the four duplicated drain loops into
+  `drain_microtasks()`, which warns from *inside* the loop on crossing the threshold (a
+  never-emptying checkpoint previously never reached the after-loop check); committed
+  separately. ARCHITECTURE revision: the doc predated the `runtime_shared` extraction and
+  most of this release effort. Fixed: the "[future]" driver-abstraction section that had
+  since shipped (now describes the real `Box<dyn DriverBackend>` type-erasure design);
+  `queue_task`→`queue_macrotask` naming throughout; all shared-scheduler file references
+  (`platform/linux/runtime.rs` → `runtime_shared/*`); timer handles described as
+  `Rc<()>`-based `!Send` (they are sendable `{id, generation}` tokens); the claim that
+  same-thread I/O completions wake as microtasks (they are local macrotasks via
+  `WakeClass`); the claim that the driver is re-polled after every microtask (once per
+  turn); "phase 9"/"top-10 refactor" process-speak (→ ROADMAP references). Added the
+  missing architecture from this effort: `Send+Sync` Arc waker + task registry, panic
+  isolation (new section), reentrancy guard, `block_on`, the internal-wake reserved
+  queue path, the read-stash/`ReadOverflow` cancel-safety model, notifier `OwnedFd` dup,
+  SQ-tail rollback and CQ-overflow detection in the safety invariants, and corrected
+  parity-matrix rows (close is synchronous `Drop`; `set_len` has the `ftruncate`
+  fallback). Header now states the doc describes 0.1 as implemented, intent lives in
+  ROADMAP.
 - [x] **4.5 Regression tests** for 1.1/1.2/1.3/1.7 + a non-`#[ignore]` signal e2e test.
   **Done:** the 1.1/1.2/1.3/1.7 regression tests landed with their Tier-1 fixes (each
   verified failing against the pre-fix code). Signal e2e: `signal_receives_sigwinch`
