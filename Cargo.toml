@@ -33,7 +33,7 @@ hyper = { version = "1.8", default-features = false, features = [
   "http1",
 ], optional = true }
 libc = "0.2"
-runite-proc-macros = { package = "runite-proc-macros", version = "0.1.0", path = "./proc_macros" }
+runite-proc-macros = { package = "runite-proc-macros", version = "=0.1.0", path = "./proc_macros" }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
