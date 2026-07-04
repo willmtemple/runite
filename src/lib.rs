@@ -144,9 +144,10 @@ pub(crate) mod trace_targets {
     pub const RUNTIME: &str = "runite::runtime";
     pub const SCHEDULER: &str = "runite::scheduler";
 
-    #[cfg(debug_assertions)]
+    // Unconditional (not #[cfg(debug_assertions)]): always-on logging (e.g.
+    // the task-panic report) uses these too, and cfg-gated constants create a
+    // "compiles under dev, breaks under `cargo bench`/release" trap.
     pub const TIMER: &str = "runite::timer";
-    #[cfg(debug_assertions)]
     pub const ASYNC: &str = "runite::async";
 }
 
