@@ -12,6 +12,7 @@ use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
@@ -598,6 +599,106 @@ pub fn run_ready_tasks<R: Runtime>() {
             state.shared.closing.store(false, Ordering::Release);
         });
         return;
+    }
+}
+
+/// Drives the current thread's event loop until `future` resolves, then returns
+/// its output.
+///
+/// Unlike [`run`], which runs until the loop is fully idle, `block_on` returns
+/// as soon as the supplied future completes; any other tasks still queued on the
+/// thread are left in place for a later `run`/`block_on`. The future is driven in
+/// place (not spawned), so it may borrow local state and need not be `Send` or
+/// `'static`.
+///
+/// # Panics
+///
+/// Panics if runtime initialization fails, if the driver returns an unexpected
+/// error, or if called re-entrantly from within a task already running on this
+/// thread (see the reentrancy guard shared with [`run`]).
+pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
+    with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
+
+    let owner = with_installed_thread(|state| state.handle());
+    // `woken` starts true so the future is polled once before the loop parks.
+    let block_waker = Arc::new(BlockOnWaker {
+        woken: AtomicBool::new(true),
+        owner,
+    });
+    let waker = Waker::from(Arc::clone(&block_waker));
+    let mut context = Context::from_waker(&waker);
+
+    let mut future = core::pin::pin!(future);
+
+    loop {
+        // Poll the top-level future whenever it may have made progress.
+        if block_waker.woken.swap(false, Ordering::AcqRel)
+            && let Poll::Ready(output) = future.as_mut().poll(&mut context)
+        {
+            return output;
+        }
+
+        // Pump one turn of the loop, mirroring `run` minus the idle-shutdown
+        // probe: `block_on` exits on the future, not on loop quiescence.
+        drain_all::<R>();
+
+        let mut microtasks_run: u64 = 0;
+        while let Some(task) = pop_microtask() {
+            run_guarded(task);
+            microtasks_run += 1;
+        }
+        if microtasks_run >= MICROTASK_STARVATION_THRESHOLD {
+            tracing::warn!(
+                target: trace_targets::SCHEDULER,
+                event = "microtask_starvation",
+                count = microtasks_run,
+                "microtask queue ran {microtasks_run} tasks in a single turn; macrotask handlers may be starved",
+            );
+        }
+
+        if let Some(task) = pop_macrotask::<R>() {
+            run_guarded(task);
+            continue;
+        }
+
+        drain_all::<R>();
+
+        // If the future was woken during draining, or there is more ready work,
+        // handle it before considering a blocking wait.
+        if block_waker.woken.load(Ordering::Acquire) || has_ready_work() {
+            continue;
+        }
+
+        // Nothing runnable and the future is pending: block for external events
+        // (I/O completions, timers, cross-thread wakes), then re-check.
+        with_installed_thread(|state| {
+            state.driver.wait().expect("driver wait should succeed");
+        });
+    }
+}
+
+/// Waker for the top-level [`block_on`] future. Marks that the future should be
+/// re-polled and, for a cross-thread wake, nudges the driver so a parked
+/// `block_on` loop wakes up.
+struct BlockOnWaker {
+    woken: AtomicBool,
+    owner: ThreadHandle,
+}
+
+impl Wake for BlockOnWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        // A same-thread wake happens while the loop is actively running (never
+        // parked in `driver.wait`), so the flag alone suffices. A cross-thread
+        // wake may find the loop parked; notify the driver to unblock it.
+        if !self.owner.is_current() {
+            self.owner.shared.notify();
+        }
     }
 }
 

@@ -376,6 +376,42 @@ mod runtime_api {
         imp::run()
     }
 
+    /// Drives the current thread's event loop until `future` completes, then
+    /// returns its output.
+    ///
+    /// This is the value-returning entry point: where [`run`] drives the loop to
+    /// quiescence and returns `()`, `block_on` returns as soon as the given
+    /// future resolves, leaving any other tasks you have spawned queued for a
+    /// later `run`/`block_on`. The future is driven in place rather than spawned,
+    /// so — unlike [`spawn`] — it may borrow local state and need not be `Send`
+    /// or `'static`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if runtime or driver initialization fails, if the driver returns
+    /// an unexpected error, or if called from within a task already running on
+    /// this thread (the event loop cannot be re-entered).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sum = runite::block_on(async {
+    ///     let mut total = 0;
+    ///     for value in 1..=4 {
+    ///         total += value;
+    ///         runite::yield_now().await;
+    ///     }
+    ///     total
+    /// });
+    /// assert_eq!(sum, 10);
+    /// ```
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: core::future::Future,
+    {
+        imp::block_on(future)
+    }
+
     /// Drives the event loop until it would next block waiting on the I/O driver.
     ///
     /// Runs all currently ready tasks, microtasks, and expired timers, then
