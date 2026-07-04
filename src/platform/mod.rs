@@ -5,8 +5,12 @@ pub mod runtime_shared;
 pub mod linux;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod macos_aarch64;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 pub use linux as current;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use macos_aarch64 as current;
+#[cfg(windows)]
+pub use windows as current;

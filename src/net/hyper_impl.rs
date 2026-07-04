@@ -63,8 +63,7 @@ impl HyperRead for TcpStream {
                 let n = data.len().min(buf.remaining());
                 buf.put_slice(&data[..n]);
                 if data.len() > n {
-                    this.read_overflow =
-                        Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
+                    this.read_overflow = Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
                 }
                 Poll::Ready(Ok(()))
             }

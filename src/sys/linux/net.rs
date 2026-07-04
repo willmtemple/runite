@@ -24,13 +24,16 @@ use crate::op::completion::completion_for_current_thread;
 use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
 use crate::platform::linux::runtime::with_current_driver;
 use crate::platform::linux::uring::{
-    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN,
-    IORING_OP_RECV, IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN,
-    IORING_OP_SOCKET, IoUringCqe, IoUringSqe,
+    IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN, IORING_OP_RECV,
+    IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN, IORING_OP_SOCKET,
+    IoUringCqe, IoUringSqe,
 };
 use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
+
+/// Peek flag for `recv`-family operations, re-exported for the public layer.
+pub const MSG_PEEK: i32 = libc::MSG_PEEK;
 
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
@@ -1509,10 +1512,9 @@ mod tests {
         let observed_task = Arc::clone(&observed);
 
         spawn(async move {
-            let listener =
-                bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
-                    .await
-                    .expect("listener should bind");
+            let listener = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
+                .await
+                .expect("listener should bind");
             *observed_task.lock().expect("result mutex poisoned") =
                 Some(reuse_addr(listener.as_raw_fd()).expect("getsockopt should succeed"));
         });

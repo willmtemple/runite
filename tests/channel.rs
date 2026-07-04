@@ -195,8 +195,7 @@ fn watch_stale_completion_does_not_regress_version() {
 
         // Register a waiter (version 0), then let it time out so the `changed()`
         // future is dropped while the receiver's internal wait slot persists.
-        let _ =
-            runite::time::timeout(Duration::from_millis(10), receiver.changed()).await;
+        let _ = runite::time::timeout(Duration::from_millis(10), receiver.changed()).await;
 
         // Complete the persisted (never re-polled) waiter, then advance past it.
         sender.send(1).unwrap();

@@ -18,9 +18,9 @@ use crate::platform::linux::runtime::{
     QueueError, ThreadHandle, current_thread_handle, with_current_driver,
 };
 use crate::platform::linux::uring::{
-    IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
-    IORING_OP_MKDIRAT, IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX,
-    IORING_OP_UNLINKAT, IORING_OP_WRITE, IoUringCqe,
+    IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE, IORING_OP_MKDIRAT,
+    IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX, IORING_OP_UNLINKAT,
+    IORING_OP_WRITE, IoUringCqe,
 };
 
 const STATX_BASIC_MASK: u32 =
@@ -568,13 +568,15 @@ fn creation_mode(options: &OpenOptions) -> io::Result<i32> {
         }
     }
 
-    Ok(match (options.create, options.truncate, options.create_new) {
-        (false, false, false) => 0,
-        (true, false, false) => libc::O_CREAT,
-        (false, true, false) => libc::O_TRUNC,
-        (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
-        (_, _, true) => libc::O_CREAT | libc::O_EXCL,
-    })
+    Ok(
+        match (options.create, options.truncate, options.create_new) {
+            (false, false, false) => 0,
+            (true, false, false) => libc::O_CREAT,
+            (false, true, false) => libc::O_TRUNC,
+            (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
+            (_, _, true) => libc::O_CREAT | libc::O_EXCL,
+        },
+    )
 }
 
 fn metadata_flags(follow_symlinks: bool) -> i32 {
@@ -590,6 +592,7 @@ fn raw_metadata_from_statx(statx: &libc::statx) -> RawMetadata {
         file_type: file_type_from_mode(statx.stx_mode),
         mode: u32::from(statx.stx_mode),
         len: statx.stx_size,
+        platform: Default::default(),
     }
 }
 

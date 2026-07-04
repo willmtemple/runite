@@ -85,9 +85,17 @@ before committing.
 
 ## Platform & hardening
 
-- **Windows backend (IOCP)**, with thread offload where IOCP does not apply.
-  Descriptor interop for it lands as `AsSocket`/`AsHandle` under
-  `#[cfg(windows)]`, parallel to the existing `#[cfg(unix)]` fd interop.
+- **Windows follow-ups** (the IOCP backend shipped in 0.1; see `docs/WINDOWS.md`):
+  - Unix-domain sockets via `AF_UNIX` (Windows 10 1803+, stream-only) so
+    `runite::net::unix` can exist on Windows.
+  - High-resolution runtime timers by associating a
+    `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer with the completion port via
+    `NtAssociateWaitCompletionPacket` (the high-resolution timer kind rejects
+    the APC route used today, which is bounded by the ~15.6 ms interrupt
+    period).
+  - `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` on sockets to elide completion
+    packets for synchronously-completed operations (needs the documented
+    non-IFS-LSP caveat handled).
 - Sanitizers (ASan/TSan) in CI, and Miri for the logic crates (requires a mock
   driver).
 - CI on an io_uring-limited kernel, so the readiness/synchronous fallbacks are

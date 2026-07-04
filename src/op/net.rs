@@ -1,8 +1,12 @@
 //! Logical networking operations shared between the public API and Linux backend.
 
+use crate::sys::handle::RawSock;
 use std::net::{Shutdown, SocketAddr};
-use std::os::fd::RawFd;
 
+// `Socket`/`Bind`/`Listen` are constructed only by the Unix backends and the
+// Unix-domain-socket layer; the Windows backend reaches its socket/bind/listen
+// helpers directly.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug)]
 pub enum NetOp {
     Socket {
@@ -12,50 +16,50 @@ pub enum NetOp {
         flags: u32,
     },
     Connect {
-        fd: RawFd,
+        fd: RawSock,
         addr: SocketAddr,
     },
     Bind {
-        fd: RawFd,
+        fd: RawSock,
         addr: SocketAddr,
     },
     Listen {
-        fd: RawFd,
+        fd: RawSock,
         backlog: i32,
     },
     Accept {
-        fd: RawFd,
+        fd: RawSock,
     },
     Send {
-        fd: RawFd,
+        fd: RawSock,
         data: Vec<u8>,
         flags: i32,
     },
     SendTo {
-        fd: RawFd,
+        fd: RawSock,
         target: SocketAddr,
         data: Vec<u8>,
         flags: i32,
     },
     Recv {
-        fd: RawFd,
+        fd: RawSock,
         len: usize,
         flags: i32,
     },
     RecvFrom {
-        fd: RawFd,
+        fd: RawSock,
         len: usize,
         flags: i32,
     },
     Shutdown {
-        fd: RawFd,
+        fd: RawSock,
         how: Shutdown,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct AcceptedSocket {
-    pub fd: RawFd,
+    pub fd: RawSock,
     pub peer_addr: SocketAddr,
 }
 

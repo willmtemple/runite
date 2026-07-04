@@ -1,28 +1,48 @@
-//! macOS filesystem backend.
+//! Windows filesystem backend.
+//!
+//! File reads and writes are true completion-based I/O: handles are opened
+//! with `FILE_FLAG_OVERLAPPED`, associated with the runtime thread's
+//! completion port, and driven by overlapped `ReadFile`/`WriteFile` (see
+//! `docs/WINDOWS.md`). Operations with no overlapped form — open, metadata,
+//! directory scans, flush, truncation — are offloaded to the blocking pool,
+//! mirroring the macOS backend.
+//!
+//! Cursor semantics: overlapped I/O always takes an explicit offset, so the
+//! "current position" reads and writes bracket each operation with the file
+//! object's shared pointer (`SetFilePointerEx`). Duplicated handles share the
+//! file object and therefore the cursor, matching Unix `dup`.
 
 use std::collections::VecDeque;
-use std::ffi::CString;
 use std::future::poll_fn;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::mem::ManuallyDrop;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BEGIN,
+    FILE_CURRENT, FILE_END, FILE_FLAG_OVERLAPPED, SetFilePointerEx,
+};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
 use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, RawDirEntry, RawMetadata};
 use crate::platform::current::runtime::{QueueError, ThreadHandle, current_thread_handle};
 use crate::sys::blocking::spawn_blocking;
+use crate::sys::handle::{OwnedFile, PlatformMetadata, RawFile, raw_file};
+use crate::sys::windows::overlapped;
 
-pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
+pub async fn open(op: FsOp) -> io::Result<OwnedFile> {
     let FsOp::Open { path, options } = op else {
         unreachable!("open backend called with non-open op");
     };
 
-    offload(move || {
+    let file = offload(move || {
         let mut open = std::fs::OpenOptions::new();
         open.read(options.read)
             .write(options.write)
@@ -30,11 +50,29 @@ pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
             .truncate(options.truncate)
             .create(options.create)
             .create_new(options.create_new)
-            .mode(0o666);
+            .custom_flags(options.platform.custom_flags | FILE_FLAG_OVERLAPPED);
+        if let Some(access) = options.platform.access_mode {
+            open.access_mode(access);
+        }
+        if let Some(share) = options.platform.share_mode {
+            open.share_mode(share);
+        }
+        if options.platform.attributes != 0 {
+            open.attributes(options.platform.attributes);
+        }
+        if options.platform.security_qos_flags != 0 {
+            open.security_qos_flags(options.platform.security_qos_flags);
+        }
         let file = open.open(path)?;
-        Ok(unsafe { OwnedFd::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(file)) })
+        Ok(OwnedHandle::from(file))
     })
-    .await
+    .await?;
+
+    // Bind the fresh handle to this runtime thread's completion port so
+    // overlapped reads and writes post their packets here. Runs after the
+    // offload so it executes on the runtime thread that owns the driver.
+    overlapped::associate_file(raw_file(&file))?;
+    Ok(file)
 }
 
 pub async fn read(op: FsOp) -> io::Result<Vec<u8>> {
@@ -42,26 +80,15 @@ pub async fn read(op: FsOp) -> io::Result<Vec<u8>> {
         unreachable!("read backend called with non-read op");
     };
 
-    offload(move || {
-        let mut buffer = vec![0; len];
-        let read = match offset {
-            Some(offset) => unsafe {
-                libc::pread(
-                    fd,
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    len,
-                    offset as libc::off_t,
-                )
-            },
-            None => unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), len) },
-        };
-        if read < 0 {
-            return Err(io::Error::last_os_error());
+    match offset {
+        Some(offset) => overlapped::read_at(fd, len, offset).await,
+        None => {
+            let position = seek(fd, std::io::SeekFrom::Current(0))?;
+            let data = overlapped::read_at(fd, len, position).await?;
+            advance_cursor(fd, position, data.len() as u64);
+            Ok(data)
         }
-        buffer.truncate(read as usize);
-        Ok(buffer)
-    })
-    .await
+    }
 }
 
 pub async fn write(op: FsOp) -> io::Result<usize> {
@@ -69,24 +96,27 @@ pub async fn write(op: FsOp) -> io::Result<usize> {
         unreachable!("write backend called with non-write op");
     };
 
-    offload(move || {
-        let written = match offset {
-            Some(offset) => unsafe {
-                libc::pwrite(
-                    fd,
-                    data.as_ptr().cast::<libc::c_void>(),
-                    data.len(),
-                    offset as libc::off_t,
-                )
-            },
-            None => unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) },
-        };
-        if written < 0 {
-            return Err(io::Error::last_os_error());
+    match offset {
+        Some(offset) => overlapped::write_at(fd, data, offset).await,
+        None => {
+            let position = seek(fd, std::io::SeekFrom::Current(0))?;
+            let written = overlapped::write_at(fd, data, position).await?;
+            advance_cursor(fd, position, written as u64);
+            Ok(written)
         }
-        Ok(written as usize)
-    })
-    .await
+    }
+}
+
+/// Moves the shared file cursor past a completed cursor-based operation.
+///
+/// Best-effort: append-mode handles ignore write offsets entirely (the kernel
+/// appends atomically), and a failed pointer update only affects subsequent
+/// cursor-based operations on the same handle.
+fn advance_cursor(fd: RawFile, position: u64, transferred: u64) {
+    let _ = seek(
+        fd,
+        std::io::SeekFrom::Start(position.saturating_add(transferred)),
+    );
 }
 
 pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
@@ -108,12 +138,8 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
                 }
             }
             MetadataTarget::File(fd) => {
-                let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-                let result = unsafe { libc::fstat(fd, &mut stat) };
-                if result < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                return Ok(raw_metadata_from_stat(&stat));
+                let file = borrow_file(fd);
+                file.metadata()
             }
         }?;
         Ok(raw_metadata_from_std(&metadata))
@@ -121,34 +147,12 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
     .await
 }
 
-/// Durably flushes a file to disk on macOS.
-///
-/// Plain `fsync(2)` on macOS does **not** flush the drive's write cache, so it
-/// is not a real durability barrier; `fcntl(F_FULLFSYNC)` is. `std::fs` uses
-/// `F_FULLFSYNC` for both `sync_all` and `sync_data` on Apple targets for this
-/// reason, falling back to `fsync` on filesystems (e.g. some network mounts)
-/// that do not support it. We match that behavior.
-fn full_fsync(fd: RawFd) -> io::Result<()> {
-    match cvt(unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) }) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOTTY)
-            ) =>
-        {
-            cvt(unsafe { libc::fsync(fd) }).map(|_| ())
-        }
-        Err(error) => Err(error),
-    }
-}
-
 pub async fn sync_all(op: FsOp) -> io::Result<()> {
     let FsOp::SyncAll { fd } = op else {
         unreachable!("sync_all backend called with non-sync_all op");
     };
 
-    offload(move || full_fsync(fd)).await
+    offload(move || borrow_file(fd).sync_all()).await
 }
 
 pub async fn sync_data(op: FsOp) -> io::Result<()> {
@@ -156,7 +160,7 @@ pub async fn sync_data(op: FsOp) -> io::Result<()> {
         unreachable!("sync_data backend called with non-sync_data op");
     };
 
-    offload(move || full_fsync(fd)).await
+    offload(move || borrow_file(fd).sync_data()).await
 }
 
 pub async fn set_len(op: FsOp) -> io::Result<()> {
@@ -164,48 +168,75 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         unreachable!("set_len backend called with non-set_len op");
     };
 
-    offload(move || cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())).await
+    offload(move || borrow_file(fd).set_len(len)).await
 }
 
-/// Repositions the file's kernel cursor. `lseek(2)` on a regular file is a fast
-/// metadata operation that does not block, so it runs inline on the event loop.
-pub fn seek(fd: RawFd, pos: std::io::SeekFrom) -> io::Result<u64> {
-    let (whence, offset) = match pos {
-        std::io::SeekFrom::Start(n) => (libc::SEEK_SET, n as libc::off_t),
-        std::io::SeekFrom::End(n) => (libc::SEEK_END, n as libc::off_t),
-        std::io::SeekFrom::Current(n) => (libc::SEEK_CUR, n as libc::off_t),
+/// Repositions the file's kernel cursor. `SetFilePointerEx` is a fast
+/// metadata operation that does not block, so it runs inline on the event
+/// loop.
+pub fn seek(fd: RawFile, pos: std::io::SeekFrom) -> io::Result<u64> {
+    let (method, offset) = match pos {
+        std::io::SeekFrom::Start(n) => (
+            FILE_BEGIN,
+            i64::try_from(n).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "seek offset exceeds i64 range")
+            })?,
+        ),
+        std::io::SeekFrom::End(n) => (FILE_END, n),
+        std::io::SeekFrom::Current(n) => (FILE_CURRENT, n),
     };
-    // SAFETY: `lseek` takes only a descriptor and integer arguments.
-    let result = unsafe { libc::lseek(fd, offset, whence) };
-    if result < 0 {
+
+    let mut new_position = 0i64;
+    // SAFETY: `fd` names an open file handle and `new_position` is a valid
+    // out-pointer.
+    let ok = unsafe { SetFilePointerEx(fd.as_handle(), offset, &mut new_position, method) };
+    if ok == 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(result as u64)
+        Ok(new_position as u64)
     }
 }
 
-pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
+pub async fn try_clone(op: FsOp) -> io::Result<OwnedFile> {
     let FsOp::Duplicate { fd } = op else {
         unreachable!("try_clone backend called with non-duplicate op");
     };
 
-    offload(move || {
-        let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
-        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    })
-    .await
+    // `DuplicateHandle` within one process never blocks; run it inline like
+    // the Linux backend's `F_DUPFD_CLOEXEC`.
+    let mut duplicated = std::ptr::null_mut();
+    // SAFETY: `fd` is an open handle owned by the caller; both process handles
+    // are the current-process pseudo handle; `duplicated` is a valid
+    // out-pointer.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            fd.as_handle(),
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `duplicated` is a fresh handle exclusively owned here.
+    let file = unsafe { OwnedHandle::from_raw_handle(duplicated) };
+
+    // The duplicate shares the original's file object, which is already bound
+    // to a completion port; tolerate the re-association failure.
+    overlapped::associate_file_reused(raw_file(&file))?;
+    Ok(file)
 }
 
 pub async fn create_dir(op: FsOp) -> io::Result<()> {
-    let FsOp::CreateDir { path, mode } = op else {
+    let FsOp::CreateDir { path, mode: _ } = op else {
         unreachable!("create_dir backend called with non-create_dir op");
     };
 
-    offload(move || {
-        let c_path = path_to_c_string(path)?;
-        cvt(unsafe { libc::mkdir(c_path.as_ptr(), mode as libc::mode_t) }).map(|_| ())
-    })
-    .await
+    offload(move || std::fs::create_dir(path)).await
 }
 
 pub async fn remove_file(op: FsOp) -> io::Result<()> {
@@ -396,69 +427,64 @@ async fn offload<T: Send + 'static>(
     future.await
 }
 
-fn path_to_c_string(path: PathBuf) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains interior NUL bytes",
-        )
-    })
+/// Borrows a raw handle as a [`std::fs::File`] without taking ownership, so
+/// std's handle-based metadata/flush/truncate wrappers can be reused. The
+/// `ManuallyDrop` prevents the borrowed handle from being closed.
+fn borrow_file(fd: RawFile) -> ManuallyDrop<std::fs::File> {
+    // SAFETY: `fd` names a handle the caller keeps open for the duration of
+    // the blocking operation; `ManuallyDrop` ensures ownership never
+    // transfers.
+    ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(fd.as_handle()) })
 }
 
 fn raw_metadata_from_std(metadata: &std::fs::Metadata) -> RawMetadata {
     let file_type = metadata.file_type();
-    let kind = if file_type.is_file() {
-        FileType::File
+    let kind = if file_type.is_symlink() {
+        FileType::Symlink
     } else if file_type.is_dir() {
         FileType::Directory
-    } else if file_type.is_symlink() {
-        FileType::Symlink
-    } else if file_type.is_block_device() {
-        FileType::BlockDevice
-    } else if file_type.is_char_device() {
-        FileType::CharacterDevice
-    } else if file_type.is_fifo() {
-        FileType::Fifo
-    } else if file_type.is_socket() {
-        FileType::Socket
+    } else if file_type.is_file() {
+        FileType::File
     } else {
         FileType::Unknown
     };
 
+    let attributes = metadata.file_attributes();
+
     RawMetadata {
         file_type: kind,
-        // Full st_mode (type + permission bits), matching std and the Linux
-        // backend rather than masking to permission bits only.
-        mode: metadata.mode(),
+        mode: synthesize_mode(attributes, kind),
         len: metadata.len(),
-        platform: Default::default(),
+        platform: PlatformMetadata {
+            file_attributes: attributes,
+        },
     }
 }
 
-fn raw_metadata_from_stat(stat: &libc::stat) -> RawMetadata {
-    let kind = match stat.st_mode & libc::S_IFMT {
-        libc::S_IFREG => FileType::File,
-        libc::S_IFDIR => FileType::Directory,
-        libc::S_IFLNK => FileType::Symlink,
-        libc::S_IFBLK => FileType::BlockDevice,
-        libc::S_IFCHR => FileType::CharacterDevice,
-        libc::S_IFIFO => FileType::Fifo,
-        libc::S_IFSOCK => FileType::Socket,
-        _ => FileType::Unknown,
+/// Synthesizes a POSIX-style `st_mode` from Windows file attributes so
+/// `Metadata::mode()` has consistent cross-platform shape: the file-type bits
+/// match `S_IFMT` values, and the permission bits reflect
+/// `FILE_ATTRIBUTE_READONLY` (write bits cleared when set). This mirrors the
+/// mapping used by MSYS/Cygwin-style environments.
+fn synthesize_mode(attributes: u32, kind: FileType) -> u32 {
+    const S_IFDIR: u32 = 0o040000;
+    const S_IFREG: u32 = 0o100000;
+    const S_IFLNK: u32 = 0o120000;
+
+    let (type_bits, base_permissions) = match kind {
+        FileType::Directory => (S_IFDIR, 0o777),
+        FileType::Symlink => (S_IFLNK, 0o777),
+        _ => (S_IFREG, 0o666),
     };
 
-    RawMetadata {
-        file_type: kind,
-        mode: u32::from(stat.st_mode),
-        len: stat.st_size as u64,
-        platform: Default::default(),
-    }
-}
-
-fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
-    if value < 0 {
-        Err(io::Error::last_os_error())
+    let permissions = if attributes & FILE_ATTRIBUTE_READONLY != 0
+        && attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    {
+        base_permissions & !0o222
     } else {
-        Ok(value)
-    }
+        base_permissions
+    };
+
+    type_bits | permissions
 }

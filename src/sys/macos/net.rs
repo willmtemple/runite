@@ -17,6 +17,9 @@ use crate::sys::blocking::spawn_blocking;
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
+/// Peek flag for `recv`-family operations, re-exported for the public layer.
+pub const MSG_PEEK: i32 = libc::MSG_PEEK;
+
 type RecvFuture = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type SendFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type ShutdownFuture = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;

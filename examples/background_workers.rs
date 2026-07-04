@@ -75,7 +75,10 @@ async fn main() {
                 progress.ticks += 1;
                 progress.worst_jitter = progress.worst_jitter.max(jitter);
                 let done = progress.finished;
-                print!("\r[heartbeat {:>3}] jobs done: {done}/{jobs} ", progress.ticks);
+                print!(
+                    "\r[heartbeat {:>3}] jobs done: {done}/{jobs} ",
+                    progress.ticks
+                );
                 use std::io::Write as _;
                 let _ = std::io::stdout().flush();
                 if done == jobs {

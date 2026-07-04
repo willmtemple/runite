@@ -8,10 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — 0.1.0
 
 Initial public release of `runite`: an event-loop-per-thread async runtime for
-Rust, built on io_uring (Linux `x86_64`/`aarch64`) and kqueue (macOS
-`aarch64`), with JavaScript-style deterministic microtask/macrotask scheduling.
-Futures on a runtime thread are `!Send` and never migrate; explicit worker
-threads and channels provide parallelism.
+Rust, built on io_uring (Linux `x86_64`/`aarch64`), kqueue (macOS `aarch64`),
+and I/O completion ports (Windows `x86_64`), with JavaScript-style
+deterministic microtask/macrotask scheduling. Futures on a runtime thread are
+`!Send` and never migrate; explicit worker threads and channels provide
+parallelism.
 
 ### Runtime & scheduling
 
@@ -73,9 +74,13 @@ threads and channels provide parallelism.
 - `sync`: async `Mutex`, `RwLock` (FIFO-fair), `Semaphore`, `Notify`, and
   `OnceCell`; `signal`: Unix signal streams plus a cross-platform `ctrl_c`;
   `stdio`: async stdin/stdout/stderr.
-- Unix descriptor interop: `AsFd`/`AsRawFd`/`From<OwnedFd>` and `from_std`
-  adopters on every fd-backed type, and `fd::wait_readable`/`wait_writable`
-  readiness helpers taking `impl AsFd` (all `#[cfg(unix)]`).
+- Descriptor/handle interop: on Unix, `AsFd`/`AsRawFd`/`From<OwnedFd>` and
+  `from_std` adopters on every fd-backed type plus
+  `fd::wait_readable`/`wait_writable` readiness helpers taking `impl AsFd`
+  (all `#[cfg(unix)]`); on Windows, the parallel
+  `AsHandle`/`AsRawHandle`/`AsSocket`/`AsRawSocket` impls with
+  `From<OwnedHandle>`/`From<OwnedSocket>`/`from_std` adoption (which associates
+  the handle with the completion port).
 
 ### Platform notes
 
@@ -86,6 +91,16 @@ threads and channels provide parallelism.
   CQ overflow and missing-feature conditions are detected and reported.
 - macOS `aarch64`: kqueue readiness plus a blocking pool for filesystem work;
   `sync_all`/`sync_data` use `F_FULLFSYNC` for real durability.
+- Windows `x86_64` (MSVC): one I/O completion port per runtime thread;
+  overlapped `ReadFile`/`WriteFile` for files and child pipes; overlapped
+  Winsock (`ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom`)
+  for TCP/UDP; `CancelIoEx`-based drop-cancellation; blocking-pool offload for
+  open/metadata/directory scans/DNS/console stdio; `RegisterWaitForSingleObject`
+  child-exit waits; a waitable-timer APC for runtime timers;
+  `runite::signal::windows` console control events backing the portable
+  `signal::ctrl_c`; and `runite::os::windows::fs` extensions. See
+  `docs/WINDOWS.md` for the design. `runite::fd` and `runite::net::unix` are
+  Unix-only, and `TcpSocket::set_reuseport` reports `Unsupported` on Windows.
 - Stable Rust only (MSRV 1.88); no nightly features.
 
 [Unreleased]: https://github.com/willmtemple/runite/commits/main

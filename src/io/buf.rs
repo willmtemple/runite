@@ -852,6 +852,9 @@ mod tests {
         });
 
         run();
-        assert_eq!(&*observed.borrow(), &["foo\n".to_string(), "bar\n".to_string()]);
+        assert_eq!(
+            &*observed.borrow(),
+            &["foo\n".to_string(), "bar\n".to_string()]
+        );
     }
 }
