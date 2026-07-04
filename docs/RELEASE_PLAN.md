@@ -290,7 +290,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   types; drop `TcpListener: Clone` for `try_clone`.
 - [ ] **3.8 fs semantic gaps.** `symlink_metadata` (so `is_symlink` can be true); `File::seek`;
   document/drop implicit `SO_REUSEADDR`; unify `Metadata::mode()` across platforms.
-- [ ] **3.9 Pin proc-macro dep `=0.1.0`.**
+- [x] **3.9 Pin proc-macro dep `=0.1.0`.** Done: `runite-proc-macros` dependency pinned to `=0.1.0` so the lockstep-versioned macro crate can never resolve to a mismatched version.
 - [ ] **3.10 Per-method cancel-safety docs.**
 
 ## Tier 4 — Release mechanics
