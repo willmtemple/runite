@@ -26,6 +26,25 @@ is in progress. It is **not** part of the 0.1 release; on Windows `runite` does
 not yet compile. The other unsupported targets fail to compile with a clear
 error.
 
+### Minimum Linux kernel
+
+The io_uring backend targets **Linux 6.1+** (current LTS), which is what CI
+tests. Older kernels may work subject to these io_uring feature requirements:
+
+- **5.6** — base ring operations (`openat`/`read`/`write`/`fsync`/`statx`/…);
+  required.
+- **5.18** — `MSG_RING`, used for cross-thread wakeups; required for
+  multithreaded runtimes (`spawn_worker`), optional for a single event loop.
+- File truncation (`OpenOptions::truncate`, `File::set_len`) uses `FTRUNCATE`
+  (6.9) and falls back to `ftruncate(2)` on older kernels.
+- Socket operations (`socket` 5.19, `bind`/`listen` 6.11, and
+  `connect`/`accept`/`send`/`recv`/`shutdown`) transparently fall back to
+  blocking syscalls on kernels that lack the opcode, so networking works below
+  these versions with reduced native-io_uring coverage.
+
+So the recommended 6.1 floor exercises every feature; the only hard lower bounds
+are 5.6 (single-threaded) and 5.18 (multithreaded).
+
 ## Installation
 
 ```toml

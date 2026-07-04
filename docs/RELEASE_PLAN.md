@@ -198,8 +198,18 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   same-thread `send`/`.await` deadlocks. Regression test
   `two_borrows_on_same_thread_do_not_deadlock` (hangs on the old design); public API
   unchanged.
-- [ ] **2.9 fs ops have no older-kernel fallback; min kernel undocumented.**
+- [x] **2.9 fs ops have no older-kernel fallback; min kernel undocumented.**
   Decide floor (~5.19 full / 5.18 multi-thread) and document, or add blocking-pool fallbacks.
+  **Done (both):** documented a precise kernel floor in `lib.rs` and `README.md` —
+  recommended **6.1 LTS** (what CI tests), with hard lower bounds of **5.6**
+  (single-threaded base ring) and **5.18** (`MSG_RING`, for `spawn_worker`
+  multithreading / cross-thread wakes). Audited the opcodes actually used: net socket
+  lifecycle ops (`socket` 5.19, `bind`/`listen` 6.11, connect/accept/send/recv/shutdown)
+  already fall back to blocking syscalls; the only no-fallback fs op newer than the base
+  ring was `IORING_OP_FTRUNCATE` (6.9), so `set_len` now falls back to an inline
+  `ftruncate(2)` (a fast metadata op, matching the net `*_sync` fallbacks). Net result:
+  the recommended 6.1 floor exercises every feature; older core fs ops (openat/read/
+  write/fsync/statx 5.6, mkdirat/renameat/unlinkat 5.15) are covered by the floor.
 - [x] **2.10 Smaller robustness:** mpsc bounded-send cancel-registration Arc-cycle leak
   (`mpsc.rs:448-489`); accept fd leak on address-parse failure; stdin inherent-read offload
   steals input + leaks a pool thread after cancel. **Done:**
