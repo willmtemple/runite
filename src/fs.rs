@@ -55,6 +55,8 @@ use core::task::{Context, Poll};
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::fd::{AsFd, BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use crate::io::{AsyncRead, AsyncWrite, Stream};
@@ -790,6 +792,50 @@ pub async fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
         path: path.as_ref().to_path_buf(),
     })
     .map(|inner| ReadDir { inner })
+}
+
+// -- File-descriptor interop (Unix only) -------------------------------------
+//
+// `#[cfg(unix)]` because these expose raw/owned file descriptors, which the
+// Windows backend would replace with `AsHandle`/`AsRawHandle`.
+
+#[cfg(unix)]
+impl AsFd for File {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inner.fd.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for File {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.fd.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl From<OwnedFd> for File {
+    /// Adopts an open file descriptor as an async [`File`].
+    ///
+    /// The descriptor must refer to a regular file opened for the access the
+    /// caller intends to use; use [`File::from_std`] to adopt a
+    /// [`std::fs::File`].
+    fn from(fd: OwnedFd) -> Self {
+        Self::from_owned_fd(fd)
+    }
+}
+
+#[cfg(unix)]
+impl File {
+    /// Adopts a [`std::fs::File`], returning an async [`File`] that shares the
+    /// same open file description.
+    ///
+    /// Files do not need non-blocking mode (the driver handles them via
+    /// `io_uring` on Linux and the blocking pool on macOS), so this simply
+    /// transfers ownership of the descriptor.
+    pub fn from_std(file: std::fs::File) -> Self {
+        Self::from_owned_fd(OwnedFd::from(file))
+    }
 }
 
 #[cfg(test)]

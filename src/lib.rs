@@ -138,6 +138,7 @@ pub(crate) mod trace_targets {
 }
 
 pub mod channel;
+#[cfg(unix)]
 pub mod fd;
 pub mod fs;
 pub mod io;

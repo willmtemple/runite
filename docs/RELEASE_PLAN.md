@@ -278,8 +278,20 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred p
   `main` to `block_on` means a `#[runite::main]` returns when its future resolves
   (detached tasks abandoned), matching `std`/Tokio `main` semantics rather than the old
   run-to-idle behavior.
-- [ ] **3.3 fd interop.** `AsFd`/`AsRawFd`/`From<OwnedFd>`/`from_std` on fd-backed types;
-  `fd::wait_writable`; `wait_readable` take `impl AsFd`.
+- [x] **3.3 fd interop.** `AsFd`/`AsRawFd`/`From<OwnedFd>`/`from_std` on fd-backed types;
+  `fd::wait_writable`; `wait_readable` take `impl AsFd`. **Done, all `#[cfg(unix)]`-gated**
+  (fds are a Unix concept; the Windows/IOCP backend will expose `AsSocket`/`AsHandle`
+  separately). `AsFd` + `AsRawFd` + `From<OwnedFd>` on `TcpStream`, `TcpListener`,
+  `UdpSocket`, `TcpSocket`, `UnixStream`, `UnixListener`, `UnixDatagram`, and `File`.
+  `from_std` adopts the matching std type and switches sockets to non-blocking mode
+  (runite's own sockets are created `SOCK_NONBLOCK` on both backends; `File` needs no
+  mode change) — `TcpStream`/`TcpListener`/`UdpSocket` from `std::net`, the Unix types
+  from `std::os::unix::net`, `File` from `std::fs::File` (infallible). `set_nonblocking`
+  exposed through `sys::current::net`. `runite::fd` is now `#[cfg(unix)]`; `wait_readable`
+  and the new `wait_writable` take `impl AsFd` (holding the borrow across the wait so the
+  descriptor can't be closed underneath it). Tests in `tests/fd_interop.rs` (adopt a std
+  listener + accept, `From<OwnedFd>`, adopt a std `File` + read); public API snapshot
+  updated (+93 items).
 - [ ] **3.4 `UnixStream` implement `AsyncRead`/`AsyncWrite` + `shutdown` + split.**
 - [ ] **3.5 `Command::output()` → `Output { status, stdout, stderr }`; don't error on
   non-zero exit; close child stdin.**

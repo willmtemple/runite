@@ -761,7 +761,7 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
     cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) })?;
     Ok(())

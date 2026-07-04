@@ -27,7 +27,7 @@ use core::task::{Context, Poll};
 use std::ffi::c_void;
 use std::io;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::SocketAddr;
 use std::path::Path;
@@ -652,6 +652,102 @@ fn cvt_long(value: libc::ssize_t) -> io::Result<libc::ssize_t> {
         Err(io::Error::last_os_error())
     } else {
         Ok(value)
+    }
+}
+
+// -- File-descriptor interop -------------------------------------------------
+//
+// This module is already `#[cfg(unix)]`, so these fd-based impls need no further
+// gating.
+
+impl AsFd for UnixStream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for UnixStream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl From<OwnedFd> for UnixStream {
+    /// Adopts an already-connected Unix-domain stream socket. Use
+    /// [`UnixStream::from_std`] to adopt a [`std::os::unix::net::UnixStream`] and
+    /// set the mode runite's backend expects.
+    fn from(fd: OwnedFd) -> Self {
+        Self::from_owned_fd(fd)
+    }
+}
+
+impl UnixStream {
+    /// Adopts a blocking [`std::os::unix::net::UnixStream`] and switches it to
+    /// the non-blocking mode runite's driver expects.
+    pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
+        let fd = OwnedFd::from(stream);
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self::from_owned_fd(fd))
+    }
+}
+
+impl AsFd for UnixListener {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for UnixListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl From<OwnedFd> for UnixListener {
+    /// Adopts an already-listening Unix-domain socket. Use
+    /// [`UnixListener::from_std`] to adopt a std listener and set the mode.
+    fn from(fd: OwnedFd) -> Self {
+        Self { fd }
+    }
+}
+
+impl UnixListener {
+    /// Adopts a blocking [`std::os::unix::net::UnixListener`] and switches it to
+    /// non-blocking mode.
+    pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<Self> {
+        let fd = OwnedFd::from(listener);
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
+    }
+}
+
+impl AsFd for UnixDatagram {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for UnixDatagram {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl From<OwnedFd> for UnixDatagram {
+    /// Adopts an existing Unix-domain datagram socket. Use
+    /// [`UnixDatagram::from_std`] to adopt a std datagram socket and set the mode.
+    fn from(fd: OwnedFd) -> Self {
+        Self { fd }
+    }
+}
+
+impl UnixDatagram {
+    /// Adopts a blocking [`std::os::unix::net::UnixDatagram`] and switches it to
+    /// non-blocking mode.
+    pub fn from_std(socket: std::os::unix::net::UnixDatagram) -> io::Result<Self> {
+        let fd = OwnedFd::from(socket);
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
     }
 }
 
