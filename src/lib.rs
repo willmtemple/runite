@@ -120,6 +120,11 @@
 //! lower bounds are 5.6 (single-threaded) and 5.18 (multithreaded).
 
 #![deny(missing_docs)]
+// docs.rs passes --cfg docsrs (see [package.metadata.docs.rs]); `doc_cfg`
+// (which subsumed `doc_auto_cfg` in nightly 1.92) then annotates feature-gated
+// items with their required feature in the rendered docs. Plain stable builds
+// never see this attribute, so the crate stays stable-Rust clean.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
 compile_error!("runite currently supports Linux (x86_64, aarch64) and macOS aarch64.");
