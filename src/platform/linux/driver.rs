@@ -101,16 +101,6 @@ pub struct ThreadNotifier {
     inner: Arc<NotifierInner>,
 }
 
-impl ThreadNotifier {
-    // TODO(roadmap): duplicate of the `Notifier` trait method (which is what
-    // callers use); a Linux agent will remove it before release. See ROADMAP.md.
-    /// Sends a wake notification to the target runtime thread.
-    #[allow(dead_code)]
-    pub fn notify(&self) -> io::Result<()> {
-        self.inner.notify()
-    }
-}
-
 impl Notifier for ThreadNotifier {
     fn notify(&self) -> io::Result<()> {
         self.inner.notify()
@@ -549,7 +539,7 @@ fn decode_token_kind(token: u64) -> Option<CompletionKind> {
 #[cfg(test)]
 mod tests {
     use super::super::uring::{IORING_OP_NOP, SupportedOps, override_supported_ops};
-    use super::{create_driver, monotonic_now};
+    use super::{Notifier as _, create_driver, monotonic_now};
     use std::io;
     use std::os::fd::AsRawFd;
     use std::sync::Arc;

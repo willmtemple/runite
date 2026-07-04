@@ -18,7 +18,7 @@ use crate::platform::linux::runtime::{
     QueueError, ThreadHandle, current_thread_handle, with_current_driver,
 };
 use crate::platform::linux::uring::{
-    IORING_FSYNC_DATASYNC, IORING_OP_CLOSE, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
+    IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
     IORING_OP_MKDIRAT, IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX,
     IORING_OP_UNLINKAT, IORING_OP_WRITE, IoUringCqe,
 };
@@ -26,39 +26,6 @@ use crate::platform::linux::uring::{
 const STATX_BASIC_MASK: u32 =
     libc::STATX_TYPE | libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_NLINK;
 const FILE_CURSOR: u64 = u64::MAX;
-
-// TODO(roadmap): unwired io_uring fs-close / op-classifier scaffolding; a Linux
-// agent will wire or remove it before release. See ROADMAP.md.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionPath {
-    IoUring,
-    Offload,
-    Inline,
-}
-
-#[allow(dead_code)]
-pub fn execution_path(op: &FsOp) -> ExecutionPath {
-    match op {
-        // `getdents`/`std::fs::read_dir` can block on disk and has no io_uring
-        // opcode, so it streams on the blocking pool.
-        FsOp::ReadDir { .. } => ExecutionPath::Offload,
-        // `fcntl(F_DUPFD_CLOEXEC)` never blocks, so it runs inline.
-        FsOp::Duplicate { .. } => ExecutionPath::Inline,
-        FsOp::Open { .. }
-        | FsOp::Read { .. }
-        | FsOp::Write { .. }
-        | FsOp::Metadata { .. }
-        | FsOp::SetLen { .. }
-        | FsOp::SyncAll { .. }
-        | FsOp::SyncData { .. }
-        | FsOp::CreateDir { .. }
-        | FsOp::RemoveFile { .. }
-        | FsOp::RemoveDir { .. }
-        | FsOp::Rename { .. }
-        | FsOp::Close { .. } => ExecutionPath::IoUring,
-    }
-}
 
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
     let FsOp::Open { path, options } = op else {
@@ -330,22 +297,6 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
             let _to = to;
             cqe_to_result(cqe).map(|_| ())
         },
-    )
-    .await
-}
-
-#[allow(dead_code)]
-pub async fn close(op: FsOp) -> io::Result<()> {
-    let FsOp::Close { fd } = op else {
-        unreachable!("close backend called with non-close op");
-    };
-
-    submit_uring::<(), _>(
-        move |sqe| {
-            sqe.opcode = IORING_OP_CLOSE;
-            sqe.fd = fd;
-        },
-        move |cqe| cqe_to_result(cqe).map(|_| ()),
     )
     .await
 }
