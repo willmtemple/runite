@@ -100,29 +100,37 @@
 //!
 //! ## Minimum Linux kernel
 //!
-//! The io_uring backend targets **Linux 6.1 or newer** (the current LTS line),
-//! which is what CI and the maintainers test against. It may run on older
-//! kernels subject to the feature notes below, but that is not tested.
+//! The io_uring backend recommends **Linux 6.1 or newer**. The hard floor is
+//! 5.6; newer opcodes are selected opportunistically. CI runs on GitHub-hosted
+//! Ubuntu runners (currently 6.8+) without pinning a kernel version, so the
+//! fallback paths below are exercised by opcode-capability injection tests
+//! rather than against an actual older kernel.
 //!
 //! Hard requirements (no fallback — the runtime will not function without them):
 //! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
 //!   and friends, which every file and socket operation builds on.
-//! - **5.18** — `IORING_OP_MSG_RING`, used to wake one runtime thread from
-//!   another. A single-threaded runtime can run without it, but
-//!   [`spawn_worker`]-based multithreading (and any cross-thread
-//!   [`ThreadHandle`] wake) requires 5.18+.
 //!
-//! Soft requirements (a synchronous syscall fallback runs transparently on
-//! older kernels, so only native-io_uring performance is affected):
+//! Optional kernel acceleration:
+//! - **5.18** — `IORING_OP_MSG_RING`, preferred for cross-thread runtime wakes.
+//!   Older kernels transparently use a nonblocking `eventfd` watched by the
+//!   target ring, including for blocking-pool completions and [`spawn_worker`].
+//!
+//! Other fallbacks affect native-io_uring coverage, not API availability:
 //! - File truncation ([`OpenOptions::truncate`](fs::OpenOptions::truncate),
 //!   [`File::set_len`](fs::File::set_len)) uses `IORING_OP_FTRUNCATE` (6.9) and
 //!   falls back to `ftruncate(2)`.
+//! - Directory operations ([`create_dir`](fs::create_dir),
+//!   [`rename`](fs::rename), [`remove_file`](fs::remove_file),
+//!   [`remove_dir`](fs::remove_dir)) use `IORING_OP_MKDIRAT` (5.15),
+//!   `IORING_OP_RENAMEAT` (5.11), and `IORING_OP_UNLINKAT` (5.11), falling back
+//!   to the corresponding `*at(2)` syscall on the blocking pool.
 //! - The socket lifecycle operations — `socket` (5.19), `bind`/`listen` (6.11),
-//!   and `connect`/`accept`/`shutdown`/`send`/`recv` — fall back to their
-//!   blocking equivalents when the kernel lacks the opcode.
+//!   and later `connect`/`accept`/`shutdown`/`send`/`recv` opcodes — fall back
+//!   to nonblocking control calls or an io_uring readiness wait, never a
+//!   blocking-pool data operation.
 //!
-//! So the recommended 6.1 LTS floor exercises every feature; the only hard
-//! lower bounds are 5.6 (single-threaded) and 5.18 (multithreaded).
+//! Thus the recommended 6.1 baseline does not imply every newer native opcode.
+//! The hard lower bound remains 5.6 for both single- and multithreaded runtimes.
 
 #![deny(missing_docs)]
 // docs.rs passes --cfg docsrs (see [package.metadata.docs.rs]); `doc_cfg`
