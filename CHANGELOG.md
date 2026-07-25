@@ -5,12 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-07-15
+## [0.2.0] — 2026-07-25
 
-This release hardens the runtime's lifecycle and completion ownership, fills
-the portable I/O trait gaps tracked by issue #9, and makes Windows resource
-affinity explicit. See the [0.1 → 0.2 migration guide](docs/MIGRATING-0.2.md)
-for required source changes.
+This release hardens the runtime's lifecycle and completion ownership, adds the
+portable I/O traits from issue #9, and makes Windows resource affinity explicit.
+See the [0.1 → 0.2 migration guide](docs/MIGRATING-0.2.md) for required source
+changes.
 
 ### Breaking
 
@@ -122,6 +122,26 @@ for required source changes.
   corresponding io_uring opcode. `MKDIRAT` (5.15), `RENAMEAT` (5.11), and
   `UNLINKAT` (5.11) are all newer than the documented 5.6 floor, so these
   operations previously failed outright on a kernel that met it.
+- `AsyncWrite::poll_flush` on TCP and Unix-domain sockets, child pipes, and
+  stdout/stderr now waits for writes the resource still owns. It previously
+  returned `Ok(())` unconditionally, reporting bytes as visible while their
+  operation was still in flight and discarding its error.
+- `read_dir` no longer ends a partly delivered scan when a refill hits a
+  transient blocking-pool queue-full condition; the refill is retried from a
+  later poll while buffered entries remain. Its shared state also tolerates a
+  poisoned lock, which previously turned a panic under that lock into a process
+  abort during unwinding.
+- Dropped io_uring completions are reported as data loss. `rings->cq_overflow`
+  counts entries the kernel failed to allocate, never ones FEAT_NODROP
+  preserved, so the previous "held and flushed, ring undersized" warning
+  described the opposite of what had happened.
+- macOS no longer discards readiness events when draining the wake pipe fails.
+  Registrations are `EV_ONESHOT`, so events already dequeued in that batch
+  exist nowhere else and their waiters would hang; the batch is now dispatched
+  before the error is surfaced.
+- Windows reports a failed `CancelIoEx` instead of discarding it. Such an
+  operation is neither cancelled nor completing, so its owning reference is
+  never released and the waiting task cannot progress.
 - Raw `AsyncWrite::poll_write` callers no longer receive an abandoned write's
   byte count for a different buffer. A raw write is now identified by its
   buffer as well as its generation, so a new logical write started after a
