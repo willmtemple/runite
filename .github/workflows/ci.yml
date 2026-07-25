@@ -36,7 +36,9 @@ jobs:
       # rustup auto-installs a minimal toolchain (no rustfmt/clippy), so install the
       # required components explicitly and idempotently against the pinned toolchain.
       - name: Ensure rust components
-        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy -c llvm-tools --no-self-update'
+        run: |
+          # shellcheck disable=SC2016 # the inner bash expands this, not this shell
+          mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy -c llvm-tools --no-self-update'
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Validate workflow YAML
@@ -123,7 +125,9 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Ensure rust components
-        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
+        run: |
+          # shellcheck disable=SC2016 # the inner bash expands this, not this shell
+          mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
       - name: Build
         run: cargo build --workspace --all-targets --all-features
       - name: Clippy
@@ -148,18 +152,26 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Ensure rust components
-        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
+        run: |
+          # shellcheck disable=SC2016 # the inner bash expands this, not this shell
+          mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
         shell: bash
       # The subprocess tests and examples spawn Git-style shell utilities
       # (`sh`, `cat`, `true`, `false`), which GitHub's Windows images provide
-      # via Git Bash. Fail fast with a clear message if an image change ever
-      # drops them from PATH, rather than failing deep inside a test.
-      # `where.exe` (not bash's `command -v`, which would report shell
-      # builtins for `true`/`false`) resolves real executables the way
+      # via Git Bash. They live on Git Bash's own PATH, not the job default
+      # shell's, so publish that directory to the job PATH -- otherwise
+      # `std::process::Command` cannot resolve them from the test step.
+      - name: Add Git shell utilities to PATH
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\Git\usr\bin"
+      # Fail fast with a clear message if an image change ever drops them,
+      # rather than failing deep inside a test. This runs in the same shell as
+      # the test step so it checks the PATH the tests actually get; under
+      # `shell: bash` it would validate Git Bash's PATH instead and pass while
+      # the tests fail. `where.exe` (not bash's `command -v`, which reports
+      # shell builtins for `true`/`false`) resolves real executables the way
       # `std::process::Command` does.
       - name: Verify shell utilities for subprocess tests
         run: where.exe sh cat true false
-        shell: bash
       - name: Build
         run: cargo build --workspace --all-targets --all-features
       # Clippy and docs run per-OS here because the Windows-only code and its
@@ -331,7 +343,9 @@ jobs:
       # cargo-llvm-cov needs the llvm-tools component; install it explicitly because
       # a mise cache hit skips mise's own component install (see the lint job).
       - name: Ensure rust components
-        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c llvm-tools --no-self-update'
+        run: |
+          # shellcheck disable=SC2016 # the inner bash expands this, not this shell
+          mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c llvm-tools --no-self-update'
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov

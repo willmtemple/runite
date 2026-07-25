@@ -57,6 +57,7 @@ jobs:
           version: 2026.6.11
       - name: Install API-report toolchains and targets
         run: |
+          # shellcheck disable=SC2016 # the inner bash expands this, not this shell
           mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy --no-self-update'
           mise exec -- rustup toolchain install nightly-2026-07-01 --profile minimal --no-self-update
           mise exec -- rustup target add \
@@ -147,6 +148,7 @@ jobs:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
           python3 - "$version" "$GITHUB_OUTPUT" \
             "target/xtask-release/package/package/runite-${version}.crate" \
@@ -210,6 +212,7 @@ jobs:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
           artifact="target/xtask-release/package/package/runite-proc-macros-${version}.crate"
           python3 - "$version" "$artifact" <<'PY'
@@ -255,7 +258,7 @@ jobs:
           runite-proc-macros = "=${version}"
           EOF
           printf 'fn main() {}\n' >target/release-index-probe/src/main.rs
-          for attempt in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if cargo metadata \
               --manifest-path target/release-index-probe/Cargo.toml \
               --format-version 1 >/dev/null 2>&1; then
