@@ -25,7 +25,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_OPERATION_ABORTED, HANDLE,
+    ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::IO::{CancelIoEx, OVERLAPPED};
@@ -227,9 +227,29 @@ async fn await_terminal_after<T>(
 fn cancel_operation(owner: &OverlappedOwner, overlapped: *const OVERLAPPED) {
     // SAFETY: `owner` keeps the underlying kernel object alive, and
     // `overlapped` remains allocated until the terminal completion packet.
-    unsafe {
-        CancelIoEx(owner.as_handle() as HANDLE, overlapped);
+    let cancelled = unsafe { CancelIoEx(owner.as_handle() as HANDLE, overlapped) };
+    if cancelled != 0 {
+        return;
     }
+
+    // `ERROR_NOT_FOUND` is the expected benign race: the operation already
+    // completed and its packet is on the way, so the waiter still terminates.
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+        return;
+    }
+
+    // Anything else means the request is neither cancelled nor completing. The
+    // owning reference is only released by the terminal packet, so the handle
+    // stays alive and the waiter parks indefinitely. Nothing here can force the
+    // packet, so record it rather than discarding the only evidence.
+    tracing::error!(
+        target: "runite::driver",
+        event = "cancel_io_failed",
+        error = %error,
+        "CancelIoEx failed for an in-flight overlapped operation; its completion \
+         packet may never arrive and the waiting task cannot make progress",
+    );
 }
 
 pub(crate) fn associate_raw_handle(
