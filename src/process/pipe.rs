@@ -176,8 +176,11 @@ impl AsyncWrite for ChildStdin {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // An abandoned write stays owned by the pipe, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.poll_flush(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

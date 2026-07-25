@@ -577,7 +577,6 @@ impl WriteState {
         }
     }
 
-    #[cfg(feature = "hyper")]
     pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.poll_drain(cx) {
             Poll::Ready(()) => match self.buffered_error.take() {

@@ -101,6 +101,69 @@ fn abandoned_raw_write_is_not_credited_to_a_different_buffer() {
     let _ = peer.join();
 }
 
+/// `flush()` must not report success while a write is still in flight.
+///
+/// The pending-ownership model deliberately keeps an abandoned write owned by
+/// the socket, so a flush that returns `Ok` unconditionally tells the caller
+/// bytes are visible when they are not, and discards that operation's error.
+#[test]
+fn flush_waits_for_an_abandoned_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener address");
+
+    let (drain_tx, drain_rx) = std::sync::mpsc::channel::<()>();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept client");
+        drain_rx.recv().expect("drain signal");
+        let mut sink = vec![0u8; 256 * 1024];
+        while socket.read(&mut sink).map(|read| read > 0).unwrap_or(false) {}
+    });
+
+    let flush_was_pending = block_on(move || async move {
+        let mut stream = TcpStream::connect(addr).await.expect("connect to peer");
+        let bulk = vec![b'A'; FILL_CHUNK];
+        let mut attempts = 0usize;
+
+        // Leave one write in flight, then abandon it.
+        poll_fn(|cx| {
+            loop {
+                match Pin::new(&mut stream).poll_write(cx, &bulk) {
+                    Poll::Ready(Ok(_)) => {
+                        attempts += 1;
+                        assert!(attempts < MAX_FILL_ATTEMPTS, "peer never blocked");
+                        continue;
+                    }
+                    Poll::Ready(Err(error)) => panic!("bulk write failed: {error}"),
+                    Poll::Pending => return Poll::Ready(()),
+                }
+            }
+        })
+        .await;
+
+        // The very next flush poll must not claim success: the write is still
+        // outstanding and the peer is not reading yet.
+        let mut observed_pending = false;
+        let first = poll_fn(|cx| {
+            let poll = Pin::new(&mut stream).poll_flush(cx);
+            observed_pending = poll.is_pending();
+            Poll::Ready(())
+        });
+        first.await;
+
+        drain_tx.send(()).expect("signal peer to drain");
+        poll_fn(|cx| Pin::new(&mut stream).poll_flush(cx))
+            .await
+            .expect("flush should succeed once the write completes");
+        observed_pending
+    });
+
+    assert!(
+        flush_was_pending,
+        "flush reported success while a write was still in flight"
+    );
+    let _ = peer.join();
+}
+
 /// The companion property: re-polling the same buffer is the documented
 /// contract for a raw caller and must still resolve to that write's own result.
 #[test]
