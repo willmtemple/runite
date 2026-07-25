@@ -998,22 +998,28 @@ impl AsRawFd for UnixStream {
     }
 }
 
-impl From<OwnedFd> for UnixStream {
-    /// Adopts an already-connected Unix-domain stream socket. Use
-    /// [`UnixStream::from_std`] to adopt a [`std::os::unix::net::UnixStream`] and
-    /// set the mode runite's backend expects.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
+impl TryFrom<OwnedFd> for UnixStream {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixStream {
+    /// Adopts an already-connected Unix-domain stream socket, switching it to
+    /// the non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned stream.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self::from_owned_fd(fd))
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixStream`] and switches it to
     /// the non-blocking mode runite's driver expects.
     pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
-        let fd = OwnedFd::from(stream);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self::from_owned_fd(fd))
+        Self::from_owned(OwnedFd::from(stream))
     }
 }
 
@@ -1029,21 +1035,28 @@ impl AsRawFd for UnixListener {
     }
 }
 
-impl From<OwnedFd> for UnixListener {
-    /// Adopts an already-listening Unix-domain socket. Use
-    /// [`UnixListener::from_std`] to adopt a std listener and set the mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self { fd }
+impl TryFrom<OwnedFd> for UnixListener {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixListener {
+    /// Adopts an already-listening Unix-domain socket, switching it to the
+    /// non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned listener.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixListener`] and switches it to
     /// non-blocking mode.
     pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<Self> {
-        let fd = OwnedFd::from(listener);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self { fd })
+        Self::from_owned(OwnedFd::from(listener))
     }
 }
 
@@ -1059,21 +1072,28 @@ impl AsRawFd for UnixDatagram {
     }
 }
 
-impl From<OwnedFd> for UnixDatagram {
-    /// Adopts an existing Unix-domain datagram socket. Use
-    /// [`UnixDatagram::from_std`] to adopt a std datagram socket and set the mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self { fd }
+impl TryFrom<OwnedFd> for UnixDatagram {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixDatagram {
+    /// Adopts an existing Unix-domain datagram socket, switching it to the
+    /// non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned socket.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixDatagram`] and switches it to
     /// non-blocking mode.
     pub fn from_std(socket: std::os::unix::net::UnixDatagram) -> io::Result<Self> {
-        let fd = OwnedFd::from(socket);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self { fd })
+        Self::from_owned(OwnedFd::from(socket))
     }
 }
 
@@ -1181,6 +1201,43 @@ mod tests {
     use crate::{queue_macrotask, run, spawn};
 
     use super::{UnixDatagram, UnixListener, UnixStream};
+
+    fn is_nonblocking(fd: std::os::fd::RawFd) -> bool {
+        // SAFETY: `F_GETFL` reads the descriptor's status flags and takes no
+        // user pointer.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1, "F_GETFL should succeed for a live descriptor");
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    /// Adopting an owned descriptor must apply the non-blocking mode the driver
+    /// expects. The infallible `From` these types used to offer skipped that
+    /// step, so a blocking descriptor could be adopted into a readiness-based
+    /// backend and then block the event loop on the first read.
+    #[test]
+    fn adoption_switches_owned_descriptors_to_nonblocking() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+
+        let (blocking, _peer) =
+            std::os::unix::net::UnixStream::pair().expect("std stream pair should open");
+        assert!(
+            !is_nonblocking(blocking.as_raw_fd()),
+            "a std socket pair starts out blocking"
+        );
+        let adopted = UnixStream::try_from(OwnedFd::from(blocking)).expect("adoption succeeds");
+        assert!(
+            is_nonblocking(adopted.as_raw_fd()),
+            "try_from must switch the adopted stream to non-blocking"
+        );
+
+        let (blocking, _peer) =
+            std::os::unix::net::UnixDatagram::pair().expect("std datagram pair should open");
+        let adopted = UnixDatagram::try_from(OwnedFd::from(blocking)).expect("adoption succeeds");
+        assert!(
+            is_nonblocking(adopted.as_raw_fd()),
+            "try_from must switch the adopted datagram socket to non-blocking"
+        );
+    }
 
     #[test]
     fn unix_stream_pair_round_trip() {

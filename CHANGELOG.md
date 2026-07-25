@@ -14,11 +14,14 @@ for required source changes.
 
 ### Breaking
 
-- Owned `File` and TCP/UDP socket adoption is now fallible across the portable
-  types. `From<OwnedFd>`, `From<OwnedHandle>`, and `From<OwnedSocket>` become
-  `TryFrom`; inherent `from_owned` and `from_std` constructors return
-  `io::Result`. Unix-domain socket extensions retain their Unix-specific
-  conversion surface.
+- Owned resource adoption is now fallible everywhere. `From<OwnedFd>`,
+  `From<OwnedHandle>`, and `From<OwnedSocket>` become `TryFrom`, and the
+  inherent `from_owned` and `from_std` constructors return `io::Result`. This
+  covers `File` and the TCP/UDP types, and also the Unix-domain stream,
+  listener, and datagram extensions, which gain `from_owned` alongside
+  `try_from`. Their infallible `From` adopted a descriptor without applying the
+  non-blocking mode the driver requires, so a blocking socket could be adopted
+  into a readiness-based backend and stall the event loop on its first read.
 - Windows adoption rejects synchronous resources, resources suppressing
   success completion packets, and resources already associated with another
   I/O completion port. Operations validate the creating runtime's

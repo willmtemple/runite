@@ -8,9 +8,9 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 915 | 935 | 954 | 974 | 144 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 915 | 935 | 954 | 974 | 144 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 915 | 935 | 954 | 974 | 144 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 921 | 941 | 960 | 980 | 150 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 921 | 941 | 960 | 980 | 150 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 921 | 941 | 960 | 980 | 150 |
 | Windows x86_64 (`x86_64-pc-windows-msvc`) | 837 | 851 | 876 | 890 | 66 |
 
 Portable default items: **771**
@@ -884,7 +884,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **144**
+Items: **150**
 
 ### `runite::fd`
 
@@ -955,9 +955,9 @@ pub struct runite::net::UnixStream
 ### `runite::net::unix`
 
 ```rust
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::Incoming<'_>
 impl core::fmt::Debug for runite::net::unix::ReuniteError
@@ -1001,21 +1001,23 @@ pub fn runite::net::unix::ReuniteError::fmt(&self, &mut core::fmt::Formatter<'_>
 pub fn runite::net::unix::UnixDatagram::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixDatagram::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixDatagram::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixDatagram::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::pair() -> core::io::error::Result<(Self, Self)>
+pub fn runite::net::unix::UnixDatagram::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::unbound() -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixStream::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::UnixStream::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixStream::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::into_split(self) -> (runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf)
 pub fn runite::net::unix::UnixStream::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
@@ -1028,6 +1030,7 @@ pub fn runite::net::unix::UnixStream::poll_read_vectored(core::pin::Pin<&mut Sel
 pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
+pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
 pub struct runite::net::unix::Incoming<'a>
 pub struct runite::net::unix::OwnedReadHalf
@@ -1037,6 +1040,9 @@ pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
 pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
+pub type runite::net::unix::UnixListener::Error = core::io::error::Error
+pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
 ### `runite::process`
@@ -1067,7 +1073,7 @@ pub struct runite::signal::unix::Signal
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **144**
+Items: **150**
 
 ### `runite::fd`
 
@@ -1138,9 +1144,9 @@ pub struct runite::net::UnixStream
 ### `runite::net::unix`
 
 ```rust
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::Incoming<'_>
 impl core::fmt::Debug for runite::net::unix::ReuniteError
@@ -1184,21 +1190,23 @@ pub fn runite::net::unix::ReuniteError::fmt(&self, &mut core::fmt::Formatter<'_>
 pub fn runite::net::unix::UnixDatagram::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixDatagram::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixDatagram::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixDatagram::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::pair() -> core::io::error::Result<(Self, Self)>
+pub fn runite::net::unix::UnixDatagram::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::unbound() -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixStream::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::UnixStream::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixStream::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::into_split(self) -> (runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf)
 pub fn runite::net::unix::UnixStream::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
@@ -1211,6 +1219,7 @@ pub fn runite::net::unix::UnixStream::poll_read_vectored(core::pin::Pin<&mut Sel
 pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
+pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
 pub struct runite::net::unix::Incoming<'a>
 pub struct runite::net::unix::OwnedReadHalf
@@ -1220,6 +1229,9 @@ pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
 pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
+pub type runite::net::unix::UnixListener::Error = core::io::error::Error
+pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
 ### `runite::process`
@@ -1250,7 +1262,7 @@ pub struct runite::signal::unix::Signal
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **144**
+Items: **150**
 
 ### `runite::fd`
 
@@ -1321,9 +1333,9 @@ pub struct runite::net::UnixStream
 ### `runite::net::unix`
 
 ```rust
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
-impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixDatagram
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
+impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::Incoming<'_>
 impl core::fmt::Debug for runite::net::unix::ReuniteError
@@ -1367,21 +1379,23 @@ pub fn runite::net::unix::ReuniteError::fmt(&self, &mut core::fmt::Formatter<'_>
 pub fn runite::net::unix::UnixDatagram::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixDatagram::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixDatagram::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixDatagram::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixDatagram::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::from_std(std::os::unix::net::datagram::UnixDatagram) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::pair() -> core::io::error::Result<(Self, Self)>
+pub fn runite::net::unix::UnixDatagram::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixDatagram::unbound() -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
+pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
 pub fn runite::net::unix::UnixStream::as_raw_fd(&self) -> std::os::fd::raw::RawFd
 pub fn runite::net::unix::UnixStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::UnixStream::from(std::os::fd::owned::OwnedFd) -> Self
+pub fn runite::net::unix::UnixStream::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::from_std(std::os::unix::net::stream::UnixStream) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::into_split(self) -> (runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf)
 pub fn runite::net::unix::UnixStream::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
@@ -1394,6 +1408,7 @@ pub fn runite::net::unix::UnixStream::poll_read_vectored(core::pin::Pin<&mut Sel
 pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
+pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
 pub struct runite::net::unix::Incoming<'a>
 pub struct runite::net::unix::OwnedReadHalf
@@ -1403,6 +1418,9 @@ pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
 pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
+pub type runite::net::unix::UnixListener::Error = core::io::error::Error
+pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
 ### `runite::process`

@@ -32,10 +32,17 @@ fn adopt(owned: std::os::fd::OwnedFd) -> std::io::Result<runite::fs::File> {
 
 Replace `File::from(...)`, `TcpStream::from(...)`, and corresponding
 TCP/UDP conversions with `try_from(...)` or `from_owned(...)?`; add `?`/error
-handling to `from_std` calls. Unix-domain socket types remain platform
-extensions with their existing Unix conversion surface.
+handling to `from_std` calls.
 
-On Unix, adoption can fail while applying the nonblocking/runtime setup. On
+The Unix-domain types (`UnixStream`, `UnixListener`, `UnixDatagram`) change the
+same way. Their `From<OwnedFd>` becomes `TryFrom<OwnedFd>` and each gains
+`from_owned`. The old infallible conversion adopted the descriptor as-is,
+without switching it to non-blocking mode, so adopting a blocking socket left
+it able to stall the event loop.
+
+On Unix, adoption can fail while applying the nonblocking setup — except for
+`fs::File`, which has no failure mode there today and returns `io::Result` only
+so one signature works on every platform. On
 Windows it additionally rejects synchronous handles, file objects configured
 with `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`, and objects already associated
 with another runtime thread's completion port. A Windows handle cannot be
