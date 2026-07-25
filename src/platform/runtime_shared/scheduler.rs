@@ -16,14 +16,15 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use super::driver_backend::{DriverBackend, Notifier};
-use super::future_task::{FutureTask, JoinState, TaskShared};
+use super::future_task::{FutureTask, JoinState, TaskShared, cancel_tasks_for_shutdown};
 use super::handles::{
-    IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, YieldNow,
+    IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, WorkerJoinError,
+    YieldNow,
 };
 use super::state::{
     ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, describe_panic,
-    install_thread, lock_queue, teardown_thread, try_with_installed_thread, with_current_thread,
-    with_installed_thread,
+    install_thread, lock_queue, thread_teardown_guard, try_with_installed_thread,
+    with_current_thread, with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
 use super::{IntervalCallback, LocalTask, MICROTASK_STARVATION_THRESHOLD};
@@ -37,12 +38,27 @@ use crate::trace_targets;
 /// The trait surface is intentionally tiny: shared state is fully
 /// type-erased through `Box<dyn DriverBackend>` and `Box<dyn Notifier>`, so
 /// the only platform-specific behaviour the scheduler ever needs to know
-/// about is **how to mint a fresh driver + notifier pair** and **how to
-/// resolve `now` from the monotonic clock**.
+/// about is **how to mint a fresh driver + notifier pair**, **how to resolve
+/// `now` from the monotonic clock**, and **how to start worker and reaper
+/// threads**.
 #[doc(hidden)]
 pub trait Runtime: 'static {
     fn create_driver_pair() -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)>;
     fn monotonic_now() -> io::Result<Duration>;
+
+    fn spawn_worker_thread(task: super::SendTask) -> io::Result<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new()
+            .name("runite-worker".into())
+            .spawn(task)
+    }
+
+    fn spawn_worker_reaper(task: super::SendTask) -> io::Result<()> {
+        let reaper = std::thread::Builder::new()
+            .name("runite-worker-reaper".into())
+            .spawn(task)?;
+        drop(reaper);
+        Ok(())
+    }
 }
 
 // -- Public functions --------------------------------------------------------
@@ -149,6 +165,7 @@ where
     let timer = TimerNode::timeout(id, deadline, Box::new(callback));
 
     let generation = with_current_thread::<R, _>(|state| {
+        state.live_timeouts.borrow_mut().insert(id);
         state.timers.borrow_mut().insert(timer);
         state.generation
     });
@@ -251,9 +268,10 @@ pub fn cancel_interval(handle: &IntervalHandle) {
 /// The future is scheduled immediately and can be awaited through the returned
 /// [`JoinHandle`].
 ///
-/// The future will be driven to completion regardless of whether the join
-/// handle is polled or dropped, so this function can be used as a convenient
-/// way to spawn detached async tasks on the current thread.
+/// The future remains scheduled regardless of whether the join handle is
+/// polled or dropped, so this function can be used to spawn detached async
+/// tasks. If `run()` reaches quiescence while the task has no
+/// scheduler-visible source of progress, it is shutdown-cancelled.
 ///
 /// # Panics
 ///
@@ -314,7 +332,8 @@ where
 ///
 /// # Panics
 ///
-/// Panics if the worker thread or its driver cannot be created.
+/// Panics if the worker thread, its non-runtime reaper, or its driver cannot be
+/// created.
 pub fn spawn_worker<R: Runtime, Init, Exit>(initial_task: Init, on_exit: Exit) -> WorkerHandle
 where
     Init: FnOnce() + Send + 'static,
@@ -330,45 +349,80 @@ where
     let handle = ThreadHandle {
         shared: Arc::clone(&shared),
     };
-    let completion = Arc::new(WorkerCompletion {
-        finished: AtomicBool::new(false),
-        parent_event: with_current_thread::<R, _>(|parent| parent.handle()),
-    });
+    let completion = Arc::new(WorkerCompletion::new(with_current_thread::<R, _>(
+        |parent| parent.handle(),
+    )));
 
+    let (worker_sender, worker_receiver) =
+        std::sync::mpsc::sync_channel::<std::thread::JoinHandle<()>>(1);
+    let reaper_completion = Arc::clone(&completion);
+    R::spawn_worker_reaper(Box::new(move || {
+        let Ok(worker_thread) = worker_receiver.recv() else {
+            return;
+        };
+        let thread_panicked = match worker_thread.join() {
+            Ok(()) => false,
+            Err(payload) => {
+                discard_caught_panic(payload);
+                true
+            }
+        };
+        reaper_completion.publish_after_join(thread_panicked);
+    }))
+    .expect("worker reaper should spawn");
+
+    let worker_completion = Arc::clone(&completion);
+    let worker_thread = R::spawn_worker_thread(Box::new(move || {
+        let teardown = thread_teardown_guard();
+        let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            install_thread(shared, driver, Some(Arc::clone(&worker_completion)));
+        }));
+        let mut outcome = match setup {
+            Ok(()) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    queue_task::<R, _>(initial_task);
+                    run::<R>();
+                })) {
+                    Ok(()) => Ok(()),
+                    Err(payload) => {
+                        discard_caught_panic(payload);
+                        Err(WorkerJoinError::RuntimePanicked)
+                    }
+                }
+            }
+            Err(payload) => {
+                discard_caught_panic(payload);
+                Err(WorkerJoinError::SetupPanicked)
+            }
+        };
+
+        // Explicit teardown reports any panic isolated while releasing
+        // runtime-owned values. The reaper publishes this result only after
+        // the OS thread, including its remaining TLS destructors, has exited.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| teardown.teardown())) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => outcome = Err(WorkerJoinError::RuntimePanicked),
+            Err(payload) => {
+                discard_caught_panic(payload);
+                outcome = Err(WorkerJoinError::RuntimePanicked);
+            }
+        }
+        worker_completion.record_worker_outcome(outcome);
+    }))
+    .expect("worker thread should spawn");
+    worker_sender
+        .send(worker_thread)
+        .expect("worker reaper should remain available for its worker");
+
+    // Register only after the thread was created successfully. A failed
+    // spawn panics by contract, but must not leave a child whose completion
+    // can never become ready and permanently strand the parent event loop.
     with_current_thread::<R, _>(|parent| {
         parent.children.borrow_mut().push(ChildWorker {
             completion: Arc::clone(&completion),
             on_exit: Some(Box::new(on_exit)),
         });
     });
-
-    let worker_completion = Arc::clone(&completion);
-    std::thread::Builder::new()
-        .name("runite-worker".into())
-        .spawn(move || {
-            // Retain a handle to the completion so the parent can be released
-            // even if the worker unwinds before `run()` reaches its clean exit.
-            let panic_completion = Arc::clone(&worker_completion);
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                install_thread(shared, driver, Some(worker_completion));
-                queue_task::<R, _>(initial_task);
-                run::<R>();
-            }));
-            if outcome.is_err() {
-                // A panic escaped the worker's event loop or its setup — a
-                // runtime-invariant violation, since user-task panics are
-                // already isolated inside `run()`. Because `run()` could not
-                // perform its clean exit, mark the completion finished and wake
-                // the parent here so it does not hang forever waiting on a dead
-                // child. The child thread's driver state may leak, which is
-                // acceptable for an already-fatal condition; the panic itself
-                // is reported through the process panic hook.
-                panic_completion.finished.store(true, Ordering::Release);
-                panic_completion.parent_event.shared.notify();
-            }
-        })
-        .expect("worker thread should spawn");
-
     WorkerHandle {
         thread: handle,
         completion,
@@ -380,17 +434,43 @@ pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
 }
 
+fn discard_caught_panic(payload: Box<dyn Any + Send>) {
+    if let Err(drop_payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+    {
+        // A panic payload with a panicking destructor must not prevent worker
+        // completion publication or trigger a double-panic abort.
+        std::mem::forget(drop_payload);
+    }
+}
+
+enum IdleCommit {
+    Retry,
+    CancelTasks(Vec<Rc<FutureTask>>),
+    MainIdle,
+    WorkerClosed,
+}
+
 /// Runs the current runtime thread until no work, timers, child workers, or
 /// async operations remain.
 ///
 /// This is the main event-loop entry point used by the proc-macro entry
-/// attributes.
+/// attributes. On an ordinary/user thread, reaching idle returns without
+/// destroying state or driver so sequential entries reuse them. A runtime-owned
+/// worker instead atomically commits `closed` against its remote queue before
+/// returning. Pending spawned tasks with no scheduler-visible source of
+/// progress complete with `JoinError::Cancelled`. Workers perform full cleanup
+/// before returning from their thread function. Arbitrary Unix threads do so
+/// at final TLS teardown; on Windows the loader-lock-safe TLS fallback only
+/// publishes closure and retains the remaining state.
 ///
 /// # Panics
 ///
 /// Panics if runtime initialization fails or if the underlying driver returns
 /// an unexpected error.
 pub fn run<R: Runtime>() {
+    with_current_thread::<R, _>(|_| {});
+    let _event_loop = EventLoopGuard::enter();
     let _span = tracing::debug_span!(
         target: trace_targets::RUNTIME,
         "runtime.run"
@@ -401,8 +481,6 @@ pub fn run<R: Runtime>() {
         event = "run_enter",
         "entering runtime event loop"
     );
-    with_current_thread::<R, _>(|_| {});
-    let _event_loop = EventLoopGuard::enter();
 
     loop {
         drain_all::<R>();
@@ -420,7 +498,7 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
-        if !with_installed_thread(|state| state.try_begin_shutdown()) {
+        if !with_installed_thread(|state| state.try_begin_idle_probe()) {
             continue;
         }
 
@@ -434,6 +512,9 @@ pub fn run<R: Runtime>() {
         if has_ready_work() {
             continue;
         }
+
+        #[cfg(test)]
+        with_installed_thread(|state| state.shared.run_after_idle_ready_check());
 
         let busy = with_installed_thread(|state| {
             !state.timers.borrow().is_empty()
@@ -458,43 +539,41 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
-        // Atomically commit to exit: set `closed` while holding the remote
-        // queue lock. `enqueue_macro` also checks `closed` under this same
-        // lock, so there is no window in which a task can be accepted after
-        // we decide to exit. If a task snuck in between the `has_ready_work`
-        // check above and acquiring the lock, we abort and process it first.
-        let (committed, worker_completion) = with_installed_thread(|state| {
-            let remote = lock_queue(&state.shared.remote_macrotasks);
-            if remote.is_empty() {
-                state.shared.closed.store(true, Ordering::Release);
-                (true, state.worker_completion.clone())
-            } else {
-                (false, None)
+        #[cfg(test)]
+        with_installed_thread(|state| {
+            if state.worker_completion.is_some() {
+                state.shared.run_before_worker_idle_close();
             }
         });
 
-        if !committed {
-            // A remote task snuck in after the probe above; `closing_reset`
-            // restores the flag as this iteration unwinds back to the top.
-            continue;
-        }
+        let worker_closed = match commit_idle() {
+            IdleCommit::Retry => {
+                // A completion or remote task raced the preliminary probes.
+                // `closing_reset` restores the flag before retrying.
+                continue;
+            }
+            IdleCommit::CancelTasks(tasks) => {
+                // Extraction was committed under the queue lock. Release that
+                // lock before invoking arbitrary wakers or destructors.
+                cancel_tasks_for_shutdown(tasks);
+                continue;
+            }
+            IdleCommit::MainIdle => {
+                closing_reset.disarm();
+                false
+            }
+            IdleCommit::WorkerClosed => {
+                closing_reset.disarm();
+                true
+            }
+        };
 
-        // Committed to exit: `closed` is now set under the queue lock, so the
-        // `closing` flag is no longer meaningful and the guard is disarmed.
-        closing_reset.disarm();
-
-        if let Some(completion) = worker_completion {
-            completion.finished.store(true, Ordering::Release);
-            completion.parent_event.shared.notify();
-        }
-
-        with_installed_thread(|state| state.shared.notify());
         tracing::debug!(
             target: trace_targets::RUNTIME,
             event = "run_exit",
-            "runtime event loop exiting"
+            worker_closed,
+            "runtime event loop reached idle"
         );
-        teardown_thread();
         return;
     }
 }
@@ -647,7 +726,9 @@ impl Wake for BlockOnWaker {
         self.woken.store(true, Ordering::Release);
         // A same-thread wake happens while the loop is actively running (never
         // parked in `driver.wait`), so the flag alone suffices. A cross-thread
-        // wake may find the loop parked; notify the driver to unblock it.
+        // wake may find the loop parked; request a durable driver notification.
+        // Transient notifier failures are retried without losing the `woken`
+        // state.
         if !self.owner.is_current() {
             self.owner.shared.notify();
         }
@@ -735,22 +816,27 @@ fn run_guarded(task: LocalTask) {
 ///
 /// Constructing it via [`enter`](Self::enter) panics if a driver loop is
 /// already running on this thread — that is, if [`run`], [`run_until_stalled`],
-/// or [`run_ready_tasks`] is (transitively) re-entered from inside a task poll
-/// or scheduled callback. Re-entry would drive the same microtask/macrotask
-/// queues from two stack frames at once and corrupt scheduling state, so it is
-/// rejected up front. The panic is subject to the per-task firewall, so a task
-/// that illegally re-enters resolves to `JoinError::Panicked` rather than
-/// taking down the outer loop.
+/// [`run_ready_tasks`], or [`block_on`] is (transitively) re-entered from inside
+/// a task poll or scheduled callback. Re-entry would drive the same
+/// microtask/macrotask queues from two stack frames at once and corrupt
+/// scheduling state, so it is rejected up front. The panic is subject to the
+/// per-task firewall, so a task that illegally re-enters resolves to
+/// `JoinError::Panicked` rather than taking down the outer loop.
 struct EventLoopGuard;
 
 impl EventLoopGuard {
     fn enter() -> Self {
         with_installed_thread(|state| {
             assert!(
+                !state.tearing_down.get(),
+                "runite: cannot enter the runtime event loop during thread teardown",
+            );
+            assert!(
                 !state.in_event_loop.replace(true),
                 "runite: cannot re-enter the runtime event loop; `run`, \
-                 `run_until_stalled`, and `run_ready_tasks` must not be called from \
-                 within a task or callback already running on this runtime thread",
+                 `block_on`, `run_until_stalled`, and `run_ready_tasks` must not be \
+                 called from within a task or callback already running on this \
+                 runtime thread",
             );
         });
         EventLoopGuard
@@ -759,8 +845,8 @@ impl EventLoopGuard {
 
 impl Drop for EventLoopGuard {
     fn drop(&mut self) {
-        // Best-effort: `run()` tears the thread state down before this guard
-        // drops on the normal exit path, so a missing state is expected.
+        // Best-effort: an explicit thread-scope teardown may already have
+        // removed state while unwinding an owned runtime thread.
         try_with_installed_thread(|state| {
             if let Some(state) = state {
                 state.in_event_loop.set(false);
@@ -771,12 +857,11 @@ impl Drop for EventLoopGuard {
 
 /// Resets the current thread's `closing` flag on drop.
 ///
-/// `run()` sets `closing` while it probes for an idle-shutdown opportunity. On
-/// every path that does not commit to exiting, the flag must return to `false`
-/// so the loop can be re-entered. This guard makes that reset happen even if a
-/// panic unwinds through the shutdown-probe region (belt-and-suspenders on top
-/// of the per-task firewall), and is disarmed only once the loop has committed
-/// to exit. Best-effort: a no-op if the thread state is already torn down.
+/// `run()` sets `closing` while it probes for a run-to-idle return. On every
+/// non-idle path the flag must return to `false` so the loop can be re-entered.
+/// This guard makes that reset happen even if a panic unwinds through the
+/// probe. Runtime-owned workers may instead atomically commit `closed`; other
+/// threads leave final closure to their teardown owner.
 struct ClosingResetGuard {
     armed: bool,
 }
@@ -881,7 +966,7 @@ fn drain_remote_tasks<R: Runtime>() {
 }
 
 fn drain_completed_workers<R: Runtime>() {
-    let exited = with_installed_thread(|state| {
+    let mut exited = with_installed_thread(|state| {
         let mut exited = Vec::new();
         let mut children = state.children.borrow_mut();
         let mut index = 0;
@@ -900,12 +985,15 @@ fn drain_completed_workers<R: Runtime>() {
         return;
     }
 
+    let callbacks = exited
+        .iter_mut()
+        .filter_map(|child| child.on_exit.take())
+        .collect::<Vec<_>>();
+
     with_installed_thread(move |state| {
         let mut local = state.local_macrotasks.borrow_mut();
-        for mut child in exited {
-            if let Some(task) = child.on_exit.take() {
-                local.push_back(make_macro_task::<R>(task));
-            }
+        for task in callbacks {
+            local.push_back(make_macro_task::<R>(task));
         }
     });
 }
@@ -965,6 +1053,35 @@ fn has_ready_work() -> bool {
     })
 }
 
+fn commit_idle() -> IdleCommit {
+    with_installed_thread(|state| {
+        let remote = lock_queue(&state.shared.remote_macrotasks);
+
+        // A cross-thread completion enqueues its wake while holding this lock
+        // and only then decrements `pending_ops`. Therefore whichever side
+        // acquires the lock first makes either the queue or liveness recheck
+        // non-empty, preventing cancellation in the completion window.
+        if !remote.is_empty() || state.has_live_async_operations() {
+            return IdleCommit::Retry;
+        }
+
+        let tasks = std::mem::take(&mut *state.tasks.borrow_mut())
+            .into_values()
+            .collect::<Vec<_>>();
+        if !tasks.is_empty() {
+            return IdleCommit::CancelTasks(tasks);
+        }
+
+        if state.worker_completion.is_some() {
+            state.shared.closed.store(true, Ordering::Release);
+            IdleCommit::WorkerClosed
+        } else {
+            state.shared.closing.store(false, Ordering::Release);
+            IdleCommit::MainIdle
+        }
+    })
+}
+
 fn allocate_timer_id<R: Runtime>() -> usize {
     with_current_thread::<R, _>(|state| {
         let id = state.next_timer_id.get();
@@ -975,27 +1092,35 @@ fn allocate_timer_id<R: Runtime>() -> usize {
 }
 
 fn clear_timer(generation: u64, id: usize) {
-    let should_rearm = try_with_installed_thread(|state| {
-        let Some(state) = state else {
-            return false;
-        };
+    let cleared = try_with_installed_thread(|state| {
+        let state = state?;
         if state.generation != generation {
             // Stale handle from a different `ThreadState` instance — either
             // a torn-down runtime that happened to reuse an address, or a
             // handle smuggled from a different thread. Either way, there is
             // nothing to remove here.
-            return false;
+            return None;
         }
-        // Drop the live-interval entry first. Any macrotask already queued for
-        // this interval (or the currently running handler about to re-arm
-        // itself) will look up the entry and bail out when it is gone.
-        state.live_intervals.borrow_mut().remove(&id);
-        state.timers.borrow_mut().remove(id).is_some()
+        // Remove all scheduler-visible bookkeeping before dropping user
+        // callbacks. A panicking capture destructor must not leave another
+        // timer armed or an interval marked live.
+        state.live_timeouts.borrow_mut().remove(&id);
+        let interval = state.live_intervals.borrow_mut().remove(&id);
+        let timer = state.timers.borrow_mut().remove(id);
+        Some((timer, interval))
     });
-    if should_rearm {
-        // Re-arming uses the installed accessor — by construction we just
-        // observed an installed thread above.
+
+    let Some((timer, interval)) = cleared else {
+        return;
+    };
+    if timer.is_some() {
         rearm_thread_timer_installed();
+    }
+    if let Some(timer) = timer {
+        drop_timer_value(timer, "cancelled timer callback");
+    }
+    if let Some(interval) = interval {
+        drop_timer_value(interval, "cancelled interval callback");
     }
 }
 
@@ -1023,7 +1148,20 @@ fn schedule_interval_macrotask<R: Runtime>(id: usize, scheduled_deadline: Durati
             return;
         };
 
-        (callback.borrow_mut())();
+        let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (callback.borrow_mut())();
+        }));
+        if let Err(payload) = callback_result {
+            let removed = with_installed_thread(|state| {
+                state.timers.borrow_mut().remove(id);
+                state.live_intervals.borrow_mut().remove(&id)
+            });
+            if let Some(removed) = removed {
+                drop_timer_value(removed, "panicking interval callback");
+            }
+            drop_timer_value(callback, "panicking interval callback");
+            std::panic::resume_unwind(payload);
+        }
 
         // The handler may have cleared its own interval (or a chained one);
         // re-check liveness and pull the current interval duration.
@@ -1066,7 +1204,16 @@ fn dispatch_expired_timers<R: Runtime>() {
 
     for timer in due {
         match timer.kind {
-            TimerKind::Timeout(callback) => push_local_macrotask::<R>(callback),
+            TimerKind::Timeout(callback) => {
+                let id = timer.id;
+                push_local_macrotask::<R>(Box::new(move || {
+                    let live =
+                        with_installed_thread(|state| state.live_timeouts.borrow_mut().remove(&id));
+                    if live {
+                        callback();
+                    }
+                }));
+            }
             TimerKind::Interval => {
                 // The reschedule decision is deferred until after the handler
                 // runs (see `schedule_interval_macrotask`), so that an
@@ -1105,6 +1252,18 @@ fn deadline_from_now<R: Runtime>(delay: Duration) -> Duration {
         .expect("monotonic clock should be available")
         .checked_add(delay)
         .unwrap_or(Duration::MAX)
+}
+
+fn drop_timer_value<T>(value: T, kind: &'static str) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value))) {
+        tracing::error!(
+            target: trace_targets::TIMER,
+            event = "timer_drop_panicked",
+            kind,
+            panic = describe_panic(&*payload),
+            "timer-owned value panicked from Drop; timer bookkeeping is already terminal",
+        );
+    }
 }
 
 #[cfg(test)]

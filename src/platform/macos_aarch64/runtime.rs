@@ -17,7 +17,7 @@ use std::future::Future;
 use std::io;
 use std::time::Duration;
 
-use super::driver::{self, Driver, FdReadinessToken};
+use super::driver::{self, Driver, FdReadinessToken, ProcessExitToken};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
@@ -59,6 +59,12 @@ pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
 pub(crate) fn cancel_fd_readiness(token: FdReadinessToken) {
     shared::with_current_driver_any::<MacosRuntime, Driver, _>(|driver| {
         driver.cancel_fd_readiness(token)
+    });
+}
+
+pub(crate) fn cancel_process_exit(token: ProcessExitToken) {
+    shared::with_current_driver_any::<MacosRuntime, Driver, _>(|driver| {
+        driver.cancel_process_exit(token)
     });
 }
 

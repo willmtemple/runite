@@ -120,6 +120,8 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
 ///
 /// The returned future resolves with the closure's return value. If the pool's
 /// bounded queue is full, returns [`io::ErrorKind::WouldBlock`] synchronously.
+/// Once accepted, the job keeps the submitting runtime alive through terminal
+/// result publication, even if its [`BlockingJoinHandle`] is dropped.
 ///
 /// `f` runs on a real OS thread; it may call blocking syscalls freely. Avoid
 /// touching any per-runtime-thread state from inside `f` — this is a pool
@@ -152,12 +154,11 @@ where
     R: Send + 'static,
 {
     let (sender, mut receiver) = oneshot::channel::<Result<R, ()>>();
-    blocking::spawn_blocking(move || {
-        // Catch a panic in `f` so it is delivered to the awaiter as
-        // `JoinError::Panicked` rather than unwinding the pool thread. The
-        // panic is still reported through the process panic hook.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ());
-        let _ = sender.send(result);
+    blocking::spawn_blocking_owned(f, move |result| {
+        // The owned blocking-job wrapper catches the closure's panic before
+        // invoking this terminal callback. The panic hook has already reported
+        // it; the payload itself is intentionally discarded.
+        let _ = sender.send(result.map_err(|_| ()));
     })?;
     let inner: BlockingResultFuture<R> = Box::pin(async move { receiver.recv().await });
     Ok(BlockingJoinHandle { inner })
@@ -166,9 +167,121 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{run, run_until_stalled, spawn};
+    use crate::platform::runtime_shared::test_support::{ExecutionGate, TrackedThread};
+    use crate::sys::blocking::install_task_hook;
+    use crate::{queue_macrotask, run, run_until_stalled, spawn};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn accepted_job_keeps_runtime_alive_until_terminalization() {
+        let gate = ExecutionGate::default();
+        let run_returned = Arc::new(AtomicBool::new(false));
+        let closure_returned = Arc::new(AtomicBool::new(false));
+        let (handle_sender, handle_receiver) = std::sync::mpsc::sync_channel(1);
+
+        let gate_on_runtime = gate.clone();
+        let run_returned_on_runtime = Arc::clone(&run_returned);
+        let closure_returned_on_worker = Arc::clone(&closure_returned);
+        let runtime = TrackedThread::new(std::thread::spawn(move || {
+            handle_sender
+                .send(crate::current_thread_handle())
+                .expect("test should retain the runtime handle");
+            queue_macrotask(move || {
+                let hook = install_task_hook(Arc::new(gate_on_runtime));
+                let handle = spawn_blocking(move || {
+                    closure_returned_on_worker.store(true, Ordering::Release);
+                    42usize
+                })
+                .expect("controlled blocking job should be accepted");
+                drop(hook);
+
+                // Runtime liveness belongs to the accepted job, not to whether
+                // a caller retains or polls its result handle.
+                drop(handle);
+            });
+
+            run();
+            run_returned_on_runtime.store(true, Ordering::Release);
+        }));
+
+        let release = gate.release_on_drop();
+        let runtime_handle = handle_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime thread should publish its handle");
+        assert!(
+            gate.wait_until_arrived(Duration::from_secs(5)),
+            "accepted job should reach the blocking execution gate"
+        );
+        assert!(!closure_returned.load(Ordering::Acquire));
+
+        // Force a complete cross-thread scheduler round trip after the job is
+        // known to be blocked. Observing this probe proves `run()` has reached
+        // and survived an idle check with the accepted job still live.
+        let (probe_sender, probe_receiver) = std::sync::mpsc::sync_channel(1);
+        runtime_handle
+            .queue_macrotask(move || {
+                probe_sender
+                    .send(())
+                    .expect("test should wait for the runtime probe");
+            })
+            .expect("live runtime should accept the probe");
+        probe_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("run() returned before servicing the liveness probe");
+        assert!(
+            !run_returned.load(Ordering::Acquire),
+            "run() must not return while an accepted blocking job is gated"
+        );
+
+        release.release();
+        assert!(
+            gate.wait_until_completed(Duration::from_secs(5)),
+            "blocking job should terminalize after its gate is released"
+        );
+        runtime
+            .join()
+            .expect("runtime thread should return after job terminalization");
+
+        assert!(closure_returned.load(Ordering::Acquire));
+        assert!(run_returned.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn successful_closure_cannot_race_to_cancelled() {
+        let gate = ExecutionGate::default();
+        let outcome = Arc::new(std::sync::Mutex::new(None::<Result<usize, JoinError>>));
+
+        let gate_on_runtime = gate.clone();
+        let outcome_on_runtime = Arc::clone(&outcome);
+        let runtime = TrackedThread::new(std::thread::spawn(move || {
+            spawn(async move {
+                let hook = install_task_hook(Arc::new(gate_on_runtime));
+                let handle =
+                    spawn_blocking(|| 42usize).expect("controlled blocking job should queue");
+                drop(hook);
+                *outcome_on_runtime.lock().unwrap() = Some(handle.await);
+            });
+            run();
+        }));
+
+        let release = gate.release_on_drop();
+        assert!(
+            gate.wait_until_arrived(Duration::from_secs(5)),
+            "blocking job should reach its execution gate"
+        );
+        release.release();
+        assert!(
+            gate.wait_until_completed(Duration::from_secs(5)),
+            "blocking job should finish after release"
+        );
+        runtime
+            .join()
+            .expect("runtime should return after delivering the terminal result");
+
+        assert_eq!(*outcome.lock().unwrap(), Some(Ok(42)));
+    }
 
     #[test]
     fn spawn_blocking_returns_value() {

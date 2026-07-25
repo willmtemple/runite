@@ -279,7 +279,7 @@ impl<T> JoinSet<T> {
                 return Poll::Ready(None);
             }
 
-            // 0.1 keeps this deliberately simple: scan every handle and let
+            // Keep this deliberately simple: scan every handle and let
             // each pending task store this future's waker. A ready queue keyed
             // by task wakeups would avoid the linear scan in a follow-up.
             for index in 0..self.handles.len() {

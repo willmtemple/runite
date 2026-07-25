@@ -18,7 +18,7 @@ use std::future::Future;
 use std::io;
 use std::time::Duration;
 
-use super::driver::{self, Driver};
+use super::driver::{self, Driver, DriverId};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
@@ -51,6 +51,15 @@ pub(crate) fn try_current_thread_handle() -> Option<ThreadHandle> {
 
 pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
     shared::with_current_driver_any::<WindowsRuntime, Driver, T>(f)
+}
+
+#[cfg(test)]
+pub(crate) fn current_driver_id() -> DriverId {
+    with_current_driver(Driver::id)
+}
+
+pub(crate) fn ensure_current_driver(id: DriverId) -> io::Result<()> {
+    with_current_driver(|driver| driver.ensure_affinity(id))
 }
 
 pub fn queue_task<F>(task: F)
@@ -120,6 +129,7 @@ pub fn run_ready_tasks() {
 mod tests {
     use super::WindowsRuntime;
     use crate::platform::runtime_shared::test_support;
+    use crate::platform::windows::runtime::{block_on, current_driver_id, run, run_until_stalled};
 
     #[test]
     fn runtime_executes_local_and_remote_work() {
@@ -134,5 +144,17 @@ mod tests {
     #[test]
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<WindowsRuntime>();
+    }
+
+    #[test]
+    fn sequential_entry_points_keep_one_driver_identity() {
+        let first = block_on(async { current_driver_id() });
+        run_until_stalled();
+        let second = block_on(async { current_driver_id() });
+        run();
+        let third = current_driver_id();
+
+        assert_eq!(first, second);
+        assert_eq!(second, third);
     }
 }

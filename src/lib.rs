@@ -64,7 +64,7 @@
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
 //! - [`run`], [`queue_macrotask`], [`queue_microtask`], and [`spawn`] for
 //!   driving and feeding the event loop
-//! - [`spawn_worker`] and [`ThreadHandle`] for multi-threaded work
+//! - [`spawn_worker`], [`WorkerHandle`], and [`ThreadHandle`] for multi-threaded work
 //! - [`fs`], [`net`], [`process`], [`time`], [`signal`], and [`stdio`] for async
 //!   runtime services
 //! - [`channel`] for `mpsc`/`oneshot`/`broadcast`/`watch` channels
@@ -171,6 +171,9 @@ pub(crate) mod sys;
 pub mod task;
 pub mod time;
 
+#[cfg(test)]
+mod logic_safety_tests;
+
 #[doc(hidden)]
 pub mod macros;
 
@@ -205,6 +208,7 @@ mod runtime_api {
         AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
         WorkerHandle, YieldNow, yield_now,
     };
+    pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
 
     /// Queues a one-shot closure to run as a macrotask on the current runtime thread.
     ///
@@ -272,9 +276,12 @@ mod runtime_api {
     /// Spawns `future` onto the current runtime thread and returns a [`JoinHandle`].
     ///
     /// The future runs concurrently with other tasks on this thread. Awaiting the
-    /// returned handle yields `Result<T, JoinError>`: `Ok` with the output, or
-    /// [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was aborted.
-    /// Dropping the handle detaches the task; it keeps running to completion.
+    /// returned handle yields `Result<T, JoinError>`: `Ok` with the output,
+    /// [`Err(JoinError::Aborted)`](crate::task::JoinError) after explicit
+    /// abort, or [`Err(JoinError::Cancelled)`](crate::task::JoinError) if
+    /// `run()` reaches quiescence with no scheduler-visible wake source.
+    /// Dropping the handle detaches the task; it remains scheduled but may
+    /// still be shutdown-cancelled at quiescence.
     ///
     /// The future is `!Send` and never migrates off this thread. It is first
     /// scheduled as a microtask; its first poll happens when the runtime drains
@@ -315,14 +322,16 @@ mod runtime_api {
     /// runs first on the worker. After the worker completes, `on_exit` is queued
     /// as a macrotask on the parent runtime thread, so its captured state does
     /// not need to be `Send`.
-    /// Returns a [`WorkerHandle`] for joining or queueing further work via
-    /// [`ThreadHandle::queue_macrotask`]. This is the building block for scaling across
-    /// cores: start one worker per core. See the crate's architecture guide.
+    /// Returns a [`WorkerHandle`] for queueing further work or awaiting full
+    /// worker teardown with [`WorkerHandle::join`]. This is the building block
+    /// for scaling across cores: start one worker per core. See the crate's
+    /// architecture guide.
     ///
     /// # Panics
     ///
     /// Panics if the parent runtime state cannot be initialized, the worker
-    /// runtime driver cannot be created, or the OS thread cannot be spawned.
+    /// runtime driver cannot be created, or the worker/reaper OS threads cannot
+    /// be spawned.
     ///
     /// # Examples
     ///
@@ -330,7 +339,7 @@ mod runtime_api {
     /// use std::sync::mpsc;
     ///
     /// let (tx, rx) = mpsc::channel();
-    /// let _worker = runite::spawn_worker(
+    /// let worker = runite::spawn_worker(
     ///     move || {
     ///         runite::spawn(async move {
     ///             tx.send(7u32).unwrap();
@@ -338,6 +347,7 @@ mod runtime_api {
     ///     },
     ///     || {},
     /// );
+    /// runite::block_on(worker.join()).expect("worker should exit normally");
     /// assert_eq!(rx.recv().unwrap(), 7);
     /// ```
     pub fn spawn_worker<Init, Exit>(initial_task: Init, on_exit: Exit) -> WorkerHandle
@@ -373,8 +383,10 @@ mod runtime_api {
     ///
     /// Drives queued tasks, microtasks, timers, and I/O completions until the
     /// runtime is idle (no pending tasks, futures, timers, or active intervals),
-    /// then returns. This is what [`main`](crate::main) calls after queueing the
-    /// entry point.
+    /// then returns. Stranded spawned tasks are first completed with
+    /// `JoinError::Cancelled`. On an ordinary thread, the driver remains
+    /// installed for later `run`/`block_on` entries. This is what
+    /// [`main`](crate::main) calls after queueing the entry point.
     ///
     /// # Panics
     ///
@@ -441,8 +453,9 @@ mod runtime_api {
     ///
     /// # Panics
     ///
-    /// Panics if runtime or driver initialization fails, or if the platform
-    /// driver returns an unexpected error while polling ready events.
+    /// Panics if runtime or driver initialization fails, if the platform
+    /// driver returns an unexpected error while polling ready events, or if
+    /// called while this thread is already driving the runtime.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
     }
@@ -455,7 +468,8 @@ mod runtime_api {
     /// # Panics
     ///
     /// Panics if the current thread's runtime state or driver cannot be
-    /// initialized.
+    /// initialized, or if called while this thread is already driving the
+    /// runtime.
     pub fn run_ready_tasks() {
         imp::run_ready_tasks()
     }
