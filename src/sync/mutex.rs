@@ -127,7 +127,8 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     fn release_to_next_waiter(&self) {
-        if let Some(waiter) = self.waiters.borrow_mut().pop_front() {
+        let waiter = self.waiters.borrow_mut().pop_front();
+        if let Some(waiter) = waiter {
             waiter.selected.set(true);
             self.locked.set(true);
             waiter.waker.wake();
@@ -256,6 +257,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    use crate::platform::runtime_shared::test_support::ReentrantWaker;
     use crate::{run, spawn, yield_now};
 
     #[test]
@@ -307,5 +309,36 @@ mod tests {
         run();
 
         assert_eq!(&*order.borrow(), &[1, 10, 2]);
+    }
+
+    #[test]
+    fn release_extracts_waiter_before_reentrant_wake() {
+        let mutex = Mutex::new(());
+        let guard = mutex.try_lock().unwrap();
+        let mut first = Box::pin(LockFuture::new(&mutex));
+        let first_address = first.as_mut().get_mut() as *mut LockFuture<'_, ()> as usize;
+        let reentrant = ReentrantWaker::new(move || {
+            // SAFETY: the future is pinned and alive for the synchronous wake,
+            // and no other mutable reference exists after its initial poll.
+            let first = unsafe { &mut *(first_address as *mut LockFuture<'_, ()>) };
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(Pin::new(first).poll(&mut cx).is_ready());
+        });
+        let reentrant_waker = reentrant.waker();
+        let mut first_cx = Context::from_waker(&reentrant_waker);
+        let mut noop_cx = Context::from_waker(Waker::noop());
+        let mut second = Box::pin(LockFuture::new(&mutex));
+        assert!(first.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second.as_mut().poll(&mut noop_cx).is_pending());
+
+        drop(guard);
+
+        assert_eq!(reentrant.wake_count(), 1);
+        let second_guard = match second.as_mut().poll(&mut noop_cx) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("reentrant release should select the next waiter"),
+        };
+        drop(second_guard);
+        assert!(mutex.try_lock().is_some());
     }
 }
