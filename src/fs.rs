@@ -32,8 +32,9 @@
 //! - Dropping an I/O future cancels interest in the result.
 //! - The runtime issues best-effort kernel cancellation where supported.
 //! - The underlying OS operation may still complete after the future is dropped.
-//! - Dropping a [`ReadDir`] releases the runtime's pending operation state, but
-//!   it does not stop an already-running `std::fs::read_dir` producer.
+//! - Dropping a [`ReadDir`] cancels its blocking-pool producer, discards queued
+//!   entries, and drops any stored directory iterator. A bounded batch already
+//!   running may still need to finish its current filesystem call first.
 //!
 //! # Examples
 //!
@@ -50,22 +51,29 @@
 //! runite::run();
 //! ```
 
+use alloc::rc::Rc;
 use alloc::sync::Arc;
 
+use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
+use std::collections::VecDeque;
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, IoSlice};
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::io::{AsyncRead, AsyncWrite, Stream};
+use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, CursorState, Stream, WriteOperation};
 use crate::op::fs::{
     FileType as RawFileType, FsOp, MetadataTarget, OpenOptions as OpOpenOptions,
     RawDirEntry as OpDirEntry, RawMetadata,
 };
+use crate::platform::current::runtime::{ThreadHandle, current_thread_handle};
+use crate::sys::blocking::spawn_blocking;
 use crate::sys::current::fs as sys_fs;
 use crate::sys::handle::{OwnedFile, RawFile, raw_file};
 
@@ -73,26 +81,22 @@ struct FileInner {
     fd: OwnedFile,
 }
 
-type PendingFileRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
-type PendingFileWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
-
 /// Async file handle.
 ///
 /// `File` supports both cursor-based sequential I/O and offset-based positioned
 /// I/O. It is not [`Clone`]; use [`try_clone`](Self::try_clone) to duplicate the
 /// underlying file descriptor asynchronously. As with [`std::fs::File::try_clone`],
 /// duplicated handles share the kernel-managed file cursor.
+/// Sequential reads, writes, and seeks are also available through
+/// [`AsyncRead`], [`AsyncWrite`], and [`AsyncSeek`].
 ///
 /// Use [`File::open`] and [`File::create`] for common cases or [`OpenOptions`]
 /// for detailed access-mode control.
 pub struct File {
+    // Pending operations must be dropped before the descriptor owner.
+    state: Rc<RefCell<CursorState>>,
+    direct_write: Option<WriteOperation>,
     inner: Arc<FileInner>,
-    pending_read: Option<PendingFileRead>,
-    /// Bytes a completed read produced that overflowed a smaller caller buffer;
-    /// served before any new read so no bytes are lost. See
-    /// [`ReadOverflow`](crate::io::ReadOverflow).
-    read_overflow: Option<Box<crate::io::ReadOverflow>>,
-    pending_write: Option<PendingFileWrite>,
 }
 
 /// Builder used to configure how a [`File`] is opened.
@@ -118,10 +122,16 @@ pub struct Metadata {
 /// Call [`next_entry`](Self::next_entry) to pull entries one at a time, or use
 /// the [`Stream`] implementation with the runtime's stream extension traits.
 ///
-/// The stream starts an eager blocking-pool producer when it is created. Entries
-/// are queued back to the creating runtime thread as macrotasks. Dropping the
-/// stream releases runite's pending operation state, but it does not cancel an
-/// already-running `std::fs::read_dir` call in the producer.
+/// The stream starts an eager blocking-pool batch when it is created. Entries
+/// cross a fixed-size bounded queue. Each blocking-pool job advances the
+/// directory iterator only until the queue is full or one bounded batch is
+/// complete, then returns its worker to the shared pool. Draining the queue
+/// requests another batch.
+///
+/// Dropping the stream marks the scan cancelled, discards buffered entries,
+/// drops the stored iterator, and releases runtime liveness. Cancellation is
+/// cooperative around filesystem calls: an iterator call already executing in
+/// the OS may finish before the blocking job observes the drop.
 pub struct ReadDir {
     inner: sys_fs::ReadDirStream,
 }
@@ -133,6 +143,399 @@ pub struct ReadDir {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry {
     inner: OpDirEntry,
+}
+
+const READ_DIR_BUFFER_CAPACITY: usize = 32;
+
+pub(crate) struct ReadDirStream {
+    consumer: ReadDirConsumer<OpDirEntry>,
+}
+
+impl ReadDirStream {
+    pub(crate) fn new(path: PathBuf) -> io::Result<Self> {
+        let consumer = read_dir_channel(
+            current_thread_handle(),
+            READ_DIR_BUFFER_CAPACITY,
+            move || {
+                std::fs::read_dir(path).map(|entries| {
+                    entries.map(|entry| {
+                        entry.map(|entry| {
+                            let file_name = entry.file_name();
+                            OpDirEntry {
+                                path: entry.path(),
+                                file_name,
+                            }
+                        })
+                    })
+                })
+            },
+        )?;
+
+        Ok(Self { consumer })
+    }
+
+    pub(crate) async fn next_entry(&mut self) -> io::Result<Option<OpDirEntry>> {
+        core::future::poll_fn(|cx| self.consumer.poll_next(cx)).await
+    }
+}
+
+struct ReadDirConsumer<T> {
+    shared: Arc<ReadDirShared<T>>,
+}
+
+type ReadDirIterator<T> = Box<dyn Iterator<Item = io::Result<T>> + Send + 'static>;
+type ReadDirOpen<T> = Box<dyn FnOnce() -> io::Result<ReadDirIterator<T>> + Send + 'static>;
+type ReadDirJob = Box<dyn FnOnce() + Send + 'static>;
+type ReadDirScheduler = Arc<dyn Fn(ReadDirJob) -> io::Result<()> + Send + Sync + 'static>;
+
+struct ReadDirShared<T> {
+    state: Mutex<ReadDirQueue<T>>,
+    capacity: usize,
+    schedule: ReadDirScheduler,
+    owner: ThreadHandle,
+    pending: AtomicBool,
+}
+
+struct ReadDirBatchGuard<T> {
+    shared: Arc<ReadDirShared<T>>,
+    armed: bool,
+}
+
+struct ReadDirQueue<T> {
+    source: Option<ReadDirSource<T>>,
+    entries: VecDeque<io::Result<T>>,
+    terminal_error: Option<io::Error>,
+    waker: Option<Waker>,
+    batch_active: bool,
+    refill_requested: bool,
+    done: bool,
+    cancelled: bool,
+    #[cfg(test)]
+    peak_buffered: usize,
+}
+
+enum ReadDirSource<T> {
+    Open(ReadDirOpen<T>),
+    Entries(ReadDirIterator<T>),
+}
+
+fn read_dir_channel<T, I>(
+    owner: ThreadHandle,
+    capacity: usize,
+    open: impl FnOnce() -> io::Result<I> + Send + 'static,
+) -> io::Result<ReadDirConsumer<T>>
+where
+    T: Send + 'static,
+    I: Iterator<Item = io::Result<T>> + Send + 'static,
+{
+    read_dir_channel_with_scheduler(owner, capacity, open, spawn_blocking)
+}
+
+fn read_dir_channel_with_scheduler<T, I>(
+    owner: ThreadHandle,
+    capacity: usize,
+    open: impl FnOnce() -> io::Result<I> + Send + 'static,
+    schedule: impl Fn(ReadDirJob) -> io::Result<()> + Send + Sync + 'static,
+) -> io::Result<ReadDirConsumer<T>>
+where
+    T: Send + 'static,
+    I: Iterator<Item = io::Result<T>> + Send + 'static,
+{
+    assert!(capacity > 0, "read_dir buffer capacity must be non-zero");
+    owner.begin_async_operation();
+    let shared = Arc::new(ReadDirShared {
+        state: Mutex::new(ReadDirQueue {
+            source: Some(ReadDirSource::Open(Box::new(move || {
+                open().map(|entries| Box::new(entries) as ReadDirIterator<T>)
+            }))),
+            entries: VecDeque::with_capacity(capacity),
+            terminal_error: None,
+            waker: None,
+            batch_active: false,
+            refill_requested: false,
+            done: false,
+            cancelled: false,
+            #[cfg(test)]
+            peak_buffered: 0,
+        }),
+        capacity,
+        schedule: Arc::new(schedule),
+        owner,
+        pending: AtomicBool::new(true),
+    });
+
+    let consumer = ReadDirConsumer {
+        shared: Arc::clone(&shared),
+    };
+    if let Err(error) = shared.request_batch() {
+        drop(consumer);
+        return Err(error);
+    }
+    Ok(consumer)
+}
+
+impl<T: Send + 'static> ReadDirConsumer<T> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<T>>> {
+        loop {
+            let mut state = self.shared.state.lock().unwrap();
+            if let Some(entry) = state.entries.pop_front() {
+                let request_refill = !state.done && state.entries.len() <= self.shared.capacity / 2;
+                drop(state);
+                if request_refill {
+                    let _ = self.shared.request_batch();
+                }
+                return Poll::Ready(entry.map(Some));
+            }
+            if let Some(error) = state.terminal_error.take() {
+                return Poll::Ready(Err(error));
+            }
+            if state.done {
+                return Poll::Ready(Ok(None));
+            }
+
+            let old_waker = state.waker.replace(cx.waker().clone());
+            drop(state);
+            drop(old_waker);
+            if self.shared.request_batch().is_err() {
+                continue;
+            }
+            return Poll::Pending;
+        }
+    }
+
+    #[cfg(test)]
+    fn observer(&self) -> ReadDirObserver<T> {
+        ReadDirObserver {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<T> Drop for ReadDirConsumer<T> {
+    fn drop(&mut self) {
+        self.shared.cancel();
+    }
+}
+
+impl<T> ReadDirShared<T> {
+    fn complete(&self, error: Option<io::Error>) {
+        let (source, waker) = {
+            let mut state = self.state.lock().unwrap();
+            if state.done {
+                (None, None)
+            } else {
+                state.done = true;
+                state.batch_active = false;
+                state.refill_requested = false;
+                let source = state.source.take();
+                if !state.cancelled {
+                    state.terminal_error = error;
+                    (source, state.waker.take())
+                } else {
+                    (source, None)
+                }
+            }
+        };
+
+        drop(source);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        self.release_pending();
+    }
+
+    fn cancel(&self) {
+        let (source, entries, terminal_error, waker) = {
+            let mut state = self.state.lock().unwrap();
+            state.cancelled = true;
+            state.done = true;
+            state.batch_active = false;
+            state.refill_requested = false;
+            (
+                state.source.take(),
+                core::mem::take(&mut state.entries),
+                state.terminal_error.take(),
+                state.waker.take(),
+            )
+        };
+
+        drop(source);
+        drop(entries);
+        drop(terminal_error);
+        drop(waker);
+        self.release_pending();
+    }
+
+    fn release_pending(&self) {
+        if self.pending.swap(false, Ordering::AcqRel) {
+            self.owner.finish_async_operation();
+        }
+    }
+}
+
+impl<T: Send + 'static> ReadDirShared<T> {
+    fn request_batch(self: &Arc<Self>) -> io::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.done || state.cancelled {
+                return Ok(());
+            }
+            if state.batch_active {
+                state.refill_requested = true;
+                return Ok(());
+            }
+            if state.source.is_none() {
+                return Ok(());
+            }
+            state.batch_active = true;
+            state.refill_requested = false;
+        }
+
+        self.submit_batch()
+    }
+
+    fn submit_batch(self: &Arc<Self>) -> io::Result<()> {
+        let shared = Arc::clone(self);
+        match (self.schedule)(Box::new(move || shared.run_batch())) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let returned = io::Error::new(error.kind(), error.to_string());
+                self.complete(Some(error));
+                Err(returned)
+            }
+        }
+    }
+
+    fn run_batch(self: Arc<Self>) {
+        let mut guard = ReadDirBatchGuard {
+            shared: Arc::clone(&self),
+            armed: true,
+        };
+        self.run_batch_inner();
+        guard.armed = false;
+    }
+
+    fn run_batch_inner(self: &Arc<Self>) {
+        let source = {
+            let mut state = self.state.lock().unwrap();
+            if state.done || state.cancelled {
+                state.batch_active = false;
+                return;
+            }
+            state.source.take()
+        };
+        let Some(source) = source else {
+            self.complete(Some(io::Error::other(
+                "read_dir producer lost its iterator state",
+            )));
+            return;
+        };
+
+        let mut entries = match source {
+            ReadDirSource::Open(open) => match open() {
+                Ok(entries) => entries,
+                Err(error) => {
+                    self.complete(Some(error));
+                    return;
+                }
+            },
+            ReadDirSource::Entries(entries) => entries,
+        };
+
+        for _ in 0..self.capacity {
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.done || state.cancelled {
+                    state.batch_active = false;
+                    return;
+                }
+                if state.entries.len() >= self.capacity {
+                    drop(state);
+                    self.finish_batch(entries);
+                    return;
+                }
+            }
+
+            let Some(entry) = entries.next() else {
+                self.complete(None);
+                return;
+            };
+
+            let waker = {
+                let mut state = self.state.lock().unwrap();
+                if state.done || state.cancelled {
+                    state.batch_active = false;
+                    return;
+                }
+                debug_assert!(state.entries.len() < self.capacity);
+                state.entries.push_back(entry);
+                #[cfg(test)]
+                {
+                    state.peak_buffered = state.peak_buffered.max(state.entries.len());
+                }
+                state.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+
+        self.finish_batch(entries);
+    }
+
+    fn finish_batch(self: &Arc<Self>, entries: ReadDirIterator<T>) {
+        let schedule_next = {
+            let mut state = self.state.lock().unwrap();
+            if state.done || state.cancelled {
+                state.batch_active = false;
+                false
+            } else {
+                debug_assert!(state.source.is_none());
+                state.source = Some(ReadDirSource::Entries(entries));
+                state.batch_active = false;
+                if state.refill_requested && state.entries.len() < self.capacity {
+                    state.batch_active = true;
+                    state.refill_requested = false;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        if schedule_next {
+            let _ = self.submit_batch();
+        }
+    }
+}
+
+impl<T> Drop for ReadDirBatchGuard<T> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared
+                .complete(Some(io::Error::other("read_dir producer batch panicked")));
+        }
+    }
+}
+
+#[cfg(test)]
+struct ReadDirObserver<T> {
+    shared: Arc<ReadDirShared<T>>,
+}
+
+#[cfg(test)]
+impl<T> ReadDirObserver<T> {
+    fn buffered(&self) -> usize {
+        self.shared.state.lock().unwrap().entries.len()
+    }
+
+    fn peak_buffered(&self) -> usize {
+        self.shared.state.lock().unwrap().peak_buffered
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.shared.state.lock().unwrap().cancelled
+    }
 }
 
 impl File {
@@ -235,13 +638,12 @@ impl File {
     /// # Cancel safety
     ///
     /// **Not** cancel-safe: a completion-based write dropped mid-flight may have
-    /// already committed bytes without reporting the count. Drive writes to
-    /// completion rather than cancelling them.
+    /// already committed bytes without reporting the count. Each write owns a
+    /// distinct operation identity, so another clone may drive its completion
+    /// without consuming the result or causing this future to resubmit. Drive
+    /// writes to completion when the reported count matters.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Delegate to the AsyncWrite path so the in-flight write is stashed on
-        // the file. Positional [`write_at`](Self::write_at) keeps using
-        // `write_impl`.
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
+        crate::io::AsyncWriteExt::write(self, buf).await
     }
 
     /// Writes the entire buffer at the file's current cursor position.
@@ -265,7 +667,7 @@ impl File {
     /// no-op. It does not call `fsync` or make data durable; use
     /// [`sync_all`](Self::sync_all) or [`sync_data`](Self::sync_data) for that.
     pub async fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_flush(cx)).await
     }
 
     /// Synchronizes file contents and metadata to stable storage.
@@ -355,27 +757,38 @@ impl File {
     /// [`read`](Self::read)/[`write`](Self::write) methods, not the positioned
     /// [`read_at`](Self::read_at)/[`write_at`](Self::write_at) methods. Mirrors
     /// [`std::io::Seek::seek`].
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe: an accepted sequential read or write is reconciled before
+    /// the synchronous cursor move. If this future is dropped while waiting,
+    /// no seek has occurred and the accepted operation remains on the file.
     pub async fn seek(&mut self, pos: std::io::SeekFrom) -> io::Result<u64> {
-        sys_fs::seek(self.raw_fd(), pos)
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_seek(cx, pos)).await
     }
 
     /// Duplicates the underlying file description.
     ///
     /// As with [`std::fs::File::try_clone`], the cloned handle shares
     /// kernel-managed cursor state with this handle. Positioned I/O methods such
-    /// as [`read_at`](Self::read_at) avoid that shared cursor.
+    /// as [`read_at`](Self::read_at) avoid that shared cursor. Sequential writes
+    /// are queued in first-poll order, and a live write's completion remains
+    /// associated with the future that submitted it even when another clone
+    /// drives the shared cursor.
     pub async fn try_clone(&self) -> io::Result<Self> {
-        sys_fs::try_clone(FsOp::Duplicate { fd: self.raw_fd() })
-            .await
-            .map(File::from_owned_fd)
+        let fd = sys_fs::try_clone(FsOp::Duplicate { fd: self.raw_fd() }).await?;
+        Ok(File::from_owned_file_with_state(fd, Rc::clone(&self.state)))
     }
 
-    fn from_owned_fd(fd: OwnedFile) -> Self {
+    fn from_owned_file(fd: OwnedFile) -> Self {
+        Self::from_owned_file_with_state(fd, Rc::new(RefCell::new(CursorState::default())))
+    }
+
+    fn from_owned_file_with_state(fd: OwnedFile, state: Rc<RefCell<CursorState>>) -> Self {
         Self {
+            state,
+            direct_write: None,
             inner: Arc::new(FileInner { fd }),
-            pending_read: None,
-            read_overflow: None,
-            pending_write: None,
         }
     }
 
@@ -406,6 +819,19 @@ impl File {
     }
 }
 
+fn rewind_file_cursor(fd: RawFile, bytes: usize) -> io::Result<()> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let bytes = i64::try_from(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "retained read overflow exceeds seek range",
+        )
+    })?;
+    sys_fs::seek(fd, std::io::SeekFrom::Current(-bytes)).map(|_| ())
+}
+
 impl AsyncRead for File {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -418,79 +844,75 @@ impl AsyncRead for File {
 
         let this = self.get_mut();
 
-        // Serve any surplus from a previous read before submitting a new one.
-        if let Some(overflow) = this.read_overflow.as_mut() {
-            let n = overflow.drain_into(buf);
-            if overflow.is_drained() {
-                this.read_overflow = None;
-            }
-            return Poll::Ready(Ok(n));
-        }
-
-        if this.pending_read.is_none() {
-            let op = FsOp::Read {
-                fd: this.raw_fd(),
-                offset: None,
-                len: buf.len(),
-            };
-            this.pending_read = Some(Box::pin(sys_fs::read(op)));
-        }
-
-        match this
-            .pending_read
-            .as_mut()
-            .expect("pending read must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_read = None;
-                let data = result?;
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                // Retain any bytes that did not fit rather than discarding them.
-                if data.len() > n {
-                    this.read_overflow = Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
-                }
-                Poll::Ready(Ok(n))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        let fd = this.raw_fd();
+        this.state
+            .borrow_mut()
+            .poll_read_slice(cx, buf, move |len| {
+                Box::pin(sys_fs::read(FsOp::Read {
+                    fd,
+                    offset: None,
+                    len,
+                }))
+            })
     }
 }
 
 impl AsyncWrite for File {
     fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let generation = self
+            .as_mut()
+            .get_mut()
+            .direct_write
+            .get_or_insert_with(WriteOperation::new)
+            .generation();
+        let result = self.as_mut().poll_write_operation(cx, buf, generation);
+        if result.is_ready() {
+            self.get_mut().direct_write = None;
+        }
+        result
+    }
+
+    fn poll_write_operation(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
+        generation: u64,
     ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
         let this = self.get_mut();
-        if this.pending_write.is_none() {
-            let op = FsOp::Write {
-                fd: this.raw_fd(),
-                offset: None,
-                data: buf.to_vec(),
-            };
-            this.pending_write = Some(Box::pin(sys_fs::write(op)));
-        }
+        let rewind_fd = this.raw_fd();
+        let fd = this.raw_fd();
+        this.state.borrow_mut().poll_write(
+            cx,
+            generation,
+            buf,
+            |bytes| rewind_file_cursor(rewind_fd, bytes),
+            move |data| {
+                Box::pin(sys_fs::write(FsOp::Write {
+                    fd,
+                    offset: None,
+                    data,
+                }))
+            },
+        )
+    }
 
-        match this
-            .pending_write
-            .as_mut()
-            .expect("pending write must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_write = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
         }
     }
 
@@ -500,6 +922,27 @@ impl AsyncWrite for File {
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncSeek for File {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        position: std::io::SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        let this = self.get_mut();
+        let rewind_fd = this.raw_fd();
+        let fd = this.raw_fd();
+        match this
+            .state
+            .borrow_mut()
+            .poll_reconcile(cx, |bytes| rewind_file_cursor(rewind_fd, bytes))
+        {
+            Poll::Ready(Ok(())) => Poll::Ready(sys_fs::seek(fd, position)),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -585,7 +1028,7 @@ impl OpenOptions {
             options: self.inner.clone(),
         })
         .await
-        .map(File::from_owned_fd)
+        .map(File::from_owned_file)
     }
 }
 
@@ -845,6 +1288,10 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 
 /// Opens an async directory-entry stream.
 ///
+/// The returned stream applies bounded backpressure to its blocking directory
+/// scan. Dropping it cancels further iteration and wakes a scan waiting for
+/// buffer space.
+///
 /// # Examples
 ///
 /// ```
@@ -881,27 +1328,29 @@ impl AsRawFd for File {
 }
 
 #[cfg(unix)]
-impl From<OwnedFd> for File {
-    /// Adopts an open file descriptor as an async [`File`].
-    ///
-    /// The descriptor must refer to a regular file opened for the access the
-    /// caller intends to use; use [`File::from_std`] to adopt a
-    /// [`std::fs::File`].
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
-    }
-}
-
-#[cfg(unix)]
 impl File {
+    /// Fallibly adopts an open owned file descriptor.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        Ok(Self::from_owned_file(fd))
+    }
+
     /// Adopts a [`std::fs::File`], returning an async [`File`] that shares the
     /// same open file description.
     ///
     /// Files do not need non-blocking mode (the driver handles them via
     /// `io_uring` on Linux and the blocking pool on macOS), so this simply
     /// transfers ownership of the descriptor.
-    pub fn from_std(file: std::fs::File) -> Self {
-        Self::from_owned_fd(OwnedFd::from(file))
+    pub fn from_std(file: std::fs::File) -> io::Result<Self> {
+        Self::from_owned(OwnedFd::from(file))
+    }
+}
+
+#[cfg(unix)]
+impl TryFrom<OwnedFd> for File {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
@@ -910,8 +1359,8 @@ impl File {
 // The Windows analogs of the Unix fd-interop impls above: files are exposed
 // through `AsHandle`/`AsRawHandle`, and adoption binds the handle to the
 // current runtime thread's I/O completion port so overlapped reads and writes
-// can complete. Handles opened without `FILE_FLAG_OVERLAPPED` still work, but
-// each operation then completes synchronously on the event-loop thread.
+// can complete. Synchronous, packet-suppressing, and foreign-IOCP handles are
+// rejected.
 
 #[cfg(windows)]
 mod windows_interop {
@@ -931,20 +1380,12 @@ mod windows_interop {
         }
     }
 
-    impl From<OwnedHandle> for File {
-        /// Adopts an open file handle as an async [`File`], associating it
-        /// with the current runtime thread's completion port (best-effort; a
-        /// handle whose file object is already bound to a port keeps its
-        /// original binding). Use [`File::from_std`] for a fallible adoption.
-        fn from(handle: OwnedHandle) -> Self {
-            let _ = crate::sys::windows::overlapped::associate_file_reused(
-                crate::sys::handle::raw_file(&handle),
-            );
-            Self::from_owned_fd(handle)
-        }
-    }
-
     impl File {
+        /// Strictly adopts an overlapped owned handle into the current IOCP.
+        pub fn from_owned(handle: OwnedHandle) -> std::io::Result<Self> {
+            crate::sys::windows::fs::adopt_handle(handle).map(Self::from_owned_file)
+        }
+
         /// Adopts a [`std::fs::File`], returning an async [`File`] that shares
         /// the same open file object.
         ///
@@ -953,13 +1394,25 @@ mod windows_interop {
         /// file with the `FILE_FLAG_OVERLAPPED` custom flag (e.g. via
         /// [`OpenOptionsExt::custom_flags`](std::os::windows::fs::OpenOptionsExt::custom_flags)
         /// or runite's own [`OpenOptions`](super::OpenOptions), which sets it
-        /// automatically); a synchronous handle still completes every
-        /// operation correctly but blocks the event-loop thread while it runs.
-        pub fn from_std(file: std::fs::File) -> Self {
-            Self::from(OwnedHandle::from(file))
+        /// automatically). Synchronous handles, handles configured to suppress
+        /// successful completion packets, and handles already associated with
+        /// another IOCP are rejected.
+        pub fn from_std(file: std::fs::File) -> std::io::Result<Self> {
+            Self::from_owned(OwnedHandle::from(file))
+        }
+    }
+
+    impl TryFrom<OwnedHandle> for File {
+        type Error = std::io::Error;
+
+        fn try_from(handle: OwnedHandle) -> std::io::Result<Self> {
+            Self::from_owned(handle)
         }
     }
 }
+
+#[cfg(test)]
+mod read_dir_tests;
 
 #[cfg(test)]
 mod tests {
