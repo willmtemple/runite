@@ -277,7 +277,11 @@ where
 impl<T: Send + 'static> ReadDirConsumer<T> {
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<T>>> {
         loop {
-            let mut state = self.shared.state.lock().unwrap();
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             if let Some(entry) = state.entries.pop_front() {
                 let request_refill = !state.done && state.entries.len() <= self.shared.capacity / 2;
                 drop(state);
@@ -320,7 +324,7 @@ impl<T> Drop for ReadDirConsumer<T> {
 impl<T> ReadDirShared<T> {
     fn complete(&self, error: Option<io::Error>) {
         let (source, waker) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.done {
                 (None, None)
             } else {
@@ -346,7 +350,7 @@ impl<T> ReadDirShared<T> {
 
     fn cancel(&self) {
         let (source, entries, terminal_error, waker) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.cancelled = true;
             state.done = true;
             state.batch_active = false;
@@ -376,7 +380,7 @@ impl<T> ReadDirShared<T> {
 impl<T: Send + 'static> ReadDirShared<T> {
     fn request_batch(self: &Arc<Self>) -> io::Result<()> {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.done || state.cancelled {
                 return Ok(());
             }
@@ -439,7 +443,7 @@ impl<T: Send + 'static> ReadDirShared<T> {
 
     fn run_batch_inner(self: &Arc<Self>) {
         let source = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.done || state.cancelled {
                 state.batch_active = false;
                 return;
@@ -466,7 +470,7 @@ impl<T: Send + 'static> ReadDirShared<T> {
 
         for _ in 0..self.capacity {
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                 if state.done || state.cancelled {
                     state.batch_active = false;
                     return;
@@ -484,7 +488,7 @@ impl<T: Send + 'static> ReadDirShared<T> {
             };
 
             let waker = {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                 if state.done || state.cancelled {
                     state.batch_active = false;
                     return;
@@ -507,7 +511,7 @@ impl<T: Send + 'static> ReadDirShared<T> {
 
     fn finish_batch(self: &Arc<Self>, entries: ReadDirIterator<T>) {
         let schedule_next = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.done || state.cancelled {
                 state.batch_active = false;
                 false

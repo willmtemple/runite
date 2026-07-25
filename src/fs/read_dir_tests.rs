@@ -447,3 +447,46 @@ fn panicking_batch_becomes_terminal_error() {
     assert_eq!(next_protocol(&mut consumer, &scheduler).unwrap(), None);
     assert_eq!(owner.shared.pending_ops.load(Ordering::Acquire), baseline);
 }
+
+/// A panic raised while the shared state lock is held poisons that mutex. The
+/// batch guard's drop then runs during the unwind and takes the same lock, so
+/// an `unwrap` there would panic while already panicking and abort the process
+/// -- in a runtime whose whole premise is that a panic stays contained. The
+/// scan must instead terminalize normally and stay usable.
+#[test]
+fn poisoned_state_does_not_abort_the_scan() {
+    let owner = current_thread_handle();
+    let baseline = owner.shared.pending_ops.load(Ordering::Acquire);
+    let scheduler = Arc::new(ManualReadDirScheduler::default());
+    let mut consumer = synthetic_read_dir(owner.clone(), 4, || Ok((0..6).map(Ok)), &scheduler)
+        .expect("initial batch should schedule");
+    let shared = Arc::clone(&consumer.observer().shared);
+
+    assert!(scheduler.run_one(), "initial batch should run");
+    assert_eq!(next_protocol(&mut consumer, &scheduler).unwrap(), Some(0));
+
+    // Poison the state mutex exactly as a panic under the lock would.
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = shared.state.lock().expect("lock should still be healthy");
+        panic!("poison the read_dir state");
+    }));
+    assert!(
+        poisoned.is_err(),
+        "the helper panic should have been caught"
+    );
+    assert!(
+        shared.state.lock().is_err(),
+        "the state mutex should now be poisoned"
+    );
+
+    // Every remaining entry must still be delivered, and the scan must reach a
+    // clean end with its runtime liveness released.
+    let mut seen = Vec::new();
+    while let Some(entry) =
+        next_protocol(&mut consumer, &scheduler).expect("a poisoned mutex must not break the scan")
+    {
+        seen.push(entry);
+    }
+    assert_eq!(seen, (1..6).collect::<Vec<_>>());
+    assert_eq!(owner.shared.pending_ops.load(Ordering::Acquire), baseline);
+}
