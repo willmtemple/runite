@@ -504,3 +504,39 @@ fn select_supports_more_than_sixteen_arms() {
 
     assert_eq!(selected, 19);
 }
+
+/// Issue #10 noted that the 0.1 macro expanded to `async move`, so selecting on
+/// a method of a loop-owned resource required hoisting the future out first.
+/// The proc-macro expansion pins in the caller's scope instead, so the arm can
+/// borrow the resource directly — and because losing futures are dropped before
+/// the handler runs, the handler may re-borrow it too.
+#[test]
+fn select_borrows_loop_owned_resources_without_hoisting() {
+    let collected = runite::block_on(async {
+        let (tx, mut rx) = runite::channel::mpsc::channel::<u32>(4);
+        for value in [1u32, 2, 3] {
+            tx.try_send(value).expect("channel should accept the value");
+        }
+        drop(tx);
+
+        let mut seen = Vec::new();
+        loop {
+            // `rx.recv()` borrows `rx` in the arm, inside a loop that owns it.
+            let next = runite::select! {
+                value = rx.recv() => value,
+            };
+            match next {
+                Some(value) => seen.push(value),
+                None => break,
+            }
+        }
+
+        // Re-borrowing the same resource from a handler must also work.
+        let drained = runite::select! {
+            value = rx.recv() => value.is_none() && rx.try_recv().is_err(),
+        };
+        (seen, drained)
+    });
+
+    assert_eq!(collected, (vec![1, 2, 3], true));
+}
