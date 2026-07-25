@@ -2,9 +2,10 @@
 //!
 //! This module opens runtime-aware handles for process standard input, output,
 //! and error. [`Stdin`] reads from standard input, while [`Stdout`] and
-//! [`Stderr`] write through the runtime's platform I/O backend. Each handle
-//! duplicates the process stdio descriptor, so dropping it does not close the
-//! process-wide standard stream.
+//! [`Stderr`] write through the runtime's platform I/O backend. Output handles
+//! duplicate their process descriptors, while all [`Stdin`] handles share one
+//! process-wide reader and its bounded buffer. Dropping a handle does not close
+//! a process standard stream.
 //!
 //! The handles are thread-affine like other runite I/O objects: create and poll
 //! them on the runtime thread that owns them. Tasks do not migrate between
@@ -14,13 +15,17 @@
 //! backend: Linux uses `io_uring`, while macOS aarch64 and Windows offload
 //! blocking writes to the blocking pool. runite does not add userspace buffering
 //! for these writers. Their `poll_flush` and `poll_close` methods are no-ops;
-//! `flush()` only observes that previously awaited writes have completed and
-//! does not call libc `fflush`, a terminal flush, or `fsync`.
+//! they do not call libc `fflush`, a terminal flush, or `fsync`.
 //!
-//! `Stdin` uses the platform backend for reads. macOS and Windows always offload
-//! a blocking read (Windows console handles do not support overlapped I/O);
-//! Linux first tries `io_uring` and falls back to the blocking pool when the
-//! descriptor does not support runtime-native reads.
+//! `Stdin` uses one dedicated blocking reader thread on every platform. That
+//! thread owns a duplicate of the process input handle and, only while a read
+//! is pending, reads ahead into a bounded 64 KiB process-wide buffer. Runtime
+//! tasks only wait for buffered availability, so cancelling a read never loses
+//! bytes or strands a shared blocking-pool worker. Spawning a runite child with
+//! inherited stdin pauses the reader until that child's exit is observed or
+//! its handle is dropped. Windows rejects an inherited-console spawn while a
+//! parent console read is active because console-host reads cannot always be
+//! cancelled strongly enough to guarantee a lossless handoff.
 //!
 //! # Terminal UIs
 //!
@@ -71,41 +76,84 @@
 //! runite::run();
 //! ```
 
-use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll};
-use std::io;
+use std::io::{self, IoSlice};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::io::{AsyncRead, AsyncWrite};
+use crate::io::{AsyncRead, AsyncWrite, IoFuture, ReadState, WriteState};
+#[cfg(any(test, windows, target_os = "macos"))]
 use crate::op::completion::completion_for_current_thread;
 use crate::sys::handle::OwnedFile;
 
+mod stdin_reader;
+
 const READ_CHUNK_BYTES: usize = 1024;
 
-type PendingStdinRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
-type PendingStandardWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
+type PendingStandardWrite = IoFuture<usize>;
+
+static PROCESS_STDIN_READER: OnceLock<Arc<stdin_reader::StdinReader>> = OnceLock::new();
+static PROCESS_STDIN_INIT: Mutex<()> = Mutex::new(());
+static PROCESS_STDIN_HANDOFFS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) struct InheritedStdinHandoff {
+    active: bool,
+}
+
+pub(crate) fn handoff_stdin_to_child() -> io::Result<InheritedStdinHandoff> {
+    let _guard = PROCESS_STDIN_INIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    PROCESS_STDIN_HANDOFFS.fetch_add(1, Ordering::Relaxed);
+    if let Some(reader) = PROCESS_STDIN_READER.get()
+        && let Err(error) = reader.pause_for_handoff()
+    {
+        PROCESS_STDIN_HANDOFFS.fetch_sub(1, Ordering::Relaxed);
+        return Err(error);
+    }
+    Ok(InheritedStdinHandoff { active: true })
+}
+
+impl Drop for InheritedStdinHandoff {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _guard = PROCESS_STDIN_INIT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = PROCESS_STDIN_HANDOFFS.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0);
+        if let Some(reader) = PROCESS_STDIN_READER.get() {
+            reader.resume_after_handoff();
+        }
+        self.active = false;
+    }
+}
 
 /// Async reader for standard input.
 ///
-/// `Stdin` owns a duplicate of the process standard input descriptor and
-/// implements [`AsyncRead`] for byte-oriented reads. It also provides
-/// [`read_line`](Self::read_line) for simple line-oriented input. On Linux, the
-/// reader tries `io_uring` first and falls back to a helper-thread blocking read
-/// if the active descriptor does not support runtime-native reads. On macOS and
-/// Windows, reads are always offloaded to the blocking pool.
+/// Every handle shares the process-wide bounded stdin reader and implements
+/// [`AsyncRead`] for byte-oriented reads. It also provides
+/// [`read_line`](Self::read_line) for simple line-oriented input. The dedicated
+/// reader thread owns the duplicated operating-system handle; `Stdin` itself
+/// contains no raw handle.
 ///
-/// `read_line` keeps an internal buffer and may read beyond the returned line;
-/// bytes after the newline are saved for the next call.
+/// Multiple handles compete for the same byte stream. A completed read removes
+/// bytes exactly once; cancelling a pending read removes only that handle's
+/// waiter.
+///
+/// `read_line` keeps partial lines on the handle but leaves bytes after a
+/// newline in the shared process buffer.
 ///
 /// Create one with [`stdin`].
 pub struct Stdin {
-    fd: OwnedFile,
+    // Pending reads must be dropped before the shared reader reference.
+    read_state: ReadState,
     buffer: Vec<u8>,
-    pending_read: Option<PendingStdinRead>,
-    /// Bytes a completed read produced that overflowed a smaller caller buffer;
-    /// served before any new read so no bytes are lost. See
-    /// [`ReadOverflow`](crate::io::ReadOverflow).
-    read_overflow: Option<Box<crate::io::ReadOverflow>>,
+    reader: Arc<stdin_reader::StdinReader>,
+    waiter_id: u64,
 }
 
 /// Async writer for standard output.
@@ -114,8 +162,8 @@ pub struct Stdin {
 /// and implements [`AsyncWrite`] for runtime-driven write-through writes. A
 /// single write may complete after writing fewer bytes than requested; use
 /// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
-/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops, and
-/// `flush()` does not call libc `fflush` or `fsync`.
+/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops and
+/// do not call libc `fflush` or `fsync`.
 ///
 /// Dropping it does not close the process-wide stdout stream.
 pub struct Stdout {
@@ -128,8 +176,8 @@ pub struct Stdout {
 /// and implements [`AsyncWrite`] for runtime-driven write-through writes. A
 /// single write may complete after writing fewer bytes than requested; use
 /// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
-/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops, and
-/// `flush()` does not call libc `fflush` or `fsync`.
+/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops and
+/// do not call libc `fflush` or `fsync`.
 ///
 /// Dropping it does not close the process-wide stderr stream.
 pub struct Stderr {
@@ -137,13 +185,17 @@ pub struct Stderr {
 }
 
 struct StandardWriter {
-    fd: OwnedFile,
-    pending_write: Option<PendingStandardWrite>,
+    // Pending writes must be dropped before the descriptor owner.
+    write_state: WriteState,
+    fd: Arc<OwnedFile>,
 }
 
 /// Opens an async stdin reader.
 ///
-/// The returned [`Stdin`] owns a duplicate of the process stdin descriptor.
+/// All returned handles consume from one process-wide, bounded reader. The
+/// dedicated reader thread is started lazily by the first successful call and
+/// does not consume process input until a read is pending. A transient setup
+/// failure is returned to that caller without preventing a later retry.
 ///
 /// # Examples
 ///
@@ -159,12 +211,40 @@ struct StandardWriter {
 /// runite::run();
 /// ```
 pub fn stdin() -> io::Result<Stdin> {
-    Ok(Stdin {
-        fd: imp::duplicate_stdin()?,
-        buffer: Vec::new(),
-        pending_read: None,
-        read_overflow: None,
-    })
+    let reader = get_or_try_init(&PROCESS_STDIN_READER, &PROCESS_STDIN_INIT, || {
+        let reader = stdin_reader::StdinReader::spawn(imp::duplicate_stdin()?)?;
+        for _ in 0..PROCESS_STDIN_HANDOFFS.load(Ordering::Relaxed) {
+            reader.pause_for_handoff()?;
+        }
+        Ok(reader)
+    })?;
+    Ok(Stdin::from_reader(reader))
+}
+
+fn get_or_try_init<T>(
+    cell: &OnceLock<Arc<T>>,
+    init_lock: &Mutex<()>,
+    init: impl FnOnce() -> io::Result<Arc<T>>,
+) -> io::Result<Arc<T>> {
+    if let Some(value) = cell.get() {
+        return Ok(Arc::clone(value));
+    }
+
+    let _guard = init_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(value) = cell.get() {
+        return Ok(Arc::clone(value));
+    }
+
+    let value = init()?;
+    match cell.set(Arc::clone(&value)) {
+        Ok(()) => Ok(value),
+        Err(_) => Ok(Arc::clone(
+            cell.get()
+                .expect("stdin reader must be initialized while holding its lock"),
+        )),
+    }
 }
 
 /// Opens an async stdout writer.
@@ -216,14 +296,24 @@ pub fn stderr() -> io::Result<Stderr> {
 }
 
 impl Stdin {
+    fn from_reader(reader: Arc<stdin_reader::StdinReader>) -> Self {
+        let waiter_id = reader.new_waiter_id();
+        Self {
+            read_state: ReadState::default(),
+            buffer: Vec::new(),
+            reader,
+            waiter_id,
+        }
+    }
+
     /// Reads a single UTF-8 line, including the trailing newline when present.
     ///
     /// Returns `Ok(None)` on EOF.
     ///
     /// Invalid UTF-8 is reported as [`io::ErrorKind::InvalidData`].
     ///
-    /// This method reads chunks into an internal buffer, so it may read beyond
-    /// the line it returns. Buffered bytes are preserved for subsequent calls.
+    /// Partial lines are retained across waits. Bytes following a newline stay
+    /// in the process-wide buffer for another call or another handle.
     ///
     /// # Examples
     ///
@@ -245,7 +335,7 @@ impl Stdin {
             }
 
             let mut chunk = vec![0; READ_CHUNK_BYTES];
-            let read = self.read(&mut chunk).await?;
+            let read = self.read_line_chunk(&mut chunk).await?;
             if read == 0 {
                 if self.buffer.is_empty() {
                     return Ok(None);
@@ -268,18 +358,10 @@ impl Stdin {
     ///
     /// # Cancel safety
     ///
-    /// On the Linux `io_uring` path this method is cancel-safe: a read that
-    /// completes after its future is dropped is stashed on the handle and served
-    /// by the next read, so no bytes are lost.
-    ///
-    /// The blocking-offload fallback (macOS, Windows, and Linux kernels without
-    /// `io_uring` stdin read support) is **not** cancel-safe. A blocking
-    /// read cannot be interrupted, so if the returned future is dropped
-    /// while a read is in progress, the byte(s) that read consumes are lost
-    /// (they will not be returned to a later read), and the pool worker running
-    /// it stays blocked until input arrives. Avoid dropping a stdin read future
-    /// (e.g. in a `select!`) on those platforms. A dedicated buffered stdin
-    /// reader that closes this gap is planned post-0.1.
+    /// This method is cancel-safe on every supported platform. Dropping the
+    /// returned future unregisters its waiter; input already read by the
+    /// dedicated thread remains in the shared buffer for a later read. Stdin
+    /// never occupies a runtime blocking-pool worker.
     ///
     /// # Examples
     ///
@@ -293,12 +375,93 @@ impl Stdin {
     /// runite::run();
     /// ```
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Delegate to the AsyncRead path so the in-flight read is stashed on the
-        // handle. On the Linux io_uring path this makes the read cancel-safe (a
-        // completed-but-unclaimed read is served next via the overflow buffer);
-        // the blocking-offload fallback still cannot cancel an in-progress
-        // blocking read (a cancel-safe buffered stdin reader is a roadmap item).
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
+        self.read_buffered(buf, false).await
+    }
+
+    async fn read_line_chunk(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_buffered(buf, true).await
+    }
+
+    async fn read_buffered(&mut self, buf: &mut [u8], stop_at_newline: bool) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if !stop_at_newline && let Some(read) = self.drain_line_buffer(buf) {
+            return Ok(read);
+        }
+
+        let mut read = StdinReadGuard::new(
+            &mut self.read_state,
+            Arc::clone(&self.reader),
+            self.waiter_id,
+            stop_at_newline,
+        );
+        let result = core::future::poll_fn(|cx| read.poll(cx, buf)).await;
+        read.complete();
+        result
+    }
+
+    fn drain_line_buffer(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        let read = buf.len().min(self.buffer.len());
+        buf[..read].copy_from_slice(&self.buffer[..read]);
+        self.buffer.drain(..read);
+        Some(read)
+    }
+}
+
+impl Drop for Stdin {
+    fn drop(&mut self) {
+        self.reader.abandon(self.waiter_id);
+    }
+}
+
+struct StdinReadGuard<'a> {
+    read_state: &'a mut ReadState,
+    reader: Arc<stdin_reader::StdinReader>,
+    waiter_id: u64,
+    stop_at_newline: bool,
+    armed: bool,
+}
+
+impl<'a> StdinReadGuard<'a> {
+    fn new(
+        read_state: &'a mut ReadState,
+        reader: Arc<stdin_reader::StdinReader>,
+        waiter_id: u64,
+        stop_at_newline: bool,
+    ) -> Self {
+        Self {
+            read_state,
+            reader,
+            waiter_id,
+            stop_at_newline,
+            armed: true,
+        }
+    }
+
+    fn poll(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        let reader = Arc::clone(&self.reader);
+        let waiter_id = self.waiter_id;
+        let stop_at_newline = self.stop_at_newline;
+        self.read_state.poll_slice(cx, buf, move |len| {
+            reader.read_future(waiter_id, len, stop_at_newline)
+        })
+    }
+
+    fn complete(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StdinReadGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.read_state = ReadState::default();
+            self.reader.abandon(self.waiter_id);
+        }
     }
 }
 
@@ -361,43 +524,31 @@ impl Stderr {
 impl StandardWriter {
     fn new(fd: OwnedFile) -> Self {
         Self {
-            fd,
-            pending_write: None,
+            write_state: WriteState::default(),
+            fd: Arc::new(fd),
         }
     }
 
     async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        imp::standard_write_future(crate::sys::handle::raw_file(&self.fd), buf.to_vec()).await
+        let generation = crate::io::next_operation_id();
+        core::future::poll_fn(|cx| self.poll_write(cx, buf, generation)).await
     }
 
-    fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
-        if self.pending_write.is_none() {
-            self.pending_write = Some(imp::standard_write_future(
-                crate::sys::handle::raw_file(&self.fd),
-                buf.to_vec(),
-            ));
-        }
-
-        match self
-            .pending_write
-            .as_mut()
-            .expect("pending standard stream write must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                self.pending_write = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        let fd = Arc::clone(&self.fd);
+        self.write_state
+            .poll_write(cx, generation, buf, move |data| {
+                imp::standard_write_future(fd, data)
+            })
     }
 }
 
@@ -412,43 +563,15 @@ impl AsyncRead for Stdin {
         }
 
         let this = self.get_mut();
-
-        // Serve any surplus from a previous read before submitting a new one.
-        if let Some(overflow) = this.read_overflow.as_mut() {
-            let n = overflow.drain_into(buf);
-            if overflow.is_drained() {
-                this.read_overflow = None;
-            }
-            return Poll::Ready(Ok(n));
+        if let Some(read) = this.drain_line_buffer(buf) {
+            return Poll::Ready(Ok(read));
         }
 
-        if this.pending_read.is_none() {
-            this.pending_read = Some(imp::stdin_read_future(
-                crate::sys::handle::raw_file(&this.fd),
-                buf.len(),
-            ));
-        }
-
-        match this
-            .pending_read
-            .as_mut()
-            .expect("pending stdin read must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_read = None;
-                let bytes = result?;
-                let n = bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&bytes[..n]);
-                // Retain any bytes that did not fit rather than discarding them.
-                if bytes.len() > n {
-                    this.read_overflow = Some(Box::new(crate::io::ReadOverflow::new(&bytes[n..])));
-                }
-                Poll::Ready(Ok(n))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        let reader = Arc::clone(&this.reader);
+        let waiter_id = this.waiter_id;
+        this.read_state.poll_slice(cx, buf, move |len| {
+            reader.read_future(waiter_id, len, false)
+        })
     }
 }
 
@@ -458,7 +581,36 @@ impl AsyncWrite for Stdout {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.get_mut().writer.poll_write(cx, buf)
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().writer.poll_write(cx, buf, generation)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_vectored_operation(cx, bufs, 0)
+    }
+
+    fn poll_write_vectored_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -476,7 +628,36 @@ impl AsyncWrite for Stderr {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.get_mut().writer.poll_write(cx, buf)
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().writer.poll_write(cx, buf, generation)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_vectored_operation(cx, bufs, 0)
+    }
+
+    fn poll_write_vectored_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -488,14 +669,18 @@ impl AsyncWrite for Stderr {
     }
 }
 
+#[cfg(any(test, windows, target_os = "macos"))]
 async fn offload<T: Send + 'static>(
     task: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
     let (future, handle) = completion_for_current_thread::<io::Result<T>>();
     let handle_for_task = handle.clone();
-    if let Err(error) =
-        crate::sys::blocking::spawn_blocking(move || handle_for_task.complete(task()))
-    {
+    if let Err(error) = crate::sys::blocking::spawn_blocking_owned(task, move |outcome| {
+        handle_for_task.complete(
+            outcome
+                .unwrap_or_else(|_| Err(io::Error::other("blocking standard I/O task panicked"))),
+        );
+    }) {
         handle.complete(Err(error));
     }
     future.await
@@ -505,37 +690,23 @@ fn decode_line(bytes: Vec<u8>) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-/// Platform backend for standard-stream handles: descriptor duplication, the
-/// stdin read future, and the write-through future. The public wrappers above
-/// are platform-neutral; only this module knows how the bytes actually move.
+/// Platform backend for standard-stream handle duplication and blocking system
+/// calls. The dedicated stdin thread is platform-neutral and owns the handle it
+/// passes to `blocking_stdin_read`.
 #[cfg(unix)]
 mod imp {
     use std::io;
     use std::os::fd::{FromRawFd, RawFd};
+    use std::sync::Arc;
 
-    use super::{PendingStandardWrite, PendingStdinRead, offload};
+    use super::PendingStandardWrite;
+    #[cfg(not(target_os = "linux"))]
+    use super::offload;
+    #[cfg(target_os = "linux")]
     use crate::op::fs::FsOp;
+    #[cfg(target_os = "linux")]
     use crate::sys::current::fs as sys_fs;
-    use crate::sys::handle::{OwnedFile, RawFile};
-
-    #[cfg(target_os = "linux")]
-    use crate::op::completion::completion_for_current_thread;
-    #[cfg(target_os = "linux")]
-    use crate::platform::linux::runtime::with_current_driver;
-    #[cfg(target_os = "linux")]
-    use crate::platform::linux::uring::{IORING_OP_READ, IoUringCqe, IoUringSqe};
-    #[cfg(target_os = "linux")]
-    use std::cell::Cell;
-    #[cfg(target_os = "linux")]
-    use std::sync::{Arc, Mutex};
-
-    #[cfg(target_os = "linux")]
-    thread_local! {
-        static STDIN_URING_SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
-    }
-
-    #[cfg(target_os = "linux")]
-    const FILE_CURSOR: u64 = u64::MAX;
+    use crate::sys::handle::{OwnedFile, raw_file};
 
     pub(super) fn duplicate_stdin() -> io::Result<OwnedFile> {
         duplicate_fd(libc::STDIN_FILENO)
@@ -549,90 +720,35 @@ mod imp {
         duplicate_fd(libc::STDERR_FILENO)
     }
 
-    pub(super) fn stdin_read_future(fd: RawFile, len: usize) -> PendingStdinRead {
-        Box::pin(async move {
-            #[cfg(target_os = "linux")]
-            {
-                let support = STDIN_URING_SUPPORTED.with(Cell::get);
-                if support != Some(false) {
-                    match submit_uring_read(fd, len).await {
-                        Ok(bytes) => {
-                            STDIN_URING_SUPPORTED.with(|state| state.set(Some(true)));
-                            return Ok(bytes);
-                        }
-                        Err(error) if should_fallback_to_offload(&error) => {
-                            STDIN_URING_SUPPORTED.with(|state| state.set(Some(false)));
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
+    pub(super) fn blocking_stdin_read(source: &OwnedFile, buffer: &mut [u8]) -> io::Result<usize> {
+        blocking_read(raw_file(source), buffer)
+    }
 
-            offload(move || {
-                let mut buffer = vec![0; len];
-                let read = blocking_read(fd, &mut buffer)?;
-                buffer.truncate(read);
-                Ok(buffer)
+    pub(super) fn should_retry_stdin_read(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::Interrupted
+    }
+
+    pub(super) fn stdin_handoff_requires_idle(_source: &OwnedFile) -> bool {
+        false
+    }
+
+    pub(super) fn standard_write_future(fd: Arc<OwnedFile>, data: Vec<u8>) -> PendingStandardWrite {
+        #[cfg(target_os = "linux")]
+        {
+            Box::pin(async move {
+                sys_fs::write(FsOp::Write {
+                    fd: raw_file(&fd),
+                    offset: None,
+                    data,
+                })
+                .await
             })
-            .await
-        })
-    }
+        }
 
-    pub(super) fn standard_write_future(fd: RawFile, data: Vec<u8>) -> PendingStandardWrite {
-        Box::pin(sys_fs::write(FsOp::Write {
-            fd,
-            offset: None,
-            data,
-        }))
-    }
-
-    #[cfg(target_os = "linux")]
-    async fn submit_uring_read(fd: RawFd, len: usize) -> io::Result<Vec<u8>> {
-        let buffer = Arc::new(Mutex::new(vec![0; len].into_boxed_slice()));
-        let ptr = buffer.lock().unwrap().as_mut_ptr();
-        let capacity = len;
-        submit_uring_guarded(
-            move |sqe| {
-                sqe.opcode = IORING_OP_READ;
-                sqe.fd = fd;
-                sqe.addr = ptr as u64;
-                sqe.len = capacity as u32;
-                sqe.off = FILE_CURSOR;
-            },
-            Box::new(Arc::clone(&buffer)),
-            move |cqe| {
-                let read = cqe_to_result(cqe)? as usize;
-                let buffer = buffer.lock().unwrap();
-                Ok(buffer[..read].to_vec())
-            },
-        )
-        .await
-    }
-
-    #[cfg(target_os = "linux")]
-    async fn submit_uring_guarded<T: Send + 'static, M>(
-        fill: impl FnOnce(&mut IoUringSqe),
-        guard: Box<dyn std::any::Any + Send + 'static>,
-        map: M,
-    ) -> io::Result<T>
-    where
-        M: FnOnce(IoUringCqe) -> io::Result<T> + Send + 'static,
-    {
-        let (future, handle) = completion_for_current_thread::<io::Result<T>>();
-        let callback_handle = handle.clone();
-        let token = with_current_driver(|driver| {
-            driver.submit_operation(fill, move |cqe| {
-                callback_handle.complete(map(cqe));
-            })
-        })?;
-
-        handle.set_cancel(move || {
-            let _ = with_current_driver(|driver| {
-                driver.cancel_operation_with_guard(token, Some(guard))
-            });
-        });
-
-        future.await
+        #[cfg(not(target_os = "linux"))]
+        {
+            Box::pin(async move { offload(move || blocking_write(raw_file(&fd), &data)).await })
+        }
     }
 
     pub(super) fn blocking_read(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
@@ -654,6 +770,23 @@ mod imp {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn blocking_write(fd: RawFd, data: &[u8]) -> io::Result<usize> {
+        loop {
+            // SAFETY: the accepted blocking job owns the descriptor through an
+            // `Arc<OwnedFile>` for this call, and `data` is initialized.
+            let written =
+                unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+            if written >= 0 {
+                return Ok(written as usize);
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
     pub(super) fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFile> {
         // SAFETY: `fd` is passed by value; on success `fcntl` returns a new
         // close-on-exec descriptor owned by the caller.
@@ -661,23 +794,6 @@ mod imp {
         // SAFETY: `raw` was just returned by `F_DUPFD_CLOEXEC`, so it is a valid,
         // uniquely owned file descriptor to transfer into `OwnedFd`.
         Ok(unsafe { OwnedFile::from_raw_fd(raw) })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn cqe_to_result(cqe: IoUringCqe) -> io::Result<i32> {
-        if cqe.res < 0 {
-            Err(io::Error::from_raw_os_error(-cqe.res))
-        } else {
-            Ok(cqe.res)
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn should_fallback_to_offload(error: &io::Error) -> bool {
-        matches!(
-            error.raw_os_error(),
-            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
-        )
     }
 
     fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
@@ -691,24 +807,51 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
+    use core::ffi::c_void;
     use std::io;
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::sync::Arc;
 
     use windows_sys::Win32::Foundation::{
-        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, GetLastError, HANDLE,
-        INVALID_HANDLE_VALUE,
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED,
+        GetLastError, HANDLE, INVALID_HANDLE_VALUE, SetLastError,
     };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-    use super::{PendingStandardWrite, PendingStdinRead, offload};
-    use crate::sys::handle::{OwnedFile, RawFile};
+    use super::{PendingStandardWrite, offload};
+    use crate::sys::handle::{OwnedFile, RawFile, raw_file};
+
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: isize,
+        information: usize,
+    }
+
+    #[repr(C)]
+    struct FileModeInformation {
+        mode: u32,
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlNtStatusToDosError(status: i32) -> u32;
+        fn NtQueryInformationFile(
+            file_handle: HANDLE,
+            io_status_block: *mut IoStatusBlock,
+            file_information: *mut c_void,
+            length: u32,
+            file_information_class: i32,
+        ) -> i32;
+    }
 
     pub(super) fn duplicate_stdin() -> io::Result<OwnedFile> {
-        duplicate_std_handle(STD_INPUT_HANDLE)
+        let source = duplicate_std_handle(STD_INPUT_HANDLE)?;
+        validate_stdin_handle(&source)?;
+        Ok(source)
     }
 
     pub(super) fn duplicate_stdout() -> io::Result<OwnedFile> {
@@ -719,22 +862,64 @@ mod imp {
         duplicate_std_handle(STD_ERROR_HANDLE)
     }
 
-    /// Console handles do not support overlapped I/O and cannot be associated
-    /// with a completion port, so stdin reads always run on the blocking pool.
-    pub(super) fn stdin_read_future(fd: RawFile, len: usize) -> PendingStdinRead {
-        Box::pin(async move {
-            offload(move || {
-                let mut buffer = vec![0; len];
-                let read = blocking_read(fd, &mut buffer)?;
-                buffer.truncate(read);
-                Ok(buffer)
-            })
-            .await
-        })
+    pub(super) fn blocking_stdin_read(source: &OwnedFile, buffer: &mut [u8]) -> io::Result<usize> {
+        blocking_read(raw_file(source), buffer)
     }
 
-    pub(super) fn standard_write_future(fd: RawFile, data: Vec<u8>) -> PendingStandardWrite {
-        Box::pin(async move { offload(move || blocking_write(fd, &data)).await })
+    pub(super) fn should_retry_stdin_read(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::Interrupted
+            || error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32)
+    }
+
+    pub(super) fn stdin_handoff_requires_idle(source: &OwnedFile) -> bool {
+        let mut console_mode = 0u32;
+        // SAFETY: `source` owns the queried handle and `console_mode` is a
+        // valid out-pointer.
+        (unsafe { GetConsoleMode(raw_file(source).as_handle(), &mut console_mode) }) != 0
+    }
+
+    pub(super) fn validate_stdin_handle(source: &OwnedFile) -> io::Result<()> {
+        const FILE_MODE_INFORMATION_CLASS: i32 = 16;
+        const FILE_SYNCHRONOUS_IO_ALERT: u32 = 0x10;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+
+        let handle = raw_file(source).as_handle();
+        if stdin_handoff_requires_idle(source) {
+            return Ok(());
+        }
+
+        let mut status = IoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        let mut mode = FileModeInformation { mode: 0 };
+        // SAFETY: `mode` matches FileModeInformation, and `source` keeps
+        // `handle` live for the duration of the query.
+        let result = unsafe {
+            NtQueryInformationFile(
+                handle,
+                &mut status,
+                (&raw mut mode).cast(),
+                std::mem::size_of::<FileModeInformation>() as u32,
+                FILE_MODE_INFORMATION_CLASS,
+            )
+        };
+        if result != 0 {
+            // SAFETY: `result` came directly from an NT API.
+            let error = unsafe { RtlNtStatusToDosError(result) };
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        if mode.mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "overlapped Windows stdin handles are not supported by the dedicated reader",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn standard_write_future(fd: Arc<OwnedFile>, data: Vec<u8>) -> PendingStandardWrite {
+        Box::pin(async move { offload(move || blocking_write(raw_file(&fd), &data)).await })
     }
 
     fn duplicate_std_handle(which: u32) -> io::Result<OwnedFile> {
@@ -768,11 +953,16 @@ mod imp {
         }
         // SAFETY: on success `duplicated` is a fresh handle owned exclusively by
         // this call.
-        Ok(unsafe { OwnedHandle::from_raw_handle(duplicated) })
+        Ok(OwnedFile::unbound(unsafe {
+            OwnedHandle::from_raw_handle(duplicated)
+        }))
     }
 
     pub(super) fn blocking_read(fd: RawFile, buffer: &mut [u8]) -> io::Result<usize> {
         let mut read = 0u32;
+        // SAFETY: clearing the current thread's last-error slot lets a
+        // successful zero-byte console read report a fresh abort status.
+        unsafe { SetLastError(0) };
         // SAFETY: `fd` names a handle that remains open for the duration of the
         // call, and `buffer` points to `buffer.len()` writable bytes owned
         // exclusively through `&mut [u8]`.
@@ -785,20 +975,25 @@ mod imp {
                 std::ptr::null_mut(),
             )
         };
-        if ok == 0 {
-            // A closed pipe peer reports `ERROR_BROKEN_PIPE`; map it to the
-            // Unix "read returns 0 at EOF" convention.
-            // SAFETY: no intervening API call has replaced the thread error.
-            let error = unsafe { GetLastError() };
-            if error == ERROR_BROKEN_PIPE {
-                return Ok(0);
-            }
-            return Err(io::Error::from_raw_os_error(error as i32));
-        }
-        Ok(read as usize)
+        // SAFETY: no Win32 call intervened after ReadFile.
+        let error = unsafe { GetLastError() };
+        finish_blocking_read(ok, read, error)
     }
 
-    fn blocking_write(fd: RawFile, data: &[u8]) -> io::Result<usize> {
+    pub(super) fn finish_blocking_read(ok: i32, read: u32, error: u32) -> io::Result<usize> {
+        if ok != 0 {
+            if read == 0 && error == ERROR_OPERATION_ABORTED {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            return Ok(read as usize);
+        }
+        if error == ERROR_BROKEN_PIPE {
+            return Ok(0);
+        }
+        Err(io::Error::from_raw_os_error(error as i32))
+    }
+
+    pub(super) fn blocking_write(fd: RawFile, data: &[u8]) -> io::Result<usize> {
         let mut written = 0u32;
         // SAFETY: `fd` names a handle that remains open for the duration of the
         // call, and `data` points to `data.len()` initialized bytes.
@@ -820,12 +1015,273 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use std::future::poll_fn;
+    use std::io;
     use std::sync::{Arc, Mutex};
 
     #[cfg(unix)]
     use crate::io::AsyncWriteExt;
 
     use super::*;
+
+    struct PendingOnce<T> {
+        pending: bool,
+        result: Option<io::Result<T>>,
+    }
+
+    impl<T> PendingOnce<T> {
+        fn new(result: io::Result<T>) -> Self {
+            Self {
+                pending: true,
+                result: Some(result),
+            }
+        }
+    }
+
+    impl<T: Unpin> Future for PendingOnce<T> {
+        type Output = io::Result<T>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.pending {
+                self.pending = false;
+                Poll::Pending
+            } else {
+                Poll::Ready(self.result.take().expect("polled after completion"))
+            }
+        }
+    }
+
+    #[test]
+    fn blocking_offload_panic_terminalizes_its_completion() {
+        let observed = Arc::new(Mutex::new(None::<io::ErrorKind>));
+        {
+            let observed = Arc::clone(&observed);
+            crate::spawn(async move {
+                let error = offload(|| -> io::Result<()> {
+                    panic!("blocking standard I/O test panic");
+                })
+                .await
+                .expect_err("panic must become a terminal I/O error");
+                *observed.lock().unwrap() = Some(error.kind());
+            });
+        }
+
+        crate::run();
+        assert_eq!(*observed.lock().unwrap(), Some(io::ErrorKind::Other));
+    }
+
+    #[test]
+    fn failed_stdin_initialization_can_be_retried_and_success_is_cached() {
+        let cell = OnceLock::new();
+        let init_lock = Mutex::new(());
+
+        let error = get_or_try_init(&cell, &init_lock, || {
+            Err::<Arc<usize>, _>(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "transient setup failure",
+            ))
+        })
+        .expect_err("the injected first initialization must fail");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(cell.get().is_none());
+
+        let initialized =
+            get_or_try_init(&cell, &init_lock, || Ok(Arc::new(42))).expect("retry succeeds");
+        let cached = get_or_try_init(&cell, &init_lock, || {
+            panic!("a successful initialization must be cached")
+        })
+        .expect("cached value");
+        assert!(Arc::ptr_eq(&initialized, &cached));
+    }
+
+    #[test]
+    fn cancelled_stdin_read_preserves_later_input_and_removes_its_waiter() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut abandoned = [0u8; 8];
+
+        crate::block_on(async {
+            let mut pending = Box::pin(input.read(&mut abandoned));
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(pending);
+            assert_eq!(reader.waiter_count(), 0);
+
+            write_test_pipe(&mut writer, b"kept").expect("write after cancellation");
+            let mut observed = [0u8; 4];
+            assert_eq!(
+                input.read(&mut observed).await.expect("replacement read"),
+                4
+            );
+            assert_eq!(&observed, b"kept");
+        });
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stdin_reader_does_not_consume_without_demand() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        assert!(reader.wait_for_idle(std::time::Duration::from_secs(5)));
+        write_test_pipe(&mut writer, b"held").expect("write idle stdin bytes");
+        assert_eq!(reader.buffered_len(), 0);
+
+        let mut observed = [0u8; 4];
+        assert_eq!(
+            crate::block_on(input.read(&mut observed)).expect("demanded read"),
+            4
+        );
+        assert_eq!(&observed, b"held");
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn inherited_stdin_handoff_pauses_and_resumes_pending_reader() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        assert!(reader.wait_for_active(std::time::Duration::from_secs(5)));
+
+        reader
+            .pause_for_handoff()
+            .expect("interruptible reader should pause");
+        write_test_pipe(&mut writer, b"x").expect("write while handed off");
+        assert_eq!(reader.buffered_len(), 0);
+        reader.resume_after_handoff();
+
+        assert!(reader.wait_for_buffered(1, std::time::Duration::from_secs(5)));
+        assert!(matches!(pending.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
+        drop(pending);
+        assert_eq!(&byte, b"x");
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn cancelled_stdin_read_line_retains_its_partial_prefix() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        write_test_pipe(&mut writer, b"par").expect("write partial line");
+        let mut pending = Box::pin(input.read_line());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        assert!(reader.wait_for_buffered(3, std::time::Duration::from_secs(5)));
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        drop(pending);
+        assert_eq!(reader.waiter_count(), 0);
+
+        write_test_pipe(&mut writer, b"tial\n").expect("finish partial line");
+        assert_eq!(
+            crate::block_on(input.read_line())
+                .expect("replacement line read")
+                .as_deref(),
+            Some("partial\n")
+        );
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn cancelled_read_line_prefix_precedes_inherent_and_trait_reads() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        write_test_pipe(&mut writer, b"prefix").expect("write partial line");
+        let mut pending = Box::pin(input.read_line());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        assert!(reader.wait_for_buffered(6, std::time::Duration::from_secs(5)));
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        drop(pending);
+
+        write_test_pipe(&mut writer, b"-tail").expect("write bytes after prefix");
+        let mut inherent = [0u8; 3];
+        assert_eq!(
+            crate::block_on(input.read(&mut inherent)).expect("inherent prefix read"),
+            3
+        );
+        assert_eq!(&inherent, b"pre");
+
+        let mut trait_read = [0u8; 8];
+        assert!(matches!(
+            Pin::new(&mut input).poll_read(&mut cx, &mut trait_read),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(&trait_read[..3], b"fix");
+
+        let mut tail = [0u8; 5];
+        assert_eq!(
+            crate::block_on(input.read(&mut tail)).expect("shared tail read"),
+            5
+        );
+        assert_eq!(&tail, b"-tail");
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn standard_writer_does_not_reuse_an_abandoned_write_count() {
+        let path = std::env::current_dir()
+            .expect("current directory")
+            .join("target")
+            .join(format!("stdio-pending-write-{}", std::process::id()));
+        let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
+
+        {
+            let observed = Arc::clone(&observed);
+            let path = path.clone();
+            crate::spawn(async move {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .expect("open fixture");
+                #[cfg(unix)]
+                let fd: OwnedFile = file.into();
+                #[cfg(windows)]
+                let fd = OwnedFile::unbound(std::os::windows::io::OwnedHandle::from(file));
+                let mut writer = StandardWriter::new(fd);
+                let old = b"old".to_vec();
+                let old_generation = crate::io::next_operation_id();
+
+                poll_fn(|cx| {
+                    assert!(
+                        writer
+                            .write_state
+                            .poll_write(cx, old_generation, &old, |_| {
+                                Box::pin(PendingOnce::new(Ok(old.len())))
+                            })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+
+                assert_eq!(writer.write(b"new bytes").await.expect("new write"), 9);
+                drop(writer);
+                *observed.lock().unwrap() = Some(std::fs::read(&path).expect("read fixture"));
+                std::fs::remove_file(&path).expect("remove fixture");
+            });
+        }
+
+        crate::run();
+        assert_eq!(
+            observed.lock().unwrap().as_deref(),
+            Some(b"new bytes".as_slice())
+        );
+    }
 
     #[test]
     fn stdout_and_stderr_write_successfully() {
@@ -922,100 +1378,289 @@ mod tests {
     #[test]
     fn stdin_reads_single_byte_from_tty_fd() {
         let (master, slave) = open_pty();
+        let reader =
+            stdin_reader::StdinReader::spawn_for_test(slave, stdin_reader::BUFFER_CAPACITY)
+                .expect("spawn pty stdin reader");
         write_fd(std::os::fd::AsRawFd::as_raw_fd(&master), b"x\n")
             .expect("pty master should write input");
 
-        let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
-        {
-            let observed = Arc::clone(&observed);
-            crate::spawn(async move {
-                let mut input = Stdin {
-                    fd: slave,
-                    buffer: Vec::new(),
-                    pending_read: None,
-                    read_overflow: None,
-                };
-                let mut byte = [0u8; 1];
-                let read = input
+        let mut input = Stdin::from_reader(Arc::clone(&reader));
+        let mut byte = [0u8; 1];
+        let read = crate::block_on(input.read(&mut byte))
+            .expect("single-byte tty stdin read should succeed");
+        assert_eq!(&byte[..read], b"x");
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stdin_read_ahead_survives_sequential_handles() {
+        let (mut first, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut second = Stdin::from_reader(Arc::clone(&reader));
+        write_test_pipe(&mut writer, b"abcdef").expect("write read-ahead bytes");
+
+        let mut prefix = [0u8; 2];
+        assert_eq!(
+            crate::block_on(first.read(&mut prefix)).expect("first handle read"),
+            2
+        );
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(reader.buffered_len(), 4);
+        drop(first);
+
+        let mut suffix = [0u8; 4];
+        assert_eq!(
+            crate::block_on(second.read(&mut suffix)).expect("second handle read"),
+            4
+        );
+        assert_eq!(&suffix, b"cdef");
+
+        drop(writer);
+        let mut eof = [0u8; 1];
+        assert_eq!(
+            crate::block_on(second.read(&mut eof)).expect("stdin EOF"),
+            0
+        );
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stdin_read_line_preserves_read_ahead_and_reports_invalid_utf8() {
+        let (mut first, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut second = Stdin::from_reader(Arc::clone(&reader));
+        write_test_pipe(&mut writer, b"first\nsecond\nbad \xff\n").expect("write line input");
+        drop(writer);
+
+        crate::block_on(async {
+            assert_eq!(
+                first.read_line().await.expect("first line").as_deref(),
+                Some("first\n")
+            );
+            assert_eq!(
+                second.read_line().await.expect("second line").as_deref(),
+                Some("second\n")
+            );
+            assert_eq!(
+                second
+                    .read_line()
+                    .await
+                    .expect_err("invalid UTF-8 should fail")
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(
+                second
+                    .read_line()
+                    .await
+                    .expect("EOF after bad line")
+                    .is_none()
+            );
+        });
+
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn multiple_pending_stdin_handles_consume_each_byte_once() {
+        let (mut first, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut second = Stdin::from_reader(Arc::clone(&reader));
+        let mut first_byte = [0u8; 1];
+        let mut second_byte = [0u8; 1];
+        let mut first_read = Box::pin(first.read(&mut first_byte));
+        let mut second_read = Box::pin(second.read(&mut second_byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        assert!(first_read.as_mut().poll(&mut cx).is_pending());
+        assert!(second_read.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(reader.waiter_count(), 2);
+
+        write_test_pipe(&mut writer, b"xy").expect("write waiter bytes");
+        assert!(reader.wait_for_buffered(2, std::time::Duration::from_secs(5)));
+        assert!(matches!(
+            first_read.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(1))
+        ));
+        assert!(matches!(
+            second_read.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(1))
+        ));
+        drop(first_read);
+        drop(second_read);
+
+        let mut observed = [first_byte[0], second_byte[0]];
+        observed.sort_unstable();
+        assert_eq!(&observed, b"xy");
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stdin_drains_buffer_before_reporting_eof() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        write_test_pipe(&mut writer, b"tail").expect("write EOF fixture");
+        drop(writer);
+
+        crate::block_on(async {
+            let mut bytes = [0u8; 8];
+            assert_eq!(input.read(&mut bytes).await.expect("buffered tail"), 4);
+            assert_eq!(&bytes[..4], b"tail");
+            assert_eq!(input.read(&mut bytes).await.expect("EOF"), 0);
+            assert_eq!(input.read(&mut bytes).await.expect("stable EOF"), 0);
+        });
+
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        assert!(reader.interrupt_released());
+    }
+
+    #[test]
+    fn stdin_reader_errors_are_terminal_and_repeatable() {
+        fn fail_read(_source: &OwnedFile, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected stdin failure",
+            ))
+        }
+
+        let (source, mut writer) = test_pipe();
+        write_test_pipe(&mut writer, b"x").expect("make test source readable");
+        let reader = stdin_reader::StdinReader::spawn_with_reader_for_test(
+            source,
+            stdin_reader::BUFFER_CAPACITY,
+            fail_read,
+        )
+        .expect("spawn failing stdin reader");
+        let mut input = Stdin::from_reader(Arc::clone(&reader));
+
+        crate::block_on(async {
+            let mut byte = [0u8; 1];
+            for _ in 0..2 {
+                let error = input
                     .read(&mut byte)
                     .await
-                    .expect("single-byte tty stdin read should succeed");
-                *observed.lock().expect("observed mutex poisoned") = Some(byte[..read].to_vec());
-            });
-        }
+                    .expect_err("terminal reader error");
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(error.to_string(), "injected stdin failure");
+            }
+        });
 
-        crate::run();
-
-        assert_eq!(
-            observed.lock().expect("observed mutex poisoned").as_deref(),
-            Some(b"x".as_slice())
-        );
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        assert!(reader.interrupt_released());
     }
 
     #[test]
-    fn stdin_read_line_drains_buffered_read_ahead_before_reading_fd() {
-        let fd = imp::duplicate_stdin().expect("dup stdin fd");
-        let observed = Arc::new(Mutex::new(None::<Vec<String>>));
+    fn transient_stdin_read_errors_are_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        {
-            let observed = Arc::clone(&observed);
-            crate::spawn(async move {
-                let mut input = Stdin {
-                    fd,
-                    buffer: b"first\nsecond\n".to_vec(),
-                    pending_read: None,
-                    read_overflow: None,
-                };
-                let first = input
-                    .read_line()
-                    .await
-                    .expect("first buffered line")
-                    .expect("first line should exist");
-                let second = input
-                    .read_line()
-                    .await
-                    .expect("second buffered line")
-                    .expect("second line should exist");
-                *observed.lock().expect("observed mutex poisoned") = Some(vec![first, second]);
-            });
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn interrupt_once(source: &OwnedFile, buffer: &mut [u8]) -> io::Result<usize> {
+            if CALLS.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "injected transient interruption",
+                ))
+            } else {
+                imp::blocking_stdin_read(source, buffer)
+            }
         }
 
-        crate::run();
+        CALLS.store(0, Ordering::Release);
+        let (source, mut writer) = test_pipe();
+        let reader = stdin_reader::StdinReader::spawn_with_reader_for_test(
+            source,
+            stdin_reader::BUFFER_CAPACITY,
+            interrupt_once,
+        )
+        .expect("spawn retrying stdin reader");
+        let mut input = Stdin::from_reader(Arc::clone(&reader));
+        write_test_pipe(&mut writer, b"x").expect("write retry fixture");
 
+        let mut byte = [0u8; 1];
         assert_eq!(
-            *observed.lock().expect("observed mutex poisoned"),
-            Some(vec!["first\n".to_string(), "second\n".to_string()])
+            crate::block_on(input.read(&mut byte)).expect("read after interruption"),
+            1
         );
+        assert_eq!(&byte, b"x");
+        assert!(CALLS.load(Ordering::Acquire) >= 2);
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
     }
 
     #[test]
-    fn stdin_read_line_reports_invalid_buffered_utf8() {
-        let fd = imp::duplicate_stdin().expect("dup stdin fd");
-        let observed = Arc::new(Mutex::new(None::<io::ErrorKind>));
+    fn dedicated_stdin_buffer_applies_bounded_backpressure() {
+        const CAPACITY: usize = 8;
+        let data = *b"0123456789abcdef";
+        let (mut input, reader, mut writer) = test_stdin(CAPACITY);
+        let mut first_byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut first_byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        write_test_pipe(&mut writer, &data).expect("write bounded-buffer fixture");
+        assert!(reader.wait_for_buffered(CAPACITY, std::time::Duration::from_secs(5)));
+        assert_eq!(reader.buffered_len(), CAPACITY);
+        assert_eq!(reader.max_buffered_len(), CAPACITY);
+        drop(pending);
+        drop(writer);
 
-        {
-            let observed = Arc::clone(&observed);
-            crate::spawn(async move {
-                let mut input = Stdin {
-                    fd,
-                    buffer: b"bad \xff\n".to_vec(),
-                    pending_read: None,
-                    read_overflow: None,
-                };
-                let error = input
-                    .read_line()
-                    .await
-                    .expect_err("invalid buffered UTF-8 should fail");
-                *observed.lock().expect("observed mutex poisoned") = Some(error.kind());
-            });
-        }
+        let observed = crate::block_on(async {
+            let mut observed = Vec::new();
+            let mut chunk = [0u8; 3];
+            loop {
+                let read = input.read(&mut chunk).await.expect("bounded stdin read");
+                if read == 0 {
+                    break;
+                }
+                observed.extend_from_slice(&chunk[..read]);
+            }
+            observed
+        });
 
-        crate::run();
+        assert_eq!(observed, data);
+        assert!(reader.max_buffered_len() <= CAPACITY);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
 
-        assert_eq!(
-            *observed.lock().expect("observed mutex poisoned"),
-            Some(io::ErrorKind::InvalidData)
-        );
+    #[test]
+    fn stdin_shutdown_wakes_pending_reads_and_stops_its_thread() {
+        let (mut input, reader, _writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        let Poll::Ready(Err(error)) = pending.as_mut().poll(&mut cx) else {
+            panic!("shutdown must terminalize the pending read");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(reader.interrupt_released());
+    }
+
+    #[test]
+    fn stdin_source_drops_only_after_reader_thread_exits() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (source, _writer) = test_pipe();
+        let source_dropped = Arc::new(AtomicBool::new(false));
+        let source_dropped_by_reader = Arc::clone(&source_dropped);
+        let reader = stdin_reader::StdinReader::spawn_with_drop_hook_for_test(
+            source,
+            stdin_reader::BUFFER_CAPACITY,
+            move || source_dropped_by_reader.store(true, Ordering::Release),
+        )
+        .expect("spawn drop-observed reader");
+        let mut input = Stdin::from_reader(Arc::clone(&reader));
+        let mut byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        drop(pending);
+        drop(input);
+        assert!(!source_dropped.load(Ordering::Acquire));
+
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        assert!(reader.interrupt_released());
+        assert!(source_dropped.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1031,11 +1676,186 @@ mod tests {
         let mut err = Stderr {
             writer: StandardWriter::new(stderr_fd),
         };
+        let empty = [IoSlice::new(&[]), IoSlice::new(&[])];
 
         assert!(Pin::new(&mut out).poll_flush(&mut cx).is_ready());
         assert!(Pin::new(&mut out).poll_close(&mut cx).is_ready());
+        assert!(matches!(
+            Pin::new(&mut out).poll_write_vectored_operation(&mut cx, &empty, 1),
+            Poll::Ready(Ok(0))
+        ));
         assert!(Pin::new(&mut err).poll_flush(&mut cx).is_ready());
         assert!(Pin::new(&mut err).poll_close(&mut cx).is_ready());
+        assert!(matches!(
+            Pin::new(&mut err).poll_write_vectored_operation(&mut cx, &empty, 2),
+            Poll::Ready(Ok(0))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stdin_operation_abort_is_retryable() {
+        use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
+
+        let error = imp::finish_blocking_read(1, 0, ERROR_OPERATION_ABORTED)
+            .expect_err("successful zero-byte aborted console read must not become EOF");
+        assert!(imp::should_retry_stdin_read(&error));
+        assert_eq!(
+            imp::finish_blocking_read(1, 0, 0).expect("clean zero-byte read is EOF"),
+            0
+        );
+    }
+
+    #[test]
+    fn active_console_policy_rejects_inherited_handoff() {
+        let (source, _writer) = test_pipe();
+        let reader = stdin_reader::StdinReader::spawn_with_idle_handoff_for_test(
+            source,
+            stdin_reader::BUFFER_CAPACITY,
+        )
+        .expect("spawn console-policy reader");
+        assert!(reader.wait_for_idle(std::time::Duration::from_secs(5)));
+        reader
+            .pause_for_handoff()
+            .expect("idle console reader can be handed off");
+        reader.resume_after_handoff();
+
+        let mut input = Stdin::from_reader(Arc::clone(&reader));
+        let mut byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        assert!(reader.wait_for_active(std::time::Duration::from_secs(5)));
+        let error = reader
+            .pause_for_handoff()
+            .expect_err("active console read cannot be handed off safely");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        drop(pending);
+        drop(input);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_overlapped_named_pipe_stdin_is_rejected() {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
+        use windows_sys::Win32::System::Pipes::{
+            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let (synchronous, _writer) = test_pipe();
+        imp::validate_stdin_handle(&synchronous)
+            .expect("synchronous anonymous-pipe stdin should be supported");
+
+        const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
+        let name = format!(
+            r"\\.\pipe\runite-stdin-mode-{}",
+            crate::io::next_operation_id()
+        )
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+        // SAFETY: `name` is NUL-terminated, all sizes are finite, and null
+        // security attributes request the process defaults.
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                0,
+                4096,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            handle,
+            INVALID_HANDLE_VALUE,
+            "create overlapped named pipe: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: successful CreateNamedPipeW returned a fresh owned handle.
+        let source = OwnedFile::unbound(unsafe { OwnedHandle::from_raw_handle(handle) });
+        let error = imp::validate_stdin_handle(&source)
+            .expect_err("overlapped stdin must not use synchronous ReadFile");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    fn test_stdin(capacity: usize) -> (Stdin, Arc<stdin_reader::StdinReader>, TestPipeWriter) {
+        let (source, writer) = test_pipe();
+        let reader = stdin_reader::StdinReader::spawn_for_test(source, capacity)
+            .expect("spawn test stdin reader");
+        (Stdin::from_reader(Arc::clone(&reader)), reader, writer)
+    }
+
+    #[cfg(unix)]
+    type TestPipeWriter = std::os::unix::net::UnixStream;
+
+    #[cfg(unix)]
+    fn test_pipe() -> (OwnedFile, TestPipeWriter) {
+        use std::os::fd::{FromRawFd, IntoRawFd};
+
+        let (source, writer) =
+            std::os::unix::net::UnixStream::pair().expect("create stdin test socket pair");
+        let raw = source.into_raw_fd();
+        // SAFETY: `into_raw_fd` transferred sole ownership of `raw`.
+        let source = unsafe { OwnedFile::from_raw_fd(raw) };
+        (source, writer)
+    }
+
+    #[cfg(unix)]
+    fn write_test_pipe(writer: &mut TestPipeWriter, data: &[u8]) -> io::Result<()> {
+        std::io::Write::write_all(writer, data)
+    }
+
+    #[cfg(windows)]
+    type TestPipeWriter = OwnedFile;
+
+    #[cfg(windows)]
+    fn test_pipe() -> (OwnedFile, TestPipeWriter) {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+
+        let mut source: HANDLE = std::ptr::null_mut();
+        let mut writer: HANDLE = std::ptr::null_mut();
+        // SAFETY: both handles are valid out-pointers; null security attributes
+        // request non-inheritable handles with the default buffer size.
+        let ok = unsafe { CreatePipe(&mut source, &mut writer, std::ptr::null_mut(), 0) };
+        assert_ne!(
+            ok,
+            0,
+            "create stdin test pipe: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: successful `CreatePipe` returned two fresh owned handles.
+        let source = OwnedFile::unbound(unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(source)
+        });
+        // SAFETY: successful `CreatePipe` returned two fresh owned handles.
+        let writer = OwnedFile::unbound(unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(writer)
+        });
+        (source, writer)
+    }
+
+    #[cfg(windows)]
+    fn write_test_pipe(writer: &mut TestPipeWriter, mut data: &[u8]) -> io::Result<()> {
+        while !data.is_empty() {
+            let written = imp::blocking_write(crate::sys::handle::raw_file(writer), data)?;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "stdin test pipe write made no progress",
+                ));
+            }
+            data = &data[written..];
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
