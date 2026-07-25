@@ -1,57 +1,103 @@
 name: Release
 
-# Publishes to crates.io when a GitHub Release is published. The release's tag
-# must be `v<version>` and match both crate versions (they are versioned in
-# lockstep). Create the release from a commit whose CI run is fully green.
+# Publishes when a GitHub Release is published. The tag must be `v<version>`,
+# both crates must use that exact version, and the tagged commit must already
+# have a successful complete CI workflow run.
 on:
   release:
     types: [published]
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   validate:
-    name: Validate release
+    name: Validate release commit
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      release_sha: ${{ steps.release-ref.outputs.sha }}
     steps:
-      - uses: actions/checkout@v5
-      - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
-      # mise's rust backend delegates to rustup, which auto-installs a minimal
-      # toolchain (no rustfmt/clippy) on a fresh runner; install the components
-      # explicitly, mirroring ci.yml.
-      - name: Ensure rust components
-        run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy --no-self-update'
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-      - name: Verify tag matches both crate versions
+      # Resolve the tag exactly once through its fully-qualified ref. This
+      # cannot select a same-name branch, and every later job uses the immutable
+      # commit output even if the tag is subsequently moved.
+      - name: Resolve and check out release tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          fetch-depth: 1
+      - name: Record immutable release commit
+        id: release-ref
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          meta=$(cargo metadata --no-deps --format-version 1)
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Release tag must have the form v<version>" >&2; exit 1 ;;
+          esac
+          release_sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          checkout_sha=$(git rev-parse --verify HEAD)
+          if [ "$release_sha" != "$checkout_sha" ]; then
+            echo "Resolved tag commit does not match the checked-out commit" >&2
+            exit 1
+          fi
+          echo "sha=$release_sha" >>"$GITHUB_OUTPUT"
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+      - name: Install API-report toolchains and targets
+        run: |
+          mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy --no-self-update'
+          mise exec -- rustup toolchain install nightly-2026-07-01 --profile minimal --no-self-update
+          mise exec -- rustup target add \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+          mise exec -- rustup target add --toolchain nightly-2026-07-01 \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Require successful CI for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_ci_gate.py "$RELEASE_SHA"
+      - name: Verify tag and lockstep crate versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag_version=${RELEASE_TAG#v}
+          metadata=$(cargo metadata --no-deps --format-version 1)
           for crate in runite runite-proc-macros; do
-            version=$(echo "$meta" | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
-            if [ "$tag" != "$version" ]; then
-              echo "Tag $tag does not match $crate version $version" >&2
+            crate_version=$(
+              printf '%s' "$metadata" |
+                python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == '$crate'))"
+            )
+            if [ "$crate_version" != "$tag_version" ]; then
+              echo "Tag $tag_version does not match $crate version $crate_version" >&2
               exit 1
             fi
           done
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --workspace --all-features
-      - name: Package dry-run (proc macros)
-        run: cargo publish --dry-run -p runite-proc-macros
-      # runite itself cannot be dry-run until runite-proc-macros@<version>
-      # exists on crates.io; its verify build runs during the real publish.
-      - name: Package list (runite)
-        run: cargo package --list -p runite
+      - name: Check all public API surfaces
+        run: mise run api-report-check
 
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     needs: validate
     environment: release
     permissions:
@@ -62,24 +108,165 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out immutable release commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.validate.outputs.release_sha }}
+          fetch-depth: 1
+      - name: Verify immutable checkout
+        env:
+          RELEASE_SHA: ${{ needs.validate.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify HEAD)" = "$RELEASE_SHA"
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+      - name: Install release verification toolchains and targets
+        run: |
+          mise exec -- rustup target add \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.88.0 \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # This packages both crates, inspects and unpacks the .crate files, patches
+      # the unpacked runite manifest to the unpacked proc-macro crate, and
+      # builds/tests/checks/docs the real artifacts on every supported target.
+      # It runs before either upload, so the unavoidable two-crate publication
+      # window starts only after both artifacts are known-good.
+      - name: Verify both release artifacts
+        run: mise run release-verify
+      - name: Detect exact published versions
+        id: published
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=${VERSION#v}
+          python3 - "$version" "$GITHUB_OUTPUT" \
+            "target/xtask-release/package/package/runite-${version}.crate" \
+            "target/xtask-release/package/package/runite-proc-macros-${version}.crate" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import urllib.error
+          import urllib.request
+
+          version, output_path, runite_artifact, macros_artifact = sys.argv[1:]
+
+          def state(name, artifact):
+              request = urllib.request.Request(
+                  f"https://crates.io/api/v1/crates/{name}/{version}",
+                  headers={"User-Agent": "runite-release-workflow"},
+              )
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      published = json.load(response)["version"]
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return "missing"
+                  raise
+              if published["yanked"]:
+                  raise SystemExit(f"{name}@{version} exists but is yanked; refusing release")
+              local = hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest()
+              if published["checksum"] != local:
+                  raise SystemExit(
+                      f"{name}@{version} exists with checksum {published['checksum']}, "
+                      f"but this commit produced {local}"
+                  )
+              return "present"
+
+          runite = state("runite", runite_artifact)
+          macros = state("runite-proc-macros", macros_artifact)
+          if runite == "present" and macros == "missing":
+              raise SystemExit(
+                  "runite is published without its exact proc-macro dependency; refusing mismatch"
+              )
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"runite={runite}\n")
+              output.write(f"macros={macros}\n")
+          print(f"runite={runite}; runite-proc-macros={macros}")
+          PY
+      # Authenticate as late as possible: the exchanged registry token is
+      # short-lived, and everything above (packaging, verification, publish-state
+      # probing) can take the better part of an hour.
       - name: Authenticate with crates.io (Trusted Publishing)
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
-      # The proc-macro crate must be published first: runite depends on it by
-      # path + pinned version, so the umbrella crate's verify build has to
-      # resolve the just-published dependency from crates.io. cargo (>=1.66)
-      # blocks until the publish is visible in the index; the sleep is extra
-      # insurance against CDN propagation lag.
       - name: Publish runite-proc-macros
-        run: cargo publish -p runite-proc-macros
+        if: steps.published.outputs.macros == 'missing'
+        run: cargo publish --locked --package runite-proc-macros
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - name: Wait for index propagation
-        run: sleep 30
+      - name: Wait for exact proc-macro artifact
+        if: steps.published.outputs.macros == 'missing'
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=${VERSION#v}
+          artifact="target/xtask-release/package/package/runite-proc-macros-${version}.crate"
+          python3 - "$version" "$artifact" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          version, artifact = sys.argv[1:]
+          expected = hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest()
+          url = f"https://crates.io/api/v1/crates/runite-proc-macros/{version}"
+          for _ in range(60):
+              request = urllib.request.Request(
+                  url, headers={"User-Agent": "runite-release-workflow"}
+              )
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      published = json.load(response)["version"]
+                  if published["checksum"] != expected:
+                      raise SystemExit("published proc-macro checksum does not match verified artifact")
+                  break
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise
+              time.sleep(5)
+          else:
+              raise SystemExit("timed out waiting for proc-macro publication")
+          PY
+          mkdir -p target/release-index-probe/src
+          cat >target/release-index-probe/Cargo.toml <<EOF
+          [package]
+          name = "runite-release-index-probe"
+          version = "0.0.0"
+          edition = "2024"
+          publish = false
+
+          [workspace]
+
+          [dependencies]
+          runite-proc-macros = "=${version}"
+          EOF
+          printf 'fn main() {}\n' >target/release-index-probe/src/main.rs
+          for attempt in $(seq 1 60); do
+            if cargo metadata \
+              --manifest-path target/release-index-probe/Cargo.toml \
+              --format-version 1 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for runite-proc-macros@${version} in the Cargo index" >&2
+          exit 1
       - name: Publish runite
-        run: cargo publish -p runite
+        if: steps.published.outputs.runite == 'missing'
+        run: cargo publish --locked --package runite
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
