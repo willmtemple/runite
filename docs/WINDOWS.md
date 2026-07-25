@@ -1,8 +1,10 @@
-# Windows port — design
+# Windows backend — 0.2 design
 
 *This document describes the design of the Windows backend: an IOCP-based driver plus a
 `sys/windows` operation backend. It parallels the Linux (`io_uring`) and macOS (`kqueue` +
-blocking offload) backends described in `ARCHITECTURE.md`.*
+blocking offload) backends described in `ARCHITECTURE.md`. Applications
+upgrading resource-adoption code should also read the
+[0.1 → 0.2 migration guide](MIGRATING-0.2.md).*
 
 ## Why IOCP (and not readiness emulation or IoRing)
 
@@ -28,6 +30,8 @@ Alternatives considered and rejected:
 Identical to the other platforms: **one driver per runtime thread**.
 
 - Each runtime thread owns one completion port (`CreateIoCompletionPort`, concurrency 1).
+  The port remains installed for the OS thread's lifetime, including across sequential
+  `run()` and `block_on()` calls.
 - `wait()` blocks in `GetQueuedCompletionStatusEx` (alertable — see Timers).
 - The cross-thread `ThreadNotifier` posts a packet with a reserved completion key via
   `PostQueuedCompletionStatus`. The notifier shares the port through an
@@ -35,16 +39,27 @@ Identical to the other platforms: **one driver per runtime thread**.
   driver drops (the same TOCTOU hazard the macOS wake pipe closes with a dup'd fd).
 - The monotonic clock is `QueryPerformanceCounter` scaled by the boot-constant
   `QueryPerformanceFrequency`.
+- Runtime-owned workers explicitly tear down their port outside the Windows
+  loader lock. A non-runtime reaper publishes `WorkerJoin`/`is_finished` only
+  after the OS thread and its TLS destructors exit. The last-resort TLS path on
+  an arbitrary Windows thread marks handles closed but retains state that
+  cannot be safely destroyed under loader lock.
 
 ### Handle association
 
 A HANDLE/SOCKET can be associated with **exactly one** completion port for its lifetime.
 The Windows backend associates every file, socket, and pipe handle with the *current*
-runtime thread's port at creation/adoption time (all creation paths run on a runtime
-thread). Because the public I/O types hold type-erased pending futures (`Pin<Box<dyn
-Future>>`, which is `!Send`), a resource is created, used, polled, and dropped on one
-thread — submission thread, dispatch thread, and completion owner always coincide. This is
-the IOCP analogue of "each Linux thread owns its own ring".
+runtime thread's port at creation/adoption time and records that port's process-unique
+identity on the owned resource. Every operation validates the identity, and the public
+resource remains `!Send`, so submission, dispatch, and completion ownership cannot migrate.
+External adoption is strict: synchronous handles, handles configured with
+`FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`, and handles already bound to another port are
+rejected. Internal `try_clone` paths propagate a proven affinity without retrying an
+ambiguous association call. Skip-on-success remains a deferred optimization (issue #17)
+because the current packet context is reclaimed only by its terminal completion packet.
+The public `from_owned`/`from_std` constructors and `TryFrom<OwnedHandle>` /
+`TryFrom<OwnedSocket>` conversions therefore return `io::Result`; there is no
+infallible adoption path.
 
 ## Timers: waitable timer APC + alertable wait
 
@@ -86,6 +101,7 @@ Every overlapped submission heap-allocates one packet context:
 #[repr(C)] OverlappedOp<T> {
     OVERLAPPED,                               // must be at offset 0
     complete: unsafe fn(*mut header, ...),    // thin dispatch fn (per op kind)
+    owner: Arc<OwnedHandle/OwnedSocket>,       // kernel object live through terminal packet
     data: T,                                  // owned buffer(s), CompletionHandle, addrs
 }
 ```
@@ -105,10 +121,11 @@ Every overlapped submission heap-allocates one packet context:
   `RtlNtStatusToDosError`, the same technique libuv uses; this avoids needing a live
   handle in `GetOverlappedResult` after the resource may have closed.
 
-### Cancellation
+### Cancellation and logical writes
 
-Drop remains the cancellation primitive. The cancel callback registered on each
-`CompletionFuture` calls `CancelIoEx(handle, lpOverlapped)`:
+Every low-level `CompletionFuture` registers a cancel callback that calls
+`CancelIoEx(handle, lpOverlapped)`. Dropping a future that directly owns that
+completion runs the callback:
 
 - If the op is still in flight it completes with `ERROR_OPERATION_ABORTED`; the packet
   still arrives and frees the context — this is the IOCP analogue of Linux's
@@ -117,6 +134,17 @@ Drop remains the cancellation primitive. The cancel callback registered on each
 - If the op already completed (packet dequeued, `finished` set), the future's Drop skips
   the cancel callback entirely; dispatch and drop share a thread, so there is no race.
 - Closing a handle with in-flight I/O also cancels it; the packets are still delivered.
+- Socket deadlines issue `CancelIoEx` for the exact `OVERLAPPED` and continue awaiting its
+  terminal packet. A successful completion wins if it was already visible at the deadline;
+  only the terminal `ERROR_OPERATION_ABORTED` is translated to `TimedOut`.
+
+Public byte-stream reads and writes retain an accepted low-level future in the
+resource's `ReadState`/`WriteState`, so dropping only the transient caller
+future does not discard it. Completed read bytes remain available. Each
+extension/adapter write has a live generation; completion is retained for that
+generation and can never be credited to a later caller's buffer. Cloned files
+share one FIFO cursor/write state, while direct poll callers must continue the
+same logical write after `Pending`.
 
 ## Platform parity
 
@@ -124,8 +152,9 @@ Drop remains the cancellation primitive. The cancel callback registered on each
 | --- | --- |
 | open | blocking pool (`std::fs::OpenOptions` + `FILE_FLAG_OVERLAPPED`), then port association |
 | read / write | overlapped `ReadFile`/`WriteFile` at explicit offsets through IOCP |
-| cursor I/O | explicit-offset overlapped ops around the shared file-object cursor (`SetFilePointerEx`); dup'd handles share the cursor like Unix `dup` |
-| metadata / sync / set_len / read_dir / try_clone | blocking pool (no overlapped form), mirroring macOS |
+| cursor I/O | one shared serialized cursor state across `try_clone` handles, with explicit-offset overlapped ops and checked `SetFilePointerEx` updates |
+| metadata / sync / set_len / try_clone | blocking pool (no overlapped form), mirroring macOS |
+| read_dir | shared bounded, demand-driven 32-entry blocking-pool batches; no worker waits for buffer capacity |
 | TCP connect | `ConnectEx` (wildcard-bind first) + `SO_UPDATE_CONNECT_CONTEXT` |
 | TCP accept | `AcceptEx` + `SO_UPDATE_ACCEPT_CONTEXT`, address parsed from the accept buffer |
 | send / recv / send_to / recv_from | overlapped `WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom` with staged buffers |
@@ -133,7 +162,8 @@ Drop remains the cancellation primitive. The cancel callback registered on each
 | DNS | blocking pool `to_socket_addrs` (same as Linux/macOS) |
 | child exit | `RegisterWaitForSingleObject` on the process handle (OS wait-thread pool, no runtime thread parked) |
 | child stdio | overlapped **named-pipe** pairs (anonymous pipes cannot overlap); child end is a plain inheritable handle |
-| stdin/stdout/stderr | blocking-pool offload (console handles do not support overlapped I/O) |
+| stdin | one demand-driven process-wide dedicated blocking reader feeding a bounded 64 KiB shared buffer; handles compete for one stream, synchronous console/file/pipe handles are supported, overlapped handles are rejected, and inherited-console spawn returns `WouldBlock` while a parent console read is active |
+| stdout/stderr | blocking-pool offload (console handles do not support overlapped I/O) |
 | signals | `SetConsoleCtrlHandler` → `signal::windows::{ctrl_c, ctrl_break, …}`; `runite::signal::ctrl_c()` routes here |
 | fd readiness (`runite::fd`) | intentionally absent — readiness is a descriptor concept with no IOCP analogue |
 | Unix domain sockets | not yet provided (Windows AF_UNIX is stream-only; tracked in the project's GitHub issues) |
@@ -147,8 +177,9 @@ pointer). Rather than scattering `#[cfg]` through the op and public layers, a si
 façade module — `src/sys/handle.rs` — defines the platform's I/O handle vocabulary once:
 
 - Unix: `RawFile`/`RawSock` alias `RawFd`; `OwnedFile`/`OwnedSock` alias `OwnedFd`.
-- Windows: `RawFile` is a `Send`/`Copy` newtype over the handle value, `OwnedFile` is
-  `OwnedHandle`, `RawSock`/`OwnedSock` are `RawSocket`/`OwnedSocket`.
+- Windows: operation references clone an `Arc<OwnedHandle>`/`Arc<OwnedSocket>` together
+  with IOCP affinity, so accepted blocking jobs and overlapped packets never retain only a
+  reusable raw value.
 
 `op::fs`, `op::net`, `fs.rs`, `net/`, `process/pipe.rs`, and `stdio.rs` are written
 against the façade; only `sys/handle.rs` and the per-platform interop `impl` blocks
@@ -158,15 +189,16 @@ know which world they are in.
 ## Windows-only public surface
 
 - `runite::os::windows::fs::OpenOptionsExt` — `access_mode`, `share_mode`,
-  `custom_flags`, `attributes` (mirrors `std::os::windows::fs::OpenOptionsExt`).
+  `custom_flags`, `attributes`, `security_qos_flags` (mirrors
+  `std::os::windows::fs::OpenOptionsExt`).
 - `runite::os::windows::fs::MetadataExt` — `file_attributes`.
 - `runite::signal::windows` — console control events.
 - `Metadata::mode()` returns a synthesized POSIX-style mode on Windows (directory/file
   type bits plus `0o444`/`0o666`-style permission bits derived from `FILE_ATTRIBUTE_READONLY`),
   documented as an emulation.
-- Interop impls: `File: AsHandle + AsRawHandle + From<OwnedHandle>`, `TcpStream`/
-  `TcpListener`/`UdpSocket`/`TcpSocket`: `AsSocket + AsRawSocket + From<OwnedSocket>`,
-  plus the matching `from_std` constructors.
+- Interop impls: `File: AsHandle + AsRawHandle + TryFrom<OwnedHandle>`, `TcpStream`/
+  `TcpListener`/`UdpSocket`/`TcpSocket`: `AsSocket + AsRawSocket + TryFrom<OwnedSocket>`,
+  plus fallible inherent `from_owned` and `from_std` constructors.
 
 ## Known deltas vs. Unix backends
 

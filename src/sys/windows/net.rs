@@ -18,12 +18,11 @@ use std::mem::MaybeUninit;
 use std::net::{
     Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs,
 };
-use std::os::windows::io::IntoRawSocket;
+use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket, RawSocket};
 use std::pin::Pin;
 use std::sync::Once;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Networking::WinSock::{
     ADDRESS_FAMILY, AF_INET, AF_INET6, AcceptEx, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0,
     INVALID_SOCKET, IP_TTL, IPPROTO_IP, IPPROTO_IPV6, IPPROTO_TCP, IPV6_UNICAST_HOPS,
@@ -46,8 +45,8 @@ use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
 use crate::platform::current::runtime::with_current_driver;
 use crate::platform::windows::driver::OverlappedResult;
 use crate::sys::blocking::spawn_blocking;
-use crate::sys::handle::{OwnedSock, RawFile, RawSock, owned_sock_from_raw, raw_sock};
-use crate::sys::windows::overlapped::submit;
+use crate::sys::handle::{OverlappedOwner, OwnedSock, RawSock, raw_sock};
+use crate::sys::windows::overlapped::{submit, submit_with_timeout};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
 
@@ -107,7 +106,7 @@ pub async fn connect(op: NetOp) -> io::Result<()> {
         unreachable!("connect backend called with non-connect op");
     };
 
-    connect_async(fd, addr).await
+    connect_async(fd, addr, None).await
 }
 
 pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
@@ -123,7 +122,7 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
         unreachable!("send backend called with non-send op");
     };
 
-    send_async(fd, data, flags).await
+    send_async(fd, data, flags, None).await
 }
 
 pub async fn send_to(op: NetOp) -> io::Result<usize> {
@@ -137,7 +136,7 @@ pub async fn send_to(op: NetOp) -> io::Result<usize> {
         unreachable!("send_to backend called with non-send_to op");
     };
 
-    send_to_async(fd, target, data, flags).await
+    send_to_async(fd, target, data, flags, None).await
 }
 
 pub async fn recv(op: NetOp) -> io::Result<Vec<u8>> {
@@ -145,7 +144,7 @@ pub async fn recv(op: NetOp) -> io::Result<Vec<u8>> {
         unreachable!("recv backend called with non-recv op");
     };
 
-    recv_async(fd, len, flags).await
+    recv_async(fd, len, flags, None).await
 }
 
 pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
@@ -153,7 +152,7 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
         unreachable!("recv_from backend called with non-recv_from op");
     };
 
-    recv_from_async(fd, len, flags).await
+    recv_from_async(fd, len, flags, None).await
 }
 
 pub async fn shutdown(op: NetOp) -> io::Result<()> {
@@ -161,7 +160,7 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
         unreachable!("shutdown backend called with non-shutdown op");
     };
 
-    shutdown_sync(fd, how)
+    shutdown_sync(&fd, how)
 }
 
 pub async fn connect_stream(addr: SocketAddr) -> io::Result<OwnedSock> {
@@ -193,7 +192,7 @@ pub async fn bind_datagram(addr: SocketAddr) -> io::Result<OwnedSock> {
 
 async fn connect_stream_inner(addr: SocketAddr) -> io::Result<OwnedSock> {
     let stream = socket_sync(socket_domain(addr), SOCK_STREAM, 0, 0)?;
-    connect_async(raw_sock(&stream), addr).await?;
+    connect_async(raw_sock(&stream), addr, None).await?;
     Ok(stream)
 }
 
@@ -203,9 +202,9 @@ async fn bind_listener_inner(addr: SocketAddr, backlog: Option<i32>) -> io::Resu
     // Do not set SO_REUSEADDR implicitly (matches std::net::TcpListener::bind).
     // Callers who want it opt in via `net::TcpSocket::set_reuseaddr` before bind.
 
-    bind_sync(raw_sock(&listener), RawSocketAddr::from_socket_addr(addr))?;
+    bind_sync(&raw_sock(&listener), RawSocketAddr::from_socket_addr(addr))?;
     listen_sync(
-        raw_sock(&listener),
+        &raw_sock(&listener),
         backlog.unwrap_or(DEFAULT_LISTENER_BACKLOG),
     )?;
     Ok(listener)
@@ -213,7 +212,7 @@ async fn bind_listener_inner(addr: SocketAddr, backlog: Option<i32>) -> io::Resu
 
 async fn bind_datagram_inner(addr: SocketAddr) -> io::Result<OwnedSock> {
     let socket = socket_sync(socket_domain(addr), SOCK_DGRAM, 0, 0)?;
-    bind_sync(raw_sock(&socket), RawSocketAddr::from_socket_addr(addr))?;
+    bind_sync(&raw_sock(&socket), RawSocketAddr::from_socket_addr(addr))?;
     Ok(socket)
 }
 
@@ -226,15 +225,17 @@ pub fn tcp_socket_v6() -> io::Result<OwnedSock> {
 }
 
 pub fn bind_socket(fd: RawSock, addr: SocketAddr) -> io::Result<()> {
-    bind_sync(fd, RawSocketAddr::from_socket_addr(addr))
+    bind_sync(&fd, RawSocketAddr::from_socket_addr(addr))
 }
 
 pub fn listen_socket(fd: RawSock, backlog: i32) -> io::Result<()> {
-    listen_sync(fd, backlog)
+    listen_sync(&fd, backlog)
 }
 
 pub async fn duplicate(fd: RawSock) -> io::Result<OwnedSock> {
     wsa_init()?;
+    let affinity = fd.affinity()?;
+    let raw = fd.as_socket();
 
     // SAFETY: `WSAPROTOCOL_INFOW` is a plain C struct; zeroes are a valid
     // out-buffer state.
@@ -242,7 +243,7 @@ pub async fn duplicate(fd: RawSock) -> io::Result<OwnedSock> {
     // SAFETY: `fd` is an open socket and `info` is a valid out-pointer;
     // duplicating into the current process is the documented same-process
     // clone idiom.
-    cvt(unsafe { WSADuplicateSocketW(fd as usize, GetCurrentProcessId(), &mut info) })?;
+    cvt(unsafe { WSADuplicateSocketW(raw as usize, GetCurrentProcessId(), &mut info) })?;
 
     // SAFETY: `info` was just produced by `WSADuplicateSocketW`.
     let duplicated = unsafe {
@@ -259,12 +260,11 @@ pub async fn duplicate(fd: RawSock) -> io::Result<OwnedSock> {
         return Err(last_wsa_error());
     }
     // SAFETY: `duplicated` is a fresh socket exclusively owned here.
-    let socket = unsafe { owned_sock_from_raw(duplicated as RawSock) };
+    let socket = unsafe { OwnedSocket::from_raw_socket(duplicated as RawSocket) };
 
-    // The duplicate shares the original's file object, which is already bound
-    // to a completion port; completions route to the original's port.
-    associate_socket_reused(raw_sock(&socket))?;
-    Ok(socket)
+    // The duplicate shares the already-associated file object. Its affinity
+    // is inherited from the source; no ambiguous reassociation is attempted.
+    Ok(OwnedSock::bound(socket, affinity))
 }
 
 pub async fn recv_timeout(
@@ -273,7 +273,7 @@ pub async fn recv_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<Vec<u8>> {
-    io_timeout(timeout, recv_async(fd, len, flags)).await
+    recv_async(fd, len, flags, Some(timeout)).await
 }
 
 pub async fn send_timeout(
@@ -282,7 +282,7 @@ pub async fn send_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<usize> {
-    io_timeout(timeout, send_async(fd, data, flags)).await
+    send_async(fd, data, flags, Some(timeout)).await
 }
 
 pub async fn recv_from_timeout(
@@ -291,7 +291,7 @@ pub async fn recv_from_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<ReceivedDatagram> {
-    io_timeout(timeout, recv_from_async(fd, len, flags)).await
+    recv_from_async(fd, len, flags, Some(timeout)).await
 }
 
 pub async fn send_to_timeout(
@@ -301,12 +301,12 @@ pub async fn send_to_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<usize> {
-    io_timeout(timeout, send_to_async(fd, target, data, flags)).await
+    send_to_async(fd, target, data, flags, Some(timeout)).await
 }
 
 pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::Result<OwnedSock> {
     let socket = socket_sync(socket_domain(addr), SOCK_STREAM, 0, 0)?;
-    if let Err(error) = io_timeout(timeout, connect_async(raw_sock(&socket), addr)).await {
+    if let Err(error) = connect_async(raw_sock(&socket), addr, Some(timeout)).await {
         drop(socket);
         return Err(error);
     }
@@ -314,35 +314,35 @@ pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::
 }
 
 pub fn local_addr(fd: RawSock) -> io::Result<SocketAddr> {
-    socket_addr_with(getsockname, fd)
+    socket_addr_with(getsockname, &fd)
 }
 
 pub fn peer_addr(fd: RawSock) -> io::Result<SocketAddr> {
-    socket_addr_with(getpeername, fd)
+    socket_addr_with(getpeername, &fd)
 }
 
 pub fn nodelay(fd: RawSock) -> io::Result<bool> {
-    getsockopt_int(fd, IPPROTO_TCP, TCP_NODELAY).map(|value| value != 0)
+    getsockopt_int(&fd, IPPROTO_TCP, TCP_NODELAY).map(|value| value != 0)
 }
 
 pub fn set_nodelay(fd: RawSock, enabled: bool) -> io::Result<()> {
-    setsockopt_int(fd, IPPROTO_TCP, TCP_NODELAY, enabled.into())
+    setsockopt_int(&fd, IPPROTO_TCP, TCP_NODELAY, enabled.into())
 }
 
 pub fn broadcast(fd: RawSock) -> io::Result<bool> {
-    getsockopt_int(fd, SOL_SOCKET, SO_BROADCAST).map(|value| value != 0)
+    getsockopt_int(&fd, SOL_SOCKET, SO_BROADCAST).map(|value| value != 0)
 }
 
 pub fn set_broadcast(fd: RawSock, enabled: bool) -> io::Result<()> {
-    setsockopt_int(fd, SOL_SOCKET, SO_BROADCAST, enabled.into())
+    setsockopt_int(&fd, SOL_SOCKET, SO_BROADCAST, enabled.into())
 }
 
 pub fn reuse_addr(fd: RawSock) -> io::Result<bool> {
-    getsockopt_int(fd, SOL_SOCKET, SO_REUSEADDR).map(|value| value != 0)
+    getsockopt_int(&fd, SOL_SOCKET, SO_REUSEADDR).map(|value| value != 0)
 }
 
 pub fn set_reuse_addr(fd: RawSock, enabled: bool) -> io::Result<()> {
-    setsockopt_int(fd, SOL_SOCKET, SO_REUSEADDR, enabled.into())
+    setsockopt_int(&fd, SOL_SOCKET, SO_REUSEADDR, enabled.into())
 }
 
 /// `SO_REUSEPORT` does not exist on Windows; per-core listener sharding uses
@@ -364,12 +364,12 @@ fn reuse_port_unsupported() -> io::Error {
 }
 
 pub fn ttl(fd: RawSock) -> io::Result<u32> {
-    match socket_family(fd)? {
+    match socket_family(&fd)? {
         family if family == AF_INET => {
-            getsockopt_int(fd, IPPROTO_IP, IP_TTL).map(|value| value as u32)
+            getsockopt_int(&fd, IPPROTO_IP, IP_TTL).map(|value| value as u32)
         }
         family if family == AF_INET6 => {
-            getsockopt_int(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS).map(|value| value as u32)
+            getsockopt_int(&fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS).map(|value| value as u32)
         }
         family => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -381,9 +381,9 @@ pub fn ttl(fd: RawSock) -> io::Result<u32> {
 pub fn set_ttl(fd: RawSock, ttl: u32) -> io::Result<()> {
     let ttl = i32::try_from(ttl)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "TTL exceeds i32 range"))?;
-    match socket_family(fd)? {
-        family if family == AF_INET => setsockopt_int(fd, IPPROTO_IP, IP_TTL, ttl),
-        family if family == AF_INET6 => setsockopt_int(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, ttl),
+    match socket_family(&fd)? {
+        family if family == AF_INET => setsockopt_int(&fd, IPPROTO_IP, IP_TTL, ttl),
+        family if family == AF_INET6 => setsockopt_int(&fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, ttl),
         family => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported socket family {family} for TTL"),
@@ -391,10 +391,12 @@ pub fn set_ttl(fd: RawSock, ttl: u32) -> io::Result<()> {
     }
 }
 
-/// Binds an adopted (`from_std`) socket to the current thread's completion
-/// port so overlapped operations submitted on it can complete.
-pub(crate) fn associate_adopted(fd: RawSock) -> io::Result<()> {
-    associate_socket_reused(fd)
+/// Strictly adopts an external overlapped socket into the current IOCP.
+pub(crate) fn adopt_socket(socket: OwnedSocket) -> io::Result<OwnedSock> {
+    let affinity = with_current_driver(|driver| {
+        driver.associate_handle(socket.as_raw_socket() as usize as *mut c_void)
+    })?;
+    Ok(OwnedSock::bound(socket, affinity))
 }
 
 pub fn recv_future(fd: RawSock, len: usize) -> RecvFuture {
@@ -418,15 +420,6 @@ async fn offload<T: Send + 'static>(
         handle.complete(Err(error));
     }
     future.await
-}
-
-async fn io_timeout<T>(
-    timeout: Duration,
-    future: impl Future<Output = io::Result<T>>,
-) -> io::Result<T> {
-    crate::time::timeout(timeout, future)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "operation timed out"))?
 }
 
 // -- Socket creation and control ---------------------------------------------
@@ -470,41 +463,31 @@ fn socket_sync(domain: i32, socket_type: i32, protocol: i32, _flags: u32) -> io:
         return Err(last_wsa_error());
     }
     // SAFETY: `raw` is a fresh socket exclusively owned here.
-    let socket = unsafe { owned_sock_from_raw(raw as RawSock) };
-
-    associate_socket(raw_sock(&socket))?;
-    Ok(socket)
+    let socket = unsafe { OwnedSocket::from_raw_socket(raw as RawSocket) };
+    adopt_socket(socket)
 }
 
-fn associate_socket(fd: RawSock) -> io::Result<()> {
-    with_current_driver(|driver| driver.associate_handle(fd as usize as *mut c_void))
-}
-
-fn associate_socket_reused(fd: RawSock) -> io::Result<()> {
-    match associate_socket(fd) {
-        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => Ok(()),
-        result => result,
-    }
-}
-
-fn bind_sync(fd: RawSock, addr: RawSocketAddr) -> io::Result<()> {
+fn bind_sync(fd: &RawSock, addr: RawSocketAddr) -> io::Result<()> {
+    fd.ensure_current()?;
     // SAFETY: `addr` owns a fully initialized sockaddr of `addr.len()` bytes.
-    cvt(unsafe { wsa_bind(fd as usize, addr.as_ptr(), addr.len()) }).map(|_| ())
+    cvt(unsafe { wsa_bind(fd.as_socket() as usize, addr.as_ptr(), addr.len()) }).map(|_| ())
 }
 
-fn listen_sync(fd: RawSock, backlog: i32) -> io::Result<()> {
+fn listen_sync(fd: &RawSock, backlog: i32) -> io::Result<()> {
+    fd.ensure_current()?;
     // SAFETY: no pointer arguments.
-    cvt(unsafe { wsa_listen(fd as usize, backlog) }).map(|_| ())
+    cvt(unsafe { wsa_listen(fd.as_socket() as usize, backlog) }).map(|_| ())
 }
 
-fn shutdown_sync(fd: RawSock, how: Shutdown) -> io::Result<()> {
+fn shutdown_sync(fd: &RawSock, how: Shutdown) -> io::Result<()> {
+    fd.ensure_current()?;
     let how = match how {
         Shutdown::Read => SD_RECEIVE,
         Shutdown::Write => SD_SEND,
         Shutdown::Both => SD_BOTH,
     };
     // SAFETY: no pointer arguments.
-    cvt(unsafe { wsa_shutdown(fd as usize, how) }).map(|_| ())
+    cvt(unsafe { wsa_shutdown(fd.as_socket() as usize, how) }).map(|_| ())
 }
 
 // -- Overlapped data path ------------------------------------------------------
@@ -555,8 +538,23 @@ fn datagram_recv_result(result: OverlappedResult) -> io::Result<usize> {
     }
 }
 
-fn cancel_handle(fd: RawSock) -> RawFile {
-    RawFile::from_handle(fd as usize as *mut c_void)
+async fn submit_io<D, S, M, T>(
+    owner: OverlappedOwner,
+    data: D,
+    start: S,
+    map: M,
+    timeout: Option<Duration>,
+) -> io::Result<T>
+where
+    D: 'static,
+    S: FnOnce(&mut D, *mut OVERLAPPED) -> io::Result<()>,
+    M: FnOnce(D, OverlappedResult) -> io::Result<T> + 'static,
+    T: Send + 'static,
+{
+    match timeout {
+        Some(timeout) => submit_with_timeout(owner, data, start, map, timeout).await,
+        None => submit(owner, data, start, map).await,
+    }
 }
 
 struct BufferedIo {
@@ -587,9 +585,15 @@ impl BufferedIo {
     }
 }
 
-async fn recv_async(fd: RawSock, len: usize, flags: i32) -> io::Result<Vec<u8>> {
-    submit(
-        cancel_handle(fd),
+async fn recv_async(
+    fd: RawSock,
+    len: usize,
+    flags: i32,
+    timeout: Option<Duration>,
+) -> io::Result<Vec<u8>> {
+    let socket = fd.as_socket() as usize;
+    submit_io(
+        fd.into(),
         BufferedIo::new(vec![0u8; len.max(1)], flags),
         |data, overlapped| {
             data.fill_wsabuf();
@@ -598,7 +602,7 @@ async fn recv_async(fd: RawSock, len: usize, flags: i32) -> io::Result<Vec<u8>> 
             // the life of the operation; the buffer it points at does too.
             let result = unsafe {
                 WSARecv(
-                    fd as usize,
+                    socket,
                     &data.wsabuf,
                     1,
                     std::ptr::null_mut(),
@@ -615,21 +619,28 @@ async fn recv_async(fd: RawSock, len: usize, flags: i32) -> io::Result<Vec<u8>> 
             buffer.truncate(read);
             Ok(buffer)
         },
+        timeout,
     )
     .await
 }
 
-async fn send_async(fd: RawSock, data: Vec<u8>, flags: i32) -> io::Result<usize> {
+async fn send_async(
+    fd: RawSock,
+    data: Vec<u8>,
+    flags: i32,
+    timeout: Option<Duration>,
+) -> io::Result<usize> {
     let flags = flags as u32;
-    submit(
-        cancel_handle(fd),
+    let socket = fd.as_socket() as usize;
+    submit_io(
+        fd.into(),
         BufferedIo::new(data, 0),
         move |data, overlapped| {
             data.fill_wsabuf();
             // SAFETY: as in `recv_async`.
             let result = unsafe {
                 WSASend(
-                    fd as usize,
+                    socket,
                     &data.wsabuf,
                     1,
                     std::ptr::null_mut(),
@@ -641,6 +652,7 @@ async fn send_async(fd: RawSock, data: Vec<u8>, flags: i32) -> io::Result<usize>
             check_wsa_submission(if result == SOCKET_ERROR { result } else { 0 })
         },
         |_data, result| socket_result(result),
+        timeout,
     )
     .await
 }
@@ -651,15 +663,21 @@ struct RecvFromPayload {
     from_len: i32,
 }
 
-async fn recv_from_async(fd: RawSock, len: usize, flags: i32) -> io::Result<ReceivedDatagram> {
+async fn recv_from_async(
+    fd: RawSock,
+    len: usize,
+    flags: i32,
+    timeout: Option<Duration>,
+) -> io::Result<ReceivedDatagram> {
+    let socket = fd.as_socket() as usize;
     // SAFETY: `SOCKADDR_STORAGE` is a plain C struct; zeroed is valid.
     let payload = RecvFromPayload {
         io: BufferedIo::new(vec![0u8; len.max(1)], flags),
         from: unsafe { std::mem::zeroed() },
         from_len: std::mem::size_of::<SOCKADDR_STORAGE>() as i32,
     };
-    submit(
-        cancel_handle(fd),
+    submit_io(
+        fd.into(),
         payload,
         |payload, overlapped| {
             payload.io.fill_wsabuf();
@@ -668,7 +686,7 @@ async fn recv_from_async(fd: RawSock, len: usize, flags: i32) -> io::Result<Rece
             // completion packet reclaims it.
             let result = unsafe {
                 WSARecvFrom(
-                    fd as usize,
+                    socket,
                     &payload.io.wsabuf,
                     1,
                     std::ptr::null_mut(),
@@ -688,6 +706,7 @@ async fn recv_from_async(fd: RawSock, len: usize, flags: i32) -> io::Result<Rece
             let peer_addr = socket_addr_from_storage(&payload.from, payload.from_len)?;
             Ok(ReceivedDatagram { data, peer_addr })
         },
+        timeout,
     )
     .await
 }
@@ -702,14 +721,16 @@ async fn send_to_async(
     target: SocketAddr,
     data: Vec<u8>,
     flags: i32,
+    timeout: Option<Duration>,
 ) -> io::Result<usize> {
     let flags = flags as u32;
+    let socket = fd.as_socket() as usize;
     let payload = SendToPayload {
         io: BufferedIo::new(data, 0),
         to: RawSocketAddr::from_socket_addr(target),
     };
-    submit(
-        cancel_handle(fd),
+    submit_io(
+        fd.into(),
         payload,
         move |payload, overlapped| {
             payload.io.fill_wsabuf();
@@ -717,7 +738,7 @@ async fn send_to_async(
             // lives in the packet context.
             let result = unsafe {
                 WSASendTo(
-                    fd as usize,
+                    socket,
                     &payload.io.wsabuf,
                     1,
                     std::ptr::null_mut(),
@@ -731,6 +752,7 @@ async fn send_to_async(
             check_wsa_submission(if result == SOCKET_ERROR { result } else { 0 })
         },
         |_payload, result| socket_result(result),
+        timeout,
     )
     .await
 }
@@ -739,7 +761,7 @@ async fn send_to_async(
 
 /// Resolves the `ConnectEx` extension-function pointer for `fd`'s provider.
 fn connect_ex_fn(
-    fd: RawSock,
+    fd: &RawSock,
 ) -> io::Result<
     unsafe extern "system" fn(
         usize,
@@ -751,6 +773,8 @@ fn connect_ex_fn(
         *mut OVERLAPPED,
     ) -> i32,
 > {
+    fd.ensure_current()?;
+    let socket = fd.as_socket() as usize;
     let guid = WSAID_CONNECTEX;
     let mut function: LPFN_CONNECTEX = None;
     let mut bytes = 0u32;
@@ -758,7 +782,7 @@ fn connect_ex_fn(
     // overlapped makes this a synchronous control call.
     let result = unsafe {
         WSAIoctl(
-            fd as usize,
+            socket,
             SIO_GET_EXTENSION_FUNCTION_POINTER,
             (&raw const guid).cast::<c_void>(),
             std::mem::size_of_val(&guid) as u32,
@@ -778,15 +802,16 @@ fn connect_ex_fn(
     })
 }
 
-async fn connect_async(fd: RawSock, addr: SocketAddr) -> io::Result<()> {
+async fn connect_async(fd: RawSock, addr: SocketAddr, timeout: Option<Duration>) -> io::Result<()> {
     // `ConnectEx` only exists for connection-oriented sockets. A datagram
     // connect just records the default peer and never blocks, so it uses the
     // plain synchronous call.
-    if getsockopt_int(fd, SOL_SOCKET, SO_TYPE)? == SOCK_DGRAM {
+    if getsockopt_int(&fd, SOL_SOCKET, SO_TYPE)? == SOCK_DGRAM {
         let target = RawSocketAddr::from_socket_addr(addr);
+        let socket = fd.as_socket() as usize;
         // SAFETY: `target` owns a fully initialized sockaddr of the given
         // length.
-        return cvt(unsafe { wsa_connect(fd as usize, target.as_ptr(), target.len()) }).map(|_| ());
+        return cvt(unsafe { wsa_connect(socket, target.as_ptr(), target.len()) }).map(|_| ());
     }
 
     // `ConnectEx` requires a bound socket; bind to the wildcard address first.
@@ -795,23 +820,24 @@ async fn connect_async(fd: RawSock, addr: SocketAddr) -> io::Result<()> {
         SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
         SocketAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
     };
-    match bind_sync(fd, RawSocketAddr::from_socket_addr(wildcard)) {
+    match bind_sync(&fd, RawSocketAddr::from_socket_addr(wildcard)) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(WSAEINVAL) => {}
         Err(error) => return Err(error),
     }
 
-    let connect_ex = connect_ex_fn(fd)?;
+    let connect_ex = connect_ex_fn(&fd)?;
+    let socket = fd.as_socket() as usize;
 
-    submit(
-        cancel_handle(fd),
+    submit_io(
+        fd.into(),
         RawSocketAddr::from_socket_addr(addr),
         |target, overlapped| {
             // SAFETY: the target address lives in the packet context; no send
             // buffer is supplied.
             let ok = unsafe {
                 connect_ex(
-                    fd as usize,
+                    socket,
                     target.as_ptr(),
                     target.len(),
                     std::ptr::null(),
@@ -828,7 +854,7 @@ async fn connect_async(fd: RawSock, addr: SocketAddr) -> io::Result<()> {
             // SAFETY: no option buffer is required for this setsockopt.
             cvt(unsafe {
                 setsockopt(
-                    fd as usize,
+                    socket,
                     SOL_SOCKET,
                     SO_UPDATE_CONNECT_CONTEXT,
                     std::ptr::null(),
@@ -837,6 +863,7 @@ async fn connect_async(fd: RawSock, addr: SocketAddr) -> io::Result<()> {
             })
             .map(|_| ())
         },
+        timeout,
     )
     .await
 }
@@ -853,9 +880,10 @@ const ACCEPTEX_ADDR_LEN: usize = std::mem::size_of::<SOCKADDR_STORAGE>() + 16;
 
 async fn accept_async(fd: RawSock) -> io::Result<AcceptedSocket> {
     // The accept socket must match the listener's family and type.
-    let family = socket_family(fd)?;
-    let socket_type = getsockopt_int(fd, SOL_SOCKET, SO_TYPE)?;
+    let family = socket_family(&fd)?;
+    let socket_type = getsockopt_int(&fd, SOL_SOCKET, SO_TYPE)?;
     let accept_socket = socket_sync(i32::from(family), socket_type, 0, 0)?;
+    let listener = fd.as_socket() as usize;
 
     let payload = AcceptPayload {
         accept_socket: Some(accept_socket),
@@ -864,7 +892,7 @@ async fn accept_async(fd: RawSock) -> io::Result<AcceptedSocket> {
     };
 
     submit(
-        cancel_handle(fd),
+        fd.into(),
         payload,
         |payload, overlapped| {
             let accept_socket = payload
@@ -875,8 +903,8 @@ async fn accept_async(fd: RawSock) -> io::Result<AcceptedSocket> {
             // context; a zero receive length means no data is read into it.
             let ok = unsafe {
                 AcceptEx(
-                    fd as usize,
-                    raw_sock(accept_socket) as usize,
+                    listener,
+                    raw_sock(accept_socket).as_socket() as usize,
                     payload.addresses.as_mut_ptr().cast::<c_void>(),
                     0,
                     ACCEPTEX_ADDR_LEN as u32,
@@ -896,12 +924,11 @@ async fn accept_async(fd: RawSock) -> io::Result<AcceptedSocket> {
             let raw = raw_sock(&accept_socket);
 
             // Finalize the accepted socket so getpeername/shutdown work.
-            let listener: usize = fd as usize;
             // SAFETY: `listener` is passed by value through the option buffer,
             // as `SO_UPDATE_ACCEPT_CONTEXT` requires.
             cvt(unsafe {
                 setsockopt(
-                    raw as usize,
+                    raw.as_socket() as usize,
                     SOL_SOCKET,
                     SO_UPDATE_ACCEPT_CONTEXT,
                     (&raw const listener).cast::<u8>(),
@@ -909,11 +936,8 @@ async fn accept_async(fd: RawSock) -> io::Result<AcceptedSocket> {
                 )
             })?;
 
-            let peer_addr = peer_addr(raw)?;
-            Ok(AcceptedSocket {
-                fd: accept_socket.into_raw_socket(),
-                peer_addr,
-            })
+            let peer_addr = peer_addr(raw.clone())?;
+            Ok(AcceptedSocket { fd: raw, peer_addr })
         },
     )
     .await
@@ -930,13 +954,14 @@ fn socket_domain(addr: SocketAddr) -> i32 {
 
 type SockAddrFn = unsafe extern "system" fn(usize, *mut SOCKADDR, *mut i32) -> i32;
 
-fn socket_addr_with(op: SockAddrFn, fd: RawSock) -> io::Result<SocketAddr> {
+fn socket_addr_with(op: SockAddrFn, fd: &RawSock) -> io::Result<SocketAddr> {
+    fd.ensure_current()?;
     let mut storage = MaybeUninit::<SOCKADDR_STORAGE>::zeroed();
     let mut len = std::mem::size_of::<SOCKADDR_STORAGE>() as i32;
     // SAFETY: `storage`/`len` are valid out-pointers of the declared size.
     cvt(unsafe {
         op(
-            fd as usize,
+            fd.as_socket() as usize,
             storage.as_mut_ptr().cast::<SOCKADDR>(),
             &mut len,
         )
@@ -946,13 +971,14 @@ fn socket_addr_with(op: SockAddrFn, fd: RawSock) -> io::Result<SocketAddr> {
     socket_addr_from_storage(&storage, len)
 }
 
-fn socket_family(fd: RawSock) -> io::Result<ADDRESS_FAMILY> {
+fn socket_family(fd: &RawSock) -> io::Result<ADDRESS_FAMILY> {
+    fd.ensure_current()?;
     let mut storage = MaybeUninit::<SOCKADDR_STORAGE>::zeroed();
     let mut len = std::mem::size_of::<SOCKADDR_STORAGE>() as i32;
     // SAFETY: as in `socket_addr_with`.
     cvt(unsafe {
         getsockname(
-            fd as usize,
+            fd.as_socket() as usize,
             storage.as_mut_ptr().cast::<SOCKADDR>(),
             &mut len,
         )
@@ -962,13 +988,14 @@ fn socket_family(fd: RawSock) -> io::Result<ADDRESS_FAMILY> {
     Ok(storage.ss_family)
 }
 
-fn getsockopt_int(fd: RawSock, level: i32, name: i32) -> io::Result<i32> {
+fn getsockopt_int(fd: &RawSock, level: i32, name: i32) -> io::Result<i32> {
+    fd.ensure_current()?;
     let mut value = 0i32;
     let mut len = std::mem::size_of::<i32>() as i32;
     // SAFETY: `value`/`len` are valid out-pointers of the declared size.
     cvt(unsafe {
         getsockopt(
-            fd as usize,
+            fd.as_socket() as usize,
             level,
             name,
             (&raw mut value).cast::<u8>(),
@@ -978,11 +1005,12 @@ fn getsockopt_int(fd: RawSock, level: i32, name: i32) -> io::Result<i32> {
     Ok(value)
 }
 
-fn setsockopt_int(fd: RawSock, level: i32, name: i32, value: i32) -> io::Result<()> {
+fn setsockopt_int(fd: &RawSock, level: i32, name: i32, value: i32) -> io::Result<()> {
+    fd.ensure_current()?;
     // SAFETY: `value` is passed by pointer with its exact size.
     cvt(unsafe {
         setsockopt(
-            fd as usize,
+            fd.as_socket() as usize,
             level,
             name,
             (&raw const value).cast::<u8>(),

@@ -1,3 +1,7 @@
+#![cfg_attr(windows, allow(clippy::arc_with_non_send_sync))]
+// Windows socket owners are intentionally !Send because of IOCP affinity;
+// the portable split-handle representation still uses Arc for local sharing.
+
 //! An event-loop-per-thread async runtime with JavaScript-style scheduling,
 //! built for interactive applications.
 //!
