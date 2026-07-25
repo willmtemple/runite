@@ -4,20 +4,21 @@
 //! thread-local event loop. [`ctrl_c`] is the portable entry point for shutdown
 //! handling; the platform submodule (`unix` or `windows`) exposes streams for
 //! specific event kinds, such as terminal resize notifications on Unix or
-//! console close events on Windows.
+//! Ctrl-Break events on Windows.
 //!
 //! POSIX signals are process-global, while this runtime is thread-local and
 //! supports `!Send` futures. The Unix backend therefore uses one process-wide
 //! async-signal-safe handler plus a dedicated blocking-pool reader task. The
 //! handler records a pending bit and wakes a self-pipe/eventfd; the reader task
-//! drains that fd and forwards signal notifications as per-thread macrotasks
-//! with [`crate::ThreadHandle::queue_macrotask`].
+//! drains that fd and forwards signal notifications through the runtime's
+//! capacity-bypassing internal wake path.
 //!
 //! This is different from Tokio's default multi-threaded scheduler and
 //! async-std: runite cannot freely move `!Send` signal streams between worker
 //! threads, so delivery fans out to the runtime threads that registered local
-//! streams. Delivery is best-effort. Closed runtime threads are skipped, and a
-//! wake for a live thread can be dropped if its macrotask queue is full.
+//! streams. Repeated events coalesce while a wake is pending, and saturated
+//! user macrotask queues cannot discard that wake. Closed runtime threads are
+//! skipped because they can no longer observe events.
 //!
 //! # Examples
 //!
