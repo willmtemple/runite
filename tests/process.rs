@@ -2,13 +2,20 @@
 
 mod common;
 
+use std::future::{Future, poll_fn};
+use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::PathBuf;
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::block_on;
 use runite::io::{AsyncReadExt, AsyncWriteExt};
 use runite::process::{Command, Stdio};
 use runite::time;
+
+const STDIN_HANDOFF_HELPER: &str = "RUNITE_STDIN_HANDOFF_HELPER";
+const STDIN_HANDOFF_READY: &str = "RUNITE_STDIN_HANDOFF_READY";
+const STDIN_HANDOFF_RESULT: &str = "RUNITE_STDIN_HANDOFF_RESULT:";
 
 fn artifact_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -184,6 +191,180 @@ fn stdio_null_piped_and_inherit_configurations_are_observable() {
     assert!(null_stdin_output.is_empty());
     assert!(null_output_status);
     assert_eq!(inherited_handles_none, (true, true, true));
+}
+
+#[test]
+fn inherited_child_stdin_is_handed_off_without_reader_theft() {
+    if let Ok(mode) = std::env::var(STDIN_HANDOFF_HELPER) {
+        run_stdin_handoff_helper(&mode);
+        return;
+    }
+
+    for mode in ["idle", "pending", "late-init"] {
+        let executable = std::env::current_exe().expect("resolve process test executable");
+        let mut helper = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                "inherited_child_stdin_is_handed_off_without_reader_theft",
+                "--nocapture",
+            ])
+            .env(STDIN_HANDOFF_HELPER, mode)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stdin handoff helper");
+        let stdout = helper.stdout.take().expect("helper stdout pipe");
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+        let (continue_sender, continue_receiver) = std::sync::mpsc::sync_channel(1);
+        let output_reader = std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            let mut output = String::new();
+            loop {
+                let mut line = String::new();
+                let read = stdout.read_line(&mut line)?;
+                if read == 0 {
+                    let _ = ready_sender.send(Err(output.clone()));
+                    return Ok::<_, std::io::Error>(output);
+                }
+                output.push_str(&line);
+                if line.contains(STDIN_HANDOFF_READY) {
+                    let _ = ready_sender.send(Ok(()));
+                    break;
+                }
+            }
+            let _ = continue_receiver.recv();
+            stdout.read_to_string(&mut output)?;
+            Ok(output)
+        });
+
+        match ready_receiver.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(output)) => {
+                let _ = helper.kill();
+                drop(helper.stdin.take());
+                let _ = continue_sender.send(());
+                let _ = helper.wait();
+                let _ = output_reader.join();
+                panic!("helper exited before readiness in {mode} mode:\n{output}");
+            }
+            Err(error) => {
+                let _ = helper.kill();
+                drop(helper.stdin.take());
+                let _ = continue_sender.send(());
+                let _ = helper.wait();
+                let _ = output_reader.join();
+                panic!("helper readiness timed out in {mode} mode: {error}");
+            }
+        }
+
+        let payload = format!("handoff-{mode}\n");
+        let mut stdin = helper.stdin.take().expect("helper stdin pipe");
+        stdin
+            .write_all(payload.as_bytes())
+            .expect("write inherited stdin payload");
+        drop(stdin);
+        continue_sender
+            .send(())
+            .expect("release helper output reader");
+        let status = helper.wait().expect("wait for stdin handoff helper");
+        let output = output_reader
+            .join()
+            .expect("join helper output reader")
+            .expect("read helper output");
+        assert!(status.success(), "helper failed in {mode} mode:\n{output}");
+        assert!(
+            output.contains(&format!("{STDIN_HANDOFF_RESULT}{payload}")),
+            "inherited child did not receive exact stdin in {mode} mode:\n{output}"
+        );
+    }
+}
+
+fn run_stdin_handoff_helper(mode: &str) {
+    let output = match mode {
+        "idle" => block_on(|| async {
+            let _stdin = runite::stdin().expect("initialize process stdin reader");
+            read_inherited_child_stdin().await
+        }),
+        "pending" => block_on(|| async {
+            let mut stdin = runite::stdin().expect("initialize process stdin reader");
+            let mut byte = [0u8; 1];
+            let mut pending = Box::pin(stdin.read(&mut byte));
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let output = read_inherited_child_stdin().await;
+            drop(pending);
+            output
+        }),
+        "late-init" => block_on(|| async {
+            let mut child = spawn_inherited_stdin_child();
+            let mut stdin = runite::stdin().expect("initialize reader during handoff");
+            let mut byte = [0u8; 1];
+            let mut pending = Box::pin(stdin.read(&mut byte));
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            announce_stdin_handoff_ready();
+            let output =
+                time::timeout(Duration::from_secs(10), collect_inherited_stdin(&mut child))
+                    .await
+                    .expect("late-init inherited child timed out");
+            drop(pending);
+            output
+        }),
+        other => panic!("unknown stdin handoff helper mode: {other}"),
+    };
+
+    print!("{STDIN_HANDOFF_RESULT}{}", String::from_utf8_lossy(&output));
+    std::io::stdout()
+        .flush()
+        .expect("flush stdin handoff result");
+}
+
+async fn read_inherited_child_stdin() -> Vec<u8> {
+    let mut child = spawn_inherited_stdin_child();
+    announce_stdin_handoff_ready();
+    time::timeout(Duration::from_secs(10), collect_inherited_stdin(&mut child))
+        .await
+        .expect("inherited child timed out")
+}
+
+fn spawn_inherited_stdin_child() -> runite::process::Child {
+    Command::new("cat")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn inherited-stdin child")
+}
+
+fn announce_stdin_handoff_ready() {
+    println!("{STDIN_HANDOFF_READY}");
+    std::io::stdout()
+        .flush()
+        .expect("flush stdin handoff readiness");
+}
+
+async fn collect_inherited_stdin(child: &mut runite::process::Child) -> Vec<u8> {
+    let mut output = Vec::new();
+    child
+        .stdout
+        .as_mut()
+        .expect("child stdout pipe")
+        .read_to_end(&mut output)
+        .await
+        .expect("read inherited child output");
+    assert!(
+        child
+            .wait()
+            .await
+            .expect("wait inherited-stdin child")
+            .success()
+    );
+    output
 }
 
 #[test]
