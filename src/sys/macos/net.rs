@@ -816,3 +816,195 @@ fn cvt_long(value: libc::ssize_t) -> io::Result<libc::ssize_t> {
         Ok(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Duration;
+
+    use super::*;
+
+    async fn join_with_timeout<T: 'static>(handle: crate::JoinHandle<T>) -> T {
+        let abort = handle.abort_handle();
+        match crate::time::timeout(Duration::from_secs(2), handle).await {
+            Ok(result) => result.expect("I/O task should not be aborted"),
+            Err(_) => {
+                abort.abort();
+                panic!("I/O task did not complete after readiness");
+            }
+        }
+    }
+
+    #[test]
+    fn two_concurrent_accepts_are_woken_to_retry() {
+        crate::block_on(async {
+            let listener = bind_listener("127.0.0.1:0".parse().unwrap(), None)
+                .await
+                .expect("bind listener");
+            let listener_fd = listener.as_raw_fd();
+            let addr = local_addr(listener_fd).expect("listener address");
+
+            let first = crate::spawn(accept_async(listener_fd));
+            let second = crate::spawn(accept_async(listener_fd));
+            crate::time::sleep(Duration::from_millis(10)).await;
+
+            let _first_client = std::net::TcpStream::connect(addr).expect("first client");
+            let _second_client = std::net::TcpStream::connect(addr).expect("second client");
+
+            let first = join_with_timeout(first).await.expect("first accept");
+            let second = join_with_timeout(second).await.expect("second accept");
+            // SAFETY: accept returned two fresh descriptors and this test owns
+            // both until the wrappers below close them.
+            drop(unsafe { OwnedFd::from_raw_fd(first.fd) });
+            drop(unsafe { OwnedFd::from_raw_fd(second.fd) });
+        });
+    }
+
+    #[test]
+    fn two_concurrent_receives_are_woken_to_retry() {
+        crate::block_on(async {
+            let receiver = bind_datagram("127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind receiver");
+            let receiver_fd = receiver.as_raw_fd();
+            let receiver_addr = local_addr(receiver_fd).expect("receiver address");
+
+            let first = crate::spawn(recv_async(receiver_fd, 16, 0));
+            let second = crate::spawn(recv_async(receiver_fd, 16, 0));
+            crate::time::sleep(Duration::from_millis(10)).await;
+
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+            sender.send_to(b"one", receiver_addr).expect("send one");
+            sender.send_to(b"two", receiver_addr).expect("send two");
+
+            let mut received = vec![
+                join_with_timeout(first).await.expect("first receive"),
+                join_with_timeout(second).await.expect("second receive"),
+            ];
+            received.sort();
+            assert_eq!(received, vec![b"one".to_vec(), b"two".to_vec()]);
+        });
+    }
+
+    #[test]
+    fn cancelling_one_waiter_keeps_the_other_registered() {
+        crate::block_on(async {
+            let receiver = bind_datagram("127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind receiver");
+            let receiver_fd = receiver.as_raw_fd();
+            let receiver_addr = local_addr(receiver_fd).expect("receiver address");
+
+            let cancelled = crate::spawn(recv_async(receiver_fd, 16, 0));
+            let remaining = crate::spawn(recv_async(receiver_fd, 16, 0));
+            crate::time::sleep(Duration::from_millis(10)).await;
+
+            cancelled.abort();
+            let error = cancelled
+                .await
+                .expect_err("first receive should be aborted");
+            assert!(error.is_aborted());
+            crate::time::sleep(Duration::from_millis(10)).await;
+
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+            sender
+                .send_to(b"remaining", receiver_addr)
+                .expect("send datagram");
+
+            let received = join_with_timeout(remaining)
+                .await
+                .expect("remaining receive");
+            assert_eq!(received, b"remaining");
+        });
+    }
+
+    #[test]
+    fn two_concurrent_writes_are_woken_to_retry() {
+        crate::block_on(async {
+            let mut fds = [0; 2];
+            cvt(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) })
+                .expect("create socket pair");
+            // SAFETY: socketpair returned two fresh descriptors and ownership
+            // transfers to these wrappers exactly once.
+            let writer = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+            let reader = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+            set_nonblocking(writer.as_raw_fd()).expect("nonblocking writer");
+            set_nonblocking(reader.as_raw_fd()).expect("nonblocking reader");
+
+            let chunk = [0u8; 8192];
+            loop {
+                let written = unsafe {
+                    libc::send(
+                        writer.as_raw_fd(),
+                        chunk.as_ptr().cast::<c_void>(),
+                        chunk.len(),
+                        0,
+                    )
+                };
+                if written > 0 {
+                    continue;
+                }
+                assert!(written < 0, "non-empty send unexpectedly wrote zero bytes");
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    break;
+                }
+                if error.kind() != io::ErrorKind::Interrupted {
+                    panic!("filling socket buffer failed: {error}");
+                }
+            }
+
+            let writer_fd = writer.as_raw_fd();
+            let first = crate::spawn(send_async(writer_fd, vec![1], 0));
+            let second = crate::spawn(send_async(writer_fd, vec![2], 0));
+            crate::time::sleep(Duration::from_millis(10)).await;
+            assert!(!first.is_finished());
+            assert!(!second.is_finished());
+
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                let read = unsafe {
+                    libc::recv(
+                        reader.as_raw_fd(),
+                        buffer.as_mut_ptr().cast::<c_void>(),
+                        buffer.len(),
+                        0,
+                    )
+                };
+                if read > 0 {
+                    continue;
+                }
+                if read == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    break;
+                }
+                if error.kind() != io::ErrorKind::Interrupted {
+                    panic!("draining socket buffer failed: {error}");
+                }
+            }
+
+            assert_eq!(join_with_timeout(first).await.expect("first write"), 1);
+            assert_eq!(join_with_timeout(second).await.expect("second write"), 1);
+        });
+    }
+
+    #[test]
+    fn refused_connect_preserves_the_socket_error() {
+        crate::block_on(async {
+            let reservation =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("reserve local port");
+            let addr = reservation.local_addr().expect("reserved address");
+            drop(reservation);
+
+            let error = crate::time::timeout(Duration::from_secs(2), connect_stream(addr))
+                .await
+                .expect("connect should finish")
+                .expect_err("connect should be refused");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+            assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED));
+        });
+    }
+}
