@@ -413,8 +413,14 @@ the thread's io_uring driver before collecting the status with `waitpid`
 offload for child exit.
 
 On Windows, `Child::wait` parks the process handle on the OS wait-thread pool with
-`RegisterWaitForSingleObject`, whose callback completes a runtime completion; on macOS, the wait
-registers `EVFILT_PROC` and polls it (`src/sys/windows/process.rs`, `src/sys/macos/process.rs`).
+`RegisterWaitForSingleObject`, whose callback completes a runtime completion
+(`src/sys/windows/process.rs`).
+
+On macOS the wait is event-driven: it registers `EVFILT_PROC` with `NOTE_EXIT` on the runtime's own
+kqueue and is woken by the exit event, then collects the status with `waitpid`
+(`src/sys/macos/process.rs`). Registering a child that has already exited returns `ESRCH`, which is
+treated as a wakeup so the caller reaps it rather than waiting for an event that can never arrive.
+There is no periodic timer and no blocking-pool offload for child exit on any platform.
 
 Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
 Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, macOS uses the

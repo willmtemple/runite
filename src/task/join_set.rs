@@ -7,11 +7,12 @@ use crate::{JoinHandle, spawn};
 
 /// Error returned by awaiting a join handle or [`JoinSet`] task.
 ///
-/// Produced both by [`crate::task::BlockingJoinHandle`] (when a blocking-pool
-/// worker exits without delivering a value) and by [`crate::JoinHandle`] or
-/// [`JoinSet`] (when a queued future is aborted before it completes). A queued
-/// task's join output is `Result<T, JoinError>`, so callers should handle these
-/// errors when awaiting any join handle.
+/// Produced by [`crate::task::BlockingJoinHandle`] (when a blocking-pool worker
+/// exits without delivering a value) and by [`crate::JoinHandle`] or [`JoinSet`]
+/// (when a queued future is aborted, panics, or is still pending when
+/// [`run`](crate::run) reaches quiescence). A queued task's join output is
+/// `Result<T, JoinError>`, so callers should handle these errors when awaiting
+/// any join handle.
 ///
 /// A queued future that **panics** while being polled resolves its join handle
 /// to [`JoinError::Panicked`] rather than unwinding the event loop: runite
@@ -45,11 +46,21 @@ use crate::{JoinHandle, spawn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JoinError {
-    /// The worker exited without producing a value.
+    /// The task was terminated without producing a value, and without being
+    /// explicitly aborted or panicking.
     ///
-    /// This is used for blocking tasks whose result channel closes before the
-    /// worker delivers a value, such as during runtime shutdown or panic
-    /// unwinding.
+    /// Two situations produce this:
+    ///
+    /// - A spawned future was still pending when [`run`](crate::run) reached
+    ///   quiescence. Idle shutdown terminalizes such a task and drops its
+    ///   future. A task is safe from this whenever the runtime can see its wake
+    ///   source — channels, timers, I/O, [`spawn_blocking`](crate::task::spawn_blocking),
+    ///   signals, and [`WorkerHandle::join`](crate::WorkerHandle::join) all
+    ///   register runtime liveness. A future woken only by a bare
+    ///   [`Waker`](std::task::Waker) clone handed to a foreign thread is not
+    ///   visible to that check and will be cancelled instead of resumed.
+    /// - A blocking task's result channel closed before the pool worker
+    ///   delivered a value, such as during runtime shutdown or panic unwinding.
     Cancelled,
     /// The task was aborted before it completed.
     ///
@@ -98,8 +109,9 @@ impl JoinError {
         matches!(self, JoinError::Aborted)
     }
 
-    /// Returns `true` if a blocking-pool worker was cancelled without producing
-    /// a value.
+    /// Returns `true` if the task was cancelled without producing a value —
+    /// either a spawned future still pending when `run()` reached quiescence,
+    /// or a blocking-pool worker that exited without delivering a result.
     ///
     /// This is true only for [`JoinError::Cancelled`].
     ///
@@ -131,7 +143,7 @@ impl JoinError {
 impl fmt::Display for JoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JoinError::Cancelled => f.write_str("blocking task was cancelled"),
+            JoinError::Cancelled => f.write_str("task was cancelled without producing a value"),
             JoinError::Aborted => f.write_str("task was aborted"),
             JoinError::Panicked => f.write_str("task panicked"),
         }
