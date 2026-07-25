@@ -754,8 +754,18 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
         );
         assert!(!on_exit_ran.load(Ordering::Acquire));
 
+        // Signal after the poll and again after the drop, so a stall names the
+        // operation that stalled. Both take the completion mutex, and a single
+        // combined signal cannot tell "poll blocked" from "drop blocked" from
+        // "join resolved early" -- three different bugs.
+        #[derive(Debug)]
+        enum JoinPollStage {
+            Polled(bool),
+            Dropped,
+        }
+
         let join = worker.join();
-        let (poll_sender, poll_receiver) = mpsc::sync_channel(1);
+        let (poll_sender, poll_receiver) = mpsc::sync_channel(2);
         let poller = TrackedThread::new(
             thread::Builder::new()
                 .name("runite-worker-join-poller".into())
@@ -765,23 +775,34 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
                     let mut context = Context::from_waker(&waker);
                     let mut join = join;
                     let pending = Pin::new(&mut join).poll(&mut context).is_pending();
+                    let _ = poll_sender.send(JoinPollStage::Polled(pending));
                     drop(join);
-                    let _ = poll_sender.send(pending);
+                    let _ = poll_sender.send(JoinPollStage::Dropped);
                 })
                 .expect("worker join poller should spawn"),
         );
-        let poll_was_nonblocking = match poll_receiver.recv_timeout(DELIVERY_TIMEOUT) {
-            Ok(pending) => pending,
-            Err(_) => {
-                exit_gate.release();
-                false
-            }
-        };
+
+        let polled = poll_receiver.recv_timeout(DELIVERY_TIMEOUT).ok();
+        let dropped = polled.is_some() && poll_receiver.recv_timeout(DELIVERY_TIMEOUT).is_ok();
+        if polled.is_none() || !dropped {
+            // Let the worker finish so the poller can be joined below.
+            exit_gate.release();
+        }
         poller.join().expect("worker join poller should finish");
-        assert!(
-            poll_was_nonblocking,
-            "polling join blocked on the worker OS thread"
-        );
+
+        match polled {
+            None => panic!("polling the join future blocked on the worker OS thread"),
+            Some(JoinPollStage::Polled(false)) => {
+                panic!("join resolved before the worker OS thread exited")
+            }
+            Some(JoinPollStage::Polled(true)) => assert!(
+                dropped,
+                "dropping the join future blocked on the worker OS thread"
+            ),
+            Some(JoinPollStage::Dropped) => {
+                unreachable!("the poller signals its stages in order")
+            }
+        }
 
         let progress_for_controller = parent_progress.clone();
         let gate_for_controller = exit_gate.clone();
