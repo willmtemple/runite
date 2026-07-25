@@ -10,6 +10,13 @@ documentation = "https://docs.rs/runite-proc-macros"
 readme = "README.md"
 keywords = ["async", "runtime", "macro", "proc-macro", "runite"]
 categories = ["asynchronous"]
+include = [
+  "src/**",
+  "Cargo.toml",
+  "README.md",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+]
 
 [lib]
 proc-macro = true
