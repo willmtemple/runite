@@ -406,20 +406,31 @@ impl Driver {
 
         let mut saw_any = false;
         let count = result.max(0) as usize;
+        // Every registration is `EV_ONESHOT`, so the kernel deleted these knotes
+        // as it dequeued them: an event dropped here exists nowhere else and its
+        // waiter would hang forever. Dispatch the whole batch and only then
+        // surface a wake-pipe failure.
+        let mut drain_error = None;
         if count > 0 {
             saw_any = true;
             for event in events.iter().take(count) {
                 if event.filter == libc::EVFILT_READ && event.ident as RawFd == self.wake_read_fd {
                     ready.wake = true;
-                    let wakes = drain_wake_pipe(self.wake_read_fd)?;
-                    self.pending_wakes
-                        .set(self.pending_wakes.get().saturating_add(wakes));
+                    match drain_wake_pipe(self.wake_read_fd) {
+                        Ok(wakes) => self
+                            .pending_wakes
+                            .set(self.pending_wakes.get().saturating_add(wakes)),
+                        Err(error) => drain_error = drain_error.or(Some(error)),
+                    }
                 } else if let Some(interest) = interest_from_filter(event.filter) {
                     self.complete_fd_waiters(event.ident as RawFd, interest, event);
                 } else if event.filter == libc::EVFILT_PROC {
                     self.complete_process_waiters(event.ident as libc::pid_t, event);
                 }
             }
+        }
+        if let Some(error) = drain_error {
+            return Err(error);
         }
 
         if let Some(deadline) = self.timer_deadline.get()
