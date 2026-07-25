@@ -15,6 +15,77 @@ mise run check    # fmt + clippy + tests + cop — the full local gate
 If you do not use mise, a recent stable Rust toolchain (matching the `rust-version` /
 `rust-toolchain.toml` pin) works too.
 
+### Updating mise and the lockfile
+
+CI and release jobs explicitly install mise `2026.6.11`, the version used to
+generate the current `mise.lock`. Keep the lockfile generator and every
+`jdx/mise-action` `version` input in sync:
+
+1. Select the intended mise release locally with `mise self-update <version>`
+   and confirm it with `mise --version`.
+2. Update every `version` input in `.github/workflows/ci.yml` and
+   `.github/workflows/release.yml`, plus `PINNED_MISE_VERSION` in
+   `.github/scripts/test_mise_action_pin.py`.
+3. Run `mise upgrade` and then `mise lock` with that exact mise release, and
+   review the resulting tool versions, URLs, and checksums in `mise.lock`.
+4. Run `mise run ci-script-test`, `mise run ci-lint`, and `mise run check`
+   before committing the workflow and lockfile changes together.
+
+Do not regenerate `mise.lock` with a newer local mise while the workflows still
+install an older release; lockfile format or backend changes may not be
+compatible.
+
+## Reproducing CI
+
+The required `Required CI` status aggregates every platform, safety, API,
+package, docs/examples, coverage, license, and benchmark job. The focused
+Linux jobs are available locally:
+
+| Command | Coverage |
+| --- | --- |
+| `mise run ci-lint` | GitHub Actions YAML, expressions, and shell fragments via pinned `actionlint`. |
+| `mise run miri` | Mock-driver scheduler, task, timer, channel, sync, waker, and pending-state logic. |
+| `mise run asan` | Cancellation/drop, resource churn, and normal io_uring teardown on Linux. |
+| `mise run tsan` | Mock-driver channel, watch, waker, worker, and concurrent completion logic. |
+| `mise run capability-matrix` | Injected constrained io_uring opcode sets and old timer flags. |
+| `mise run stress-issue-6` | Repeated merged doctests and `spawn_blocking` runtime-liveness regressions. |
+| `mise run bench-io-uring-ab` | Immediate/deferred submission A/B data under `target/criterion/`. |
+
+`miri`, `asan`, and `tsan` install the pinned `nightly-2026-07-01` plus
+`miri`, `rust-src`, and `llvm-tools` through `mise run ci-nightly-install`.
+The sanitizer, capability, stress, and io_uring A/B tasks require Linux and
+GNU `timeout`. Every task and workflow job has a deadline; a stuck runtime is
+terminated rather than leaving a runner behind. Override the local stress
+count with `RUNITE_STRESS_ITERATIONS=50 mise run stress-issue-6`.
+
+### Safety-tool boundaries
+
+- **Miri** runs only `logic_safety_tests`, which enter `MockRuntimeHarness`.
+  `cfg(miri)` removes the real Linux driver test modules. Miri never initializes
+  io_uring and does not run filesystem, network, process, kqueue, or IOCP code.
+- **TSan** uses the same driver-free tests. TSan cannot reliably intercept
+  io_uring's kernel-owned accesses, so real-ring races belong to the native
+  Linux and ASan jobs; pretending those syscalls are instrumented would give
+  false confidence.
+- **ASan** intentionally uses a compatible Ubuntu kernel and the real io_uring
+  backend. Its focused suite covers cancellation, dropped buffers/descriptors,
+  churn, and successful teardown without paying for every integration test.
+- **Constrained kernels** are modeled by injecting the probe bitmap through the
+  production dispatch seam. A container shares the GitHub runner's host kernel
+  and cannot reliably provide an old io_uring implementation, so CI combines
+  deterministic missing-opcode tests with one compatible Ubuntu kernel rather
+  than claiming to boot a limited kernel.
+- **Submission A/B** results are artifacts, not a pass/fail latency threshold.
+  Hosted-runner hardware variance makes a wall-clock regression gate unsound.
+
+If a local Linux host disables io_uring or blocks it with seccomp, the ASan,
+capability, and A/B tasks will report that initialization failure; run those on
+a kernel with io_uring enabled (5.6 minimum). If a sanitizer run is interrupted,
+remove only its isolated cache (`target/asan`, `target/tsan`, or `target/miri`)
+and rerun. A TSan “unexpected memory mapping” failure is a host/runtime
+limitation, not a test skip; use the pinned Ubuntu CI image before diagnosing a
+code race.
+
 ## Reporting an issue or making a change to runite
 
 GitHub issues and pull requests are limited to collaborators. Please start by
