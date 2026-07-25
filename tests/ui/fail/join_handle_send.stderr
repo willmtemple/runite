@@ -1,0 +1,17 @@
+error[E0277]: `Rc<runite::platform::runtime_shared::future_task::JoinState<()>>` cannot be sent between threads safely
+ --> tests/ui/fail/join_handle_send.rs:4:19
+  |
+4 |     assert_send::<runite::JoinHandle<()>>();
+  |                   ^^^^^^^^^^^^^^^^^^^^^^ `Rc<runite::platform::runtime_shared::future_task::JoinState<()>>` cannot be sent between threads safely
+  |
+  = help: within `runite::JoinHandle<()>`, the trait `Send` is not implemented for `Rc<runite::platform::runtime_shared::future_task::JoinState<()>>`
+note: required because it appears within the type `runite::JoinHandle<()>`
+ --> src/platform/runtime_shared/handles.rs
+  |
+  | pub struct JoinHandle<T> {
+  |            ^^^^^^^^^^
+note: required by a bound in `assert_send`
+ --> tests/ui/fail/join_handle_send.rs:1:19
+  |
+1 | fn assert_send<T: Send>() {}
+  |                   ^^^^ required by this bound in `assert_send`

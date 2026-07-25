@@ -4,10 +4,6 @@
 //! `runite` without introducing a dependency cycle with the proc-macro
 //! crate. They poll all child futures on the current task and do not require
 //! `Send`, matching the runtime's single-threaded future model.
-//!
-//! `select!` currently supports only ready branches of the form
-//! `pattern = future => expression`. There is no `else =>` branch in this
-//! first version.
 
 /// Awaits multiple futures concurrently on the current task.
 ///
@@ -189,75 +185,68 @@ macro_rules! try_join {
     };
 }
 
-/// Resolves with the handler for the first future that becomes ready.
+#[doc(hidden)]
+pub use runite_proc_macros::select as __select;
+
+/// Resolves with the handler for the first enabled future that becomes ready.
 ///
-/// Futures are polled in lexical order on each wake. Once an arm wins, all
-/// other futures owned by the macro invocation are dropped.
+/// By default, the first arm polled rotates between invocations and after each
+/// pending poll, preventing an always-ready arm from permanently starving its
+/// peers. Add `biased;` at the start of the invocation to poll in lexical order
+/// every time:
+///
+/// ```
+/// # async fn example() {
+/// let value = runite::select! {
+///     biased;
+///     value = async { 1 } => value,
+///     value = async { 2 } => value,
+/// };
+/// assert_eq!(value, 1);
+/// # }
+/// ```
+///
+/// A branch may have an `if` precondition. Every precondition is evaluated
+/// exactly once in lexical order before any branch future is created. A
+/// disabled branch's future is still created, but is not polled. If every
+/// branch is disabled, including branches disabled because their output did
+/// not match the branch pattern, the `else` handler runs. Without `else`, the
+/// macro panics.
+///
+/// ```
+/// # async fn example() {
+/// let value = runite::select! {
+///     value = async { 1 }, if false => value,
+///     else => 2,
+/// };
+/// assert_eq!(value, 2);
+/// # }
+/// ```
+///
+/// Once an arm wins, every branch future is dropped before its handler runs.
+/// Handlers therefore execute in the caller's async and control-flow context:
+/// they may contain `.await`, `return`, or `break`.
+///
+/// The arm count has no fixed macro limit, and each future expression is
+/// created once per invocation. When selecting in a loop over methods that
+/// borrow loop-owned resources, creating those futures before the invocation
+/// makes the ownership boundary explicit:
+///
+/// ```no_run
+/// # async fn example(listener: &mut runite::net::TcpListener) -> std::io::Result<()> {
+/// loop {
+///     let accept = listener.accept();
+///     let accepted = runite::select! {
+///         accepted = accept => accepted,
+///     };
+///     let (_stream, _address) = accepted?;
+/// }
+/// # }
+/// ```
 #[macro_export]
 macro_rules! select {
-    ($($binding:pat = $future:expr => $handler:expr),+ $(,)?) => {
-        $crate::select!(
-            @collect
-            []
-            [
-                __runite_select_f0
-                __runite_select_f1
-                __runite_select_f2
-                __runite_select_f3
-                __runite_select_f4
-                __runite_select_f5
-                __runite_select_f6
-                __runite_select_f7
-                __runite_select_f8
-                __runite_select_f9
-                __runite_select_f10
-                __runite_select_f11
-                __runite_select_f12
-                __runite_select_f13
-                __runite_select_f14
-                __runite_select_f15
-            ]
-            [$($binding = $future => $handler),+]
-        )
-    };
-    (@collect
-        [$(($future_var:ident, $binding:pat, $future:expr, $handler:expr))*]
-        [$next_future_var:ident $($names:tt)*]
-        [$next_binding:pat = $next_future:expr => $next_handler:expr $(, $remaining_binding:pat = $remaining_future:expr => $remaining_handler:expr)*]
-    ) => {
-        $crate::select!(
-            @collect
-            [$(($future_var, $binding, $future, $handler))* ($next_future_var, $next_binding, $next_future, $next_handler)]
-            [$($names)*]
-            [$($remaining_binding = $remaining_future => $remaining_handler),*]
-        )
-    };
-    (@collect
-        [$(($future_var:ident, $binding:pat, $future:expr, $handler:expr))+]
-        [$($names:tt)*]
-        []
-    ) => {
-        async move {
-            $(
-                let mut $future_var = ::core::pin::pin!($future);
-            )+
-
-            ::core::future::poll_fn(move |__runite_cx| {
-                $(
-                    match ::core::future::Future::poll($future_var.as_mut(), __runite_cx) {
-                        ::core::task::Poll::Ready(__runite_value) => {
-                            let $binding = __runite_value;
-                            return ::core::task::Poll::Ready($handler);
-                        }
-                        ::core::task::Poll::Pending => {}
-                    }
-                )+
-
-                ::core::task::Poll::Pending
-            })
-            .await
-        }
-        .await
+    ($($input:tt)*) => {
+        $crate::macros::__select! { $($input)* }
     };
 }
 
