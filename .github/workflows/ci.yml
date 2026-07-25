@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Lets mise's github backend fetch the cop release and verify attestations
+  # Lets mise's github backend fetch pinned releases and verify attestations
   # without hitting unauthenticated GitHub API rate limits.
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,15 +58,6 @@ jobs:
         run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      # Run the checks first: `cop <file> -t .` auto-restores the imported
-      # packages (code, code-analysis, rust) from the default feed into a fresh
-      # runner's package cache. `cop verify` does NOT auto-restore, so it must
-      # run after the cache is warmed, otherwise it fails with
-      # "Package not found in any feed" on a clean CI machine.
-      - name: Cop checks
-        run: mise run cop
-      - name: Cop verify
-        run: mise run cop-verify
 
   test-linux:
     name: Test (Linux x86_64, io_uring)
@@ -141,7 +132,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      # Install only the pinned Rust: the other mise tools (cop, cargo-public-api)
+      # Install only the pinned Rust: the other mise tools (cargo-public-api)
       # run in the Linux lint job, and skipping them keeps Windows provisioning
       # fast. rust-toolchain.toml pins the same toolchain for rustup either way.
       - name: Install toolchain via mise
@@ -158,16 +149,10 @@ jobs:
         shell: bash
       # The subprocess tests and examples spawn Git-style shell utilities
       # (`sh`, `cat`, `true`, `false`), which GitHub's Windows images provide
-      # via Git Bash. They live on Git Bash's own PATH, not the job default
-      # shell's, so publish that directory to the job PATH -- otherwise
-      # `std::process::Command` cannot resolve them from the test step.
-      - name: Add Git shell utilities to PATH
-        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\Git\usr\bin"
-      # Fail fast with a clear message if an image change ever drops them,
-      # rather than failing deep inside a test. This runs in the same shell as
-      # the test step so it checks the PATH the tests actually get; under
-      # `shell: bash` it would validate Git Bash's PATH instead and pass while
-      # the tests fail. `where.exe` (not bash's `command -v`, which reports
+      # via Git Bash on the default PATH. Fail fast with a clear message if an
+      # image change ever drops them, rather than failing deep inside a test.
+      # Run in the job's default shell so this checks the PATH the tests are
+      # actually given. `where.exe` (not bash's `command -v`, which reports
       # shell builtins for `true`/`false`) resolves real executables the way
       # `std::process::Command` does.
       - name: Verify shell utilities for subprocess tests

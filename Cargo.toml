@@ -24,7 +24,6 @@ exclude = [
   "/.github",
   "/.claude",
   "/target",
-  "/cop-checks",
   "/proc_macros",
   "/xtask",
   "/docs/public-api.md",

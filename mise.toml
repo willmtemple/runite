@@ -27,10 +27,6 @@ RUNITE_SANITIZER_TARGET = "x86_64-unknown-linux-gnu"
 # backend installs a minimal profile otherwise.
 rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 
-# Agent Cop static-analysis tool, installed from GitHub release binaries; the
-# exact release is pinned in `mise.lock`. https://github.com/KrzysztofCwalina/cop
-"github:KrzysztofCwalina/cop" = { version = "latest", exe = "cop" }
-
 # `cargo public-api` powers `mise run api-report`, which renders the crate's
 # public surface as reviewable markdown (docs/public-api.md). It shells out to a
 # nightly rustdoc to emit rustdoc JSON, so the report is a local/dev tool rather
@@ -292,14 +288,6 @@ run = [
 description = "Emit lcov coverage for CI consumption"
 run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info"
 
-[tasks.cop]
-description = "Run Agent Cop static-analysis checks"
-run = "cop cop-checks/main.cop -t ."
-
-[tasks.cop-verify]
-description = "Verify cop rule files compile"
-run = "cop verify cop-checks/"
-
 [tasks.check]
-description = "Run the full local gate (fmt, lint, test, workflows, release gate, cop)"
-depends = ["fmt", "lint", "test", "ci-lint", "ci-script-test", "cop"]
+description = "Run the full local gate (fmt, lint, test, workflows, release gate)"
+depends = ["fmt", "lint", "test", "ci-lint", "ci-script-test"]

@@ -189,7 +189,7 @@ The toolchain is pinned with [mise](https://mise.jdx.dev/). Install it, then:
 
 ```sh
 mise install            # fetch the pinned Rust toolchain and Agent Cop
-mise run check          # fmt + clippy + tests + cop (the full local gate)
+mise run check          # fmt + clippy + tests + workflow lint (the full local gate)
 ```
 
 Individual tasks:
@@ -201,7 +201,6 @@ Individual tasks:
 | `mise run lint`     | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Lint with warnings denied.         |
 | `mise run bench`    | `cargo bench --workspace --all-features`                               | Criterion benchmarks (`benches/`). |
 | `mise run coverage` | `cargo llvm-cov --workspace --all-features ...`                        | HTML + lcov coverage report.       |
-| `mise run cop`      | `cop cop-checks/main.cop -t .`                                         | Agent Cop static-analysis checks.  |
 | `mise run api-report-check` | `cargo run -p xtask -- api-report --check`                    | Check target/feature API surfaces. |
 | `mise run package-verify` | `cargo run -p xtask -- release-verify`                         | Verify unpacked release artifacts. |
 | `mise run miri` / `asan` / `tsan` | Pinned-nightly focused safety suites.                  | Driver-free Miri/TSan; Linux ASan. |
