@@ -64,8 +64,8 @@ use std::io::{self, IoSlice};
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, CursorState, Stream, WriteOperation};
 use crate::op::fs::{
@@ -400,10 +400,32 @@ impl<T: Send + 'static> ReadDirShared<T> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let returned = io::Error::new(error.kind(), error.to_string());
-                self.complete(Some(error));
+                if !self.defer_failed_refill(&error) {
+                    self.complete(Some(error));
+                }
                 Err(returned)
             }
         }
+    }
+
+    /// Whether a failed submission can be retried instead of ending the scan.
+    ///
+    /// A full blocking-pool queue is transient. If the consumer still has
+    /// buffered entries it can make progress and drive another refill from a
+    /// later poll, so a half-read directory need not fail. With nothing
+    /// buffered there is no subsequent poll to retry from -- the consumer would
+    /// spin or park forever -- so that case stays terminal.
+    fn defer_failed_refill(&self, error: &io::Error) -> bool {
+        if error.kind() != io::ErrorKind::WouldBlock {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.done || state.cancelled || state.entries.is_empty() {
+            return false;
+        }
+        state.batch_active = false;
+        state.refill_requested = true;
+        true
     }
 
     fn run_batch(self: Arc<Self>) {

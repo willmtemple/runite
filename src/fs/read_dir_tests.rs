@@ -20,22 +20,34 @@ struct ManualReadDirScheduler {
     jobs: Mutex<VecDeque<ReadDirJob>>,
     submissions: AtomicUsize,
     fail_submission: AtomicUsize,
+    fail_permanently: AtomicBool,
 }
 
 impl ManualReadDirScheduler {
     fn schedule(&self, job: ReadDirJob) -> io::Result<()> {
         let submission = self.submissions.fetch_add(1, Ordering::AcqRel) + 1;
         if self.fail_submission.load(Ordering::Acquire) == submission {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "synthetic blocking queue is full",
-            ));
+            return Err(if self.fail_permanently.load(Ordering::Acquire) {
+                io::Error::other("synthetic scheduler is gone")
+            } else {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "synthetic blocking queue is full",
+                )
+            });
         }
         self.jobs.lock().unwrap().push_back(job);
         Ok(())
     }
 
     fn fail_on(&self, submission: usize) {
+        self.fail_submission.store(submission, Ordering::Release);
+    }
+
+    /// Fails the selected submission with a non-transient error, which must end
+    /// the scan rather than being retried.
+    fn fail_permanently_on(&self, submission: usize) {
+        self.fail_permanently.store(true, Ordering::Release);
         self.fail_submission.store(submission, Ordering::Release);
     }
 
@@ -295,12 +307,57 @@ fn dropping_paused_scan_drops_iterator_and_liveness() {
     assert_eq!(owner.shared.pending_ops.load(Ordering::Acquire), baseline);
 }
 
+/// A full blocking-pool queue is transient. As long as the consumer still has
+/// buffered entries to hand out, a failed refill must not end a half-read
+/// directory: a later poll drives another refill and the scan completes.
 #[test]
-fn reschedule_failure_is_terminal_and_drops_iterator() {
+fn transient_refill_failure_resumes_while_entries_remain_buffered() {
     let owner = current_thread_handle();
     let baseline = owner.shared.pending_ops.load(Ordering::Acquire);
     let scheduler = Arc::new(ManualReadDirScheduler::default());
     scheduler.fail_on(2);
+    let iterator_dropped = Arc::new(AtomicBool::new(false));
+    let dropped_by_iterator = Arc::clone(&iterator_dropped);
+    let mut consumer = synthetic_read_dir(
+        owner.clone(),
+        4,
+        move || {
+            Ok(DropTrackedEntries {
+                entries: (0..10).map(Ok),
+                dropped: dropped_by_iterator,
+            })
+        },
+        &scheduler,
+    )
+    .expect("initial batch should schedule");
+
+    assert!(scheduler.run_one(), "initial batch should run");
+
+    let mut seen = Vec::new();
+    while let Some(entry) = next_protocol(&mut consumer, &scheduler)
+        .expect("a transient refill failure must not end the scan")
+    {
+        seen.push(entry);
+    }
+
+    assert_eq!(
+        seen,
+        (0..10).collect::<Vec<_>>(),
+        "every entry should still be delivered, in order"
+    );
+    assert!(
+        iterator_dropped.load(Ordering::Acquire),
+        "the iterator is dropped once the scan finishes"
+    );
+    assert_eq!(owner.shared.pending_ops.load(Ordering::Acquire), baseline);
+}
+
+#[test]
+fn permanent_reschedule_failure_is_terminal_and_drops_iterator() {
+    let owner = current_thread_handle();
+    let baseline = owner.shared.pending_ops.load(Ordering::Acquire);
+    let scheduler = Arc::new(ManualReadDirScheduler::default());
+    scheduler.fail_permanently_on(2);
     let iterator_dropped = Arc::new(AtomicBool::new(false));
     let dropped_by_iterator = Arc::clone(&iterator_dropped);
     let mut consumer = synthetic_read_dir(
@@ -330,7 +387,7 @@ fn reschedule_failure_is_terminal_and_drops_iterator() {
         next_protocol(&mut consumer, &scheduler)
             .expect_err("failed reschedule should be reported after buffered entries")
             .kind(),
-        io::ErrorKind::WouldBlock
+        io::ErrorKind::Other
     );
     assert_eq!(next_protocol(&mut consumer, &scheduler).unwrap(), None);
     assert_eq!(owner.shared.pending_ops.load(Ordering::Acquire), baseline);
