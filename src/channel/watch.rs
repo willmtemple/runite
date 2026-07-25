@@ -155,19 +155,23 @@ pub struct SendError<T>(pub T);
 pub struct RecvError;
 
 impl Book {
-    fn enqueue_waiter(
-        &mut self,
-        version: u64,
-        handle: CompletionHandle<Result<u64, RecvError>>,
-    ) -> usize {
+    fn allocate_waiter_id(&mut self) -> usize {
         let id = self.next_waiter_id;
         self.next_waiter_id = self.next_waiter_id.wrapping_add(1);
+        id
+    }
+
+    fn publish_waiter(
+        &mut self,
+        id: usize,
+        version: u64,
+        handle: CompletionHandle<Result<u64, RecvError>>,
+    ) {
         self.waiters.push(WatchWaiter {
             id,
             version,
             handle,
         });
-        id
     }
 
     fn remove_waiter(&mut self, waiter_id: usize) {
@@ -269,14 +273,14 @@ impl<T: Send + 'static> Sender<T> {
     /// runite::run();
     /// ```
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let waiters = {
-            let mut book = self.shared.lock_book();
+        {
+            let book = self.shared.lock_book();
             if book.receiver_count == 0 {
                 return Err(SendError(value));
             }
-            let version = self.shared.write_value(|slot| *slot = value);
-            book.wake_changed(version)
-        };
+        }
+        let version = self.shared.write_value(|slot| *slot = value);
+        let waiters = self.shared.lock_book().wake_changed(version);
         self.complete_changed(waiters);
         Ok(())
     }
@@ -296,11 +300,8 @@ impl<T: Send + 'static> Sender<T> {
     /// assert_eq!(*receiver.borrow(), 2);
     /// ```
     pub fn send_modify(&self, f: impl FnOnce(&mut T)) {
-        let waiters = {
-            let mut book = self.shared.lock_book();
-            let version = self.shared.write_value(f);
-            book.wake_changed(version)
-        };
+        let version = self.shared.write_value(f);
+        let waiters = self.shared.lock_book().wake_changed(version);
         self.complete_changed(waiters);
     }
 
@@ -322,24 +323,18 @@ impl<T: Send + 'static> Sender<T> {
     /// assert_eq!(*receiver.borrow(), 3);
     /// ```
     pub fn send_if_modified(&self, f: impl FnOnce(&mut T) -> bool) -> bool {
-        let waiters = {
-            let mut book = self.shared.lock_book();
-            // Run `f` under the value write lock; only bump the version and
-            // collect waiters if it reports a modification, otherwise bail
-            // (dropping both guards) without advancing the version.
-            let version = {
-                let mut slot = self
-                    .shared
-                    .value
-                    .write()
-                    .expect("watch state should not be poisoned");
-                if !f(&mut slot) {
-                    return false;
-                }
-                self.shared.version.fetch_add(1, Ordering::Release) + 1
-            };
-            book.wake_changed(version)
+        let version = {
+            let mut slot = self
+                .shared
+                .value
+                .write()
+                .expect("watch state should not be poisoned");
+            if !f(&mut slot) {
+                return false;
+            }
+            self.shared.version.fetch_add(1, Ordering::Release) + 1
         };
+        let waiters = self.shared.lock_book().wake_changed(version);
         self.complete_changed(waiters);
         true
     }
@@ -520,18 +515,18 @@ impl<T: Send + 'static> Receiver<T> {
             let (future, handle) = runtime_waiter::<Result<u64, RecvError>>();
             let immediate = {
                 let mut book = self.shared.lock_book();
-                // Read the version under the book lock: `send` bumps the version
-                // (under the value lock) and then wakes waiters under this same
-                // book lock, so checking the version and enqueueing here cannot
-                // race with a send in a way that loses the wakeup.
+                // Read and publish under the book lock. A sender bumps the
+                // version before taking this lock to collect waiters, so this
+                // either observes the bump or publishes in time to be collected.
                 let current = self.shared.version.load(Ordering::Acquire);
                 if current > self.version {
                     Some(Ok(current))
                 } else if book.sender_count == 0 {
                     Some(Err(RecvError))
                 } else {
-                    let waiter_id = book.enqueue_waiter(self.version, handle.clone());
+                    let waiter_id = book.allocate_waiter_id();
                     set_cancel_waiter(&handle, &self.shared.book, waiter_id);
+                    book.publish_waiter(waiter_id, self.version, handle.clone());
                     None
                 }
             };
@@ -612,7 +607,9 @@ impl std::error::Error for RecvError {}
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use crate::platform::runtime_shared::test_support::{ExecutionGate, TrackedThread};
     use crate::{queue_macrotask, run, spawn};
 
     use super::{RecvError, channel};
@@ -633,6 +630,33 @@ mod tests {
         let b = sender.borrow();
         let c = receiver.borrow();
         assert_eq!((*a, *b, *c), (7, 7, 7));
+    }
+
+    #[test]
+    fn cross_thread_mutation_avoids_book_value_lock_inversion() {
+        let (sender, receiver) = channel(0usize);
+        let shared = Arc::clone(&receiver.shared);
+        let gate = ExecutionGate::default();
+        let mutation_gate = gate.clone();
+        let sender_thread = TrackedThread::new(std::thread::spawn(move || {
+            sender.send_modify(|value| {
+                *value = 1;
+                mutation_gate.arrive_and_wait();
+            });
+        }));
+
+        let release = gate.release_on_drop();
+        assert!(
+            gate.wait_until_arrived(Duration::from_secs(5)),
+            "mutation should reach its execution gate"
+        );
+        assert!(
+            shared.book.try_lock().is_ok(),
+            "watch mutation must release bookkeeping before locking the value"
+        );
+        release.release();
+        sender_thread.join().unwrap();
+        assert_eq!(*receiver.borrow(), 1);
     }
 
     #[test]

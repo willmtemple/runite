@@ -42,6 +42,8 @@ pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
         sender_alive: true,
         receiver_closed: false,
         waiter: None,
+        #[cfg(test)]
+        send_transition_gate: None,
     }));
     (
         Sender {
@@ -72,16 +74,18 @@ pub struct Receiver<T: Send + 'static> {
     consumed: bool,
     /// Persistent wait slot shared across `recv` calls. Keeping the completion
     /// on the receiver (rather than in each `recv` future) makes `recv`
-    /// cancel-safe: a value delivered to a `recv` future that is dropped before
-    /// being polled ready is retained here and returned by the next `recv`.
-    wait: Option<CompletionFuture<Result<T, RecvError>>>,
+    /// cancel-safe. The completion is only a readiness signal; the value stays
+    /// in `State` until a receive operation consumes it.
+    wait: Option<CompletionFuture<()>>,
 }
 
 struct State<T: Send + 'static> {
     value: Option<T>,
     sender_alive: bool,
     receiver_closed: bool,
-    waiter: Option<CompletionHandle<Result<T, RecvError>>>,
+    waiter: Option<CompletionHandle<()>>,
+    #[cfg(test)]
+    send_transition_gate: Option<crate::platform::runtime_shared::test_support::ExecutionGate>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -152,6 +156,8 @@ impl<T: Send + 'static> Sender<T> {
             return Err(SendError(value));
         };
 
+        #[cfg(test)]
+        let transition_gate;
         let waiter = {
             let mut state = shared.lock().expect("oneshot state should not be poisoned");
             state.sender_alive = false;
@@ -159,16 +165,21 @@ impl<T: Send + 'static> Sender<T> {
                 return Err(SendError(value));
             }
 
+            state.value = Some(value);
+            #[cfg(test)]
+            {
+                transition_gate = state.send_transition_gate.take();
+            }
             state.waiter.take()
         };
 
+        #[cfg(test)]
+        if let Some(gate) = transition_gate {
+            gate.arrive_and_wait();
+        }
+
         if let Some(waiter) = waiter {
-            waiter.complete(Ok(value));
-        } else {
-            shared
-                .lock()
-                .expect("oneshot state should not be poisoned")
-                .value = Some(value);
+            waiter.complete(());
         }
 
         Ok(())
@@ -199,10 +210,9 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// # Cancel safety
     ///
-    /// This method is cancel-safe. The receive completion lives on the receiver,
-    /// so a value the sender delivered to a `recv` future that is dropped before
-    /// being polled ready is retained and returned by the next `recv` rather than
-    /// lost.
+    /// This method is cancel-safe. The receive completion lives on the receiver
+    /// and only signals readiness; the value remains in the channel state until
+    /// `recv` or [`try_recv`](Self::try_recv) consumes it.
     ///
     /// # Examples
     ///
@@ -222,9 +232,8 @@ impl<T: Send + 'static> Receiver<T> {
     /// Async channel waiting registers with the current runtime thread so it can
     /// be woken by a local microtask or the platform-specific remote wake path.
     pub async fn recv(&mut self) -> Result<T, RecvError> {
-        // Route through the receiver's persistent wait slot so a delivered value
-        // survives a cancelled `recv` future. `consumed` and `wait` are disjoint
-        // fields, borrowed independently of the cloned `shared` handle.
+        // Route through the receiver's persistent readiness slot so abandoning
+        // this method cannot discard a value stored in the channel state.
         let shared = Arc::clone(&self.shared);
         let consumed = &mut self.consumed;
         let wait = &mut self.wait;
@@ -248,21 +257,22 @@ impl<T: Send + 'static> Receiver<T> {
             return Err(TryRecvError::Closed);
         }
 
-        let mut state = self
-            .shared
-            .lock()
-            .expect("oneshot state should not be poisoned");
-        if let Some(value) = state.value.take() {
-            self.consumed = true;
-            return Ok(value);
-        }
-
-        if state.receiver_closed || !state.sender_alive {
-            self.consumed = true;
-            Err(TryRecvError::Closed)
-        } else {
-            Err(TryRecvError::Empty)
-        }
+        let result = {
+            let mut state = self
+                .shared
+                .lock()
+                .expect("oneshot state should not be poisoned");
+            if let Some(value) = state.value.take() {
+                Ok(value)
+            } else if state.receiver_closed || !state.sender_alive {
+                Err(TryRecvError::Closed)
+            } else {
+                return Err(TryRecvError::Empty);
+            }
+        };
+        self.wait.take();
+        self.consumed = true;
+        result
     }
 
     /// Closes the receiver.
@@ -280,11 +290,17 @@ impl<T: Send + 'static> Receiver<T> {
     /// assert_eq!(sender.send(9), Err(SendError(9)));
     /// ```
     pub fn close(&mut self) {
-        let mut state = self
-            .shared
-            .lock()
-            .expect("oneshot state should not be poisoned");
-        state.receiver_closed = true;
+        let waiter = {
+            let mut state = self
+                .shared
+                .lock()
+                .expect("oneshot state should not be poisoned");
+            state.receiver_closed = true;
+            state.waiter.take()
+        };
+        if let Some(waiter) = waiter {
+            waiter.complete(());
+        }
     }
 
     /// Returns `true` if the channel is closed to future sends.
@@ -309,7 +325,7 @@ impl<T: Send + 'static> Receiver<T> {
         shared: &Arc<Mutex<State<T>>>,
         consumed: &mut bool,
         cx: &mut Context<'_>,
-        wait: &mut Option<CompletionFuture<Result<T, RecvError>>>,
+        wait: &mut Option<CompletionFuture<()>>,
     ) -> Poll<Result<T, RecvError>> {
         if *consumed {
             return Poll::Ready(Err(RecvError));
@@ -317,49 +333,57 @@ impl<T: Send + 'static> Receiver<T> {
 
         if let Some(future) = wait.as_mut() {
             match Pin::new(future).poll(cx) {
-                Poll::Ready(result) => {
+                Poll::Ready(()) => {
                     wait.take();
-                    *consumed = true;
-                    Poll::Ready(result)
                 }
-                Poll::Pending => Poll::Pending,
+                Poll::Pending => return Poll::Pending,
             }
-        } else {
-            let (future, handle) = runtime_waiter::<Result<T, RecvError>>();
-            let cancel_shared = Arc::clone(shared);
-            let cancel_handle = handle.clone();
-            handle.set_cancel(move || {
-                let mut state = cancel_shared
-                    .lock()
-                    .expect("oneshot state should not be poisoned");
-                let _ = state.waiter.take();
-                drop(state);
-                cancel_handle.finish(None);
-            });
-
-            let mut immediate = None;
-            {
-                let mut state = shared.lock().expect("oneshot state should not be poisoned");
-                if let Some(value) = state.value.take() {
-                    immediate = Some(Ok(value));
-                } else if state.receiver_closed || !state.sender_alive {
-                    immediate = Some(Err(RecvError));
-                } else {
-                    assert!(
-                        state.waiter.is_none(),
-                        "only one oneshot receive operation may wait at a time"
-                    );
-                    state.waiter = Some(handle.clone());
-                }
-            }
-
-            if let Some(result) = immediate {
-                handle.complete(result);
-            }
-
-            *wait = Some(future);
-            Self::poll_recv(shared, consumed, cx, wait)
         }
+
+        {
+            let mut state = shared.lock().expect("oneshot state should not be poisoned");
+            if let Some(value) = state.value.take() {
+                *consumed = true;
+                return Poll::Ready(Ok(value));
+            }
+            if state.receiver_closed || !state.sender_alive {
+                *consumed = true;
+                return Poll::Ready(Err(RecvError));
+            }
+        }
+
+        let (future, handle) = runtime_waiter::<()>();
+        let cancel_shared = Arc::clone(shared);
+        let cancel_handle = handle.clone();
+        handle.set_cancel(move || {
+            let mut state = cancel_shared
+                .lock()
+                .expect("oneshot state should not be poisoned");
+            let _ = state.waiter.take();
+            drop(state);
+            cancel_handle.finish(None);
+        });
+
+        let immediate = {
+            let mut state = shared.lock().expect("oneshot state should not be poisoned");
+            if state.value.is_some() || state.receiver_closed || !state.sender_alive {
+                true
+            } else {
+                assert!(
+                    state.waiter.is_none(),
+                    "only one oneshot receive operation may wait at a time"
+                );
+                state.waiter = Some(handle.clone());
+                false
+            }
+        };
+
+        if immediate {
+            handle.complete(());
+        }
+
+        *wait = Some(future);
+        Self::poll_recv(shared, consumed, cx, wait)
     }
 }
 
@@ -384,7 +408,7 @@ impl<T: Send + 'static> Drop for Sender<T> {
         };
 
         if let Some(waiter) = waiter {
-            waiter.complete(Err(RecvError));
+            waiter.complete(());
         }
     }
 }
@@ -403,7 +427,9 @@ impl<T: Send + 'static> Drop for Receiver<T> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use crate::platform::runtime_shared::test_support::{ExecutionGate, TrackedThread};
     use crate::{queue_macrotask, run, spawn, spawn_worker};
 
     use super::{TryRecvError, channel};
@@ -436,8 +462,8 @@ mod tests {
         assert_eq!(*result.lock().unwrap(), Some(42));
     }
 
-    /// A value delivered to a `recv` future that is dropped before being polled
-    /// ready must be retained on the receiver and returned by the next `recv`.
+    /// A value sent after a `recv` future is abandoned remains in the channel
+    /// state and is returned by the next `recv`.
     #[test]
     fn recv_is_cancel_safe() {
         use std::future::Future;
@@ -466,6 +492,105 @@ mod tests {
         run();
 
         assert_eq!(*observed.lock().unwrap(), Some(Ok(1)));
+    }
+
+    #[test]
+    fn send_publishes_value_and_closed_state_atomically() {
+        let (sender, mut receiver) = channel();
+        let gate = ExecutionGate::default();
+        receiver.shared.lock().unwrap().send_transition_gate = Some(gate.clone());
+
+        let sender_thread = TrackedThread::new(std::thread::spawn(move || sender.send(17)));
+        let release = gate.release_on_drop();
+        assert!(
+            gate.wait_until_arrived(Duration::from_secs(5)),
+            "sender should reach its publication gate"
+        );
+
+        assert_eq!(receiver.try_recv(), Ok(17));
+
+        release.release();
+        assert_eq!(sender_thread.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn abandoned_recv_observes_channel_visible_send_and_close() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        type Observation = (
+            bool,
+            Result<(), super::SendError<i32>>,
+            Result<i32, TryRecvError>,
+            bool,
+            Result<(), super::SendError<i32>>,
+            Poll<Result<i32, super::RecvError>>,
+            bool,
+            Result<(), super::SendError<i32>>,
+            Poll<Result<i32, super::RecvError>>,
+        );
+
+        let observed = Arc::new(Mutex::new(None::<Observation>));
+        let observed_for_task = Arc::clone(&observed);
+        queue_macrotask(move || {
+            let mut cx = Context::from_waker(Waker::noop());
+
+            let (sender, mut receiver) = channel();
+            let first_pending = {
+                let mut recv = std::pin::pin!(receiver.recv());
+                recv.as_mut().poll(&mut cx).is_pending()
+            };
+            let first_send = sender.send(1);
+            let first_received = receiver.try_recv();
+
+            let (sender, mut receiver) = channel();
+            let close_pending = {
+                let mut recv = std::pin::pin!(receiver.recv());
+                recv.as_mut().poll(&mut cx).is_pending()
+            };
+            receiver.close();
+            let close_send = sender.send(2);
+            let mut recv = std::pin::pin!(receiver.recv());
+            let close_received = recv.as_mut().poll(&mut cx);
+
+            let (sender, mut receiver) = channel();
+            let sent_close_pending = {
+                let mut recv = std::pin::pin!(receiver.recv());
+                recv.as_mut().poll(&mut cx).is_pending()
+            };
+            let sent_close_send = sender.send(3);
+            receiver.close();
+            let mut recv = std::pin::pin!(receiver.recv());
+            let sent_close_received = recv.as_mut().poll(&mut cx);
+
+            *observed_for_task.lock().unwrap() = Some((
+                first_pending,
+                first_send,
+                first_received,
+                close_pending,
+                close_send,
+                close_received,
+                sent_close_pending,
+                sent_close_send,
+                sent_close_received,
+            ));
+        });
+
+        run();
+        assert_eq!(
+            observed.lock().unwrap().take(),
+            Some((
+                true,
+                Ok(()),
+                Ok(1),
+                true,
+                Err(super::SendError(2)),
+                Poll::Ready(Err(super::RecvError)),
+                true,
+                Ok(()),
+                Poll::Ready(Ok(3)),
+            ))
+        );
     }
 
     #[test]

@@ -360,3 +360,26 @@ fn mpsc_fifo_across_senders_and_cross_thread_producer() {
 
     assert_eq!(cross_thread, Some("worker"));
 }
+
+#[test]
+fn mpsc_abandoned_recv_stays_fifo_with_try_recv() {
+    let observed = block_on(|| async {
+        let (sender, mut receiver) = mpsc::channel(2);
+        {
+            let mut recv = pin!(receiver.recv());
+            poll_fn(|cx| {
+                assert!(recv.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        }
+
+        sender.try_send(1).unwrap();
+        sender.try_send(2).unwrap();
+        let first = receiver.try_recv();
+        let second = receiver.recv().await;
+        (first, second)
+    });
+
+    assert_eq!(observed, (Ok(1), Some(2)));
+}
