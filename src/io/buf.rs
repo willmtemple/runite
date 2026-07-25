@@ -60,9 +60,9 @@
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::{Context, Poll, ready};
-use std::io;
+use std::io::{self, IoSlice, SeekFrom};
 
-use super::{AsyncRead, AsyncWrite};
+use super::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 
 const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
@@ -77,6 +77,11 @@ const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 /// The adapter delegates all real I/O to the wrapped [`AsyncRead`] value. When
 /// the destination buffer is at least as large as the internal buffer and no
 /// bytes are currently buffered, reads bypass the internal buffer.
+///
+/// `BufReader` implements [`AsyncBufRead`]. When the wrapped reader also
+/// implements [`AsyncSeek`], seeks relative to the current position account for
+/// unread buffered bytes before delegating and invalidate the buffer only after
+/// a successful seek.
 ///
 /// # Examples
 ///
@@ -117,6 +122,8 @@ pub struct BufReader<R> {
     buf: Vec<u8>,
     pos: usize,
     filled: usize,
+    line_buf: Vec<u8>,
+    line_pos: usize,
 }
 
 impl<R: AsyncRead> BufReader<R> {
@@ -129,14 +136,17 @@ impl<R: AsyncRead> BufReader<R> {
 
     /// Creates a buffered reader with the specified capacity.
     ///
-    /// A capacity of zero disables internal buffering and delegates reads
-    /// directly to the wrapped reader.
+    /// A capacity of zero is normalized to one byte so buffered operations such
+    /// as [`AsyncBufRead::poll_fill_buf`] and [`read_line`](Self::read_line)
+    /// cannot mistake an empty destination for EOF.
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
         Self {
             inner,
-            buf: vec![0; capacity],
+            buf: vec![0; capacity.max(1)],
             pos: 0,
             filled: 0,
+            line_buf: Vec::new(),
+            line_pos: 0,
         }
     }
 
@@ -165,7 +175,44 @@ impl<R: AsyncRead> BufReader<R> {
     /// The slice contains bytes that can be read without polling the inner
     /// reader again.
     pub fn buffer(&self) -> &[u8] {
-        &self.buf[self.pos..self.filled]
+        if self.line_pos < self.line_buf.len() {
+            &self.line_buf[self.line_pos..]
+        } else {
+            &self.buf[self.pos..self.filled]
+        }
+    }
+
+    fn consume_buffer(&mut self, amount: usize) {
+        if self.line_pos < self.line_buf.len() {
+            self.line_pos = self
+                .line_buf
+                .len()
+                .min(self.line_pos.saturating_add(amount));
+            if self.line_pos == self.line_buf.len() {
+                self.line_buf.clear();
+                self.line_pos = 0;
+            }
+        } else {
+            self.pos = self.filled.min(self.pos.saturating_add(amount));
+        }
+    }
+
+    fn compact_line_buffer(&mut self) {
+        if self.line_pos > 0 {
+            self.line_buf.drain(..self.line_pos);
+            self.line_pos = 0;
+        }
+    }
+
+    fn unread_buffered(&self) -> usize {
+        (self.line_buf.len() - self.line_pos).saturating_add(self.filled - self.pos)
+    }
+
+    fn clear_buffers(&mut self) {
+        self.pos = 0;
+        self.filled = 0;
+        self.line_buf.clear();
+        self.line_pos = 0;
     }
 }
 
@@ -176,6 +223,9 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
     /// runite's current trait shape. Call [`consume`](Self::consume) after using
     /// bytes from the returned slice.
     pub async fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.line_pos < self.line_buf.len() {
+            return Ok(self.buffer());
+        }
         if self.pos == self.filled {
             // Assign `pos`/`filled` only after the read resolves. Mutating them
             // before the await would leave `pos = 0, filled = <stale>` if the
@@ -194,7 +244,7 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
     /// Passing a value larger than the number of currently buffered bytes
     /// consumes the whole buffer.
     pub fn consume(&mut self, amount: usize) {
-        self.pos = self.filled.min(self.pos.saturating_add(amount));
+        self.consume_buffer(amount);
     }
 
     /// Reads a single UTF-8 line into `buf`.
@@ -202,13 +252,22 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
     /// The trailing newline is included when present. Returns the number of
     /// bytes appended to `buf`, or `0` on EOF with no buffered bytes remaining.
     /// Invalid UTF-8 is returned as [`io::ErrorKind::InvalidData`].
-    /// This method uses [`fill_buf`](Self::fill_buf) and
-    /// [`consume`](Self::consume), so line-oriented reads benefit from this
-    /// adapter's larger underlying reads.
+    ///
+    /// If this future is cancelled while waiting for more input, bytes already
+    /// consumed for the partial line remain in this reader. They are visible
+    /// through [`buffer`](Self::buffer), ordinary reads, or the next
+    /// `read_line` call.
     pub async fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
-        let mut bytes = Vec::new();
+        self.compact_line_buffer();
         loop {
-            let available = self.fill_buf().await?;
+            if self.pos == self.filled {
+                let filled =
+                    poll_fn(|cx| Pin::new(&mut self.inner).poll_read(cx, &mut self.buf)).await?;
+                self.pos = 0;
+                self.filled = filled;
+            }
+
+            let available = &self.buf[self.pos..self.filled];
             if available.is_empty() {
                 break;
             }
@@ -218,13 +277,15 @@ impl<R: AsyncRead + Unpin> BufReader<R> {
                 None => available.len(),
             };
             let found_newline = available[..take].last() == Some(&b'\n');
-            bytes.extend_from_slice(&available[..take]);
-            self.consume(take);
+            self.line_buf.extend_from_slice(&available[..take]);
+            self.pos += take;
             if found_newline {
                 break;
             }
         }
 
+        let bytes = core::mem::take(&mut self.line_buf);
+        self.line_pos = 0;
         let read = bytes.len();
         let line = String::from_utf8(bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -244,6 +305,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
         }
 
         let this = self.get_mut();
+        if this.line_pos < this.line_buf.len() {
+            let read = buf.len().min(this.line_buf.len() - this.line_pos);
+            buf[..read].copy_from_slice(&this.line_buf[this.line_pos..this.line_pos + read]);
+            this.consume_buffer(read);
+            return Poll::Ready(Ok(read));
+        }
+
         if this.pos < this.filled {
             let read = buf.len().min(this.filled - this.pos);
             buf[..read].copy_from_slice(&this.buf[this.pos..this.pos + read]);
@@ -269,6 +337,71 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
     }
 }
 
+impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        if this.line_pos < this.line_buf.len() {
+            return Poll::Ready(Ok(&this.line_buf[this.line_pos..]));
+        }
+
+        if this.pos == this.filled {
+            let filled = match Pin::new(&mut this.inner).poll_read(cx, &mut this.buf) {
+                Poll::Ready(result) => result?,
+                Poll::Pending => return Poll::Pending,
+            };
+            this.pos = 0;
+            this.filled = filled;
+        }
+        Poll::Ready(Ok(&this.buf[this.pos..this.filled]))
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        self.get_mut().consume_buffer(amount);
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> AsyncSeek for BufReader<R> {
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        position: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        let this = self.get_mut();
+        let position = match position {
+            SeekFrom::Current(offset) => {
+                let unread = match i64::try_from(this.unread_buffered()) {
+                    Ok(unread) => unread,
+                    Err(_) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "buffered data exceeds seek range",
+                        )));
+                    }
+                };
+                match offset.checked_sub(unread) {
+                    Some(offset) => SeekFrom::Current(offset),
+                    None => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "buffered seek offset overflowed",
+                        )));
+                    }
+                }
+            }
+            position => position,
+        };
+
+        match Pin::new(&mut this.inner).poll_seek(cx, position) {
+            Poll::Ready(Ok(position)) => {
+                this.clear_buffers();
+                Poll::Ready(Ok(position))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for BufReader<R> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -276,6 +409,32 @@ impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for BufReader<R> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_operation(cx, buf, generation)
+    }
+
+    fn poll_write_vectored_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored_operation(cx, bufs, generation)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -347,6 +506,7 @@ pub struct BufWriter<W> {
     inner: W,
     buf: Vec<u8>,
     written: usize,
+    generation: Option<super::WriteOperation>,
 }
 
 impl<W: AsyncWrite> BufWriter<W> {
@@ -359,13 +519,15 @@ impl<W: AsyncWrite> BufWriter<W> {
 
     /// Creates a buffered writer with the specified capacity.
     ///
-    /// A capacity of zero disables internal buffering and delegates writes
-    /// directly to the wrapped writer.
+    /// A capacity of zero is normalized to one byte. Since every non-empty
+    /// write is then at least as large as the buffer, it is delegated directly
+    /// to the wrapped writer.
     pub fn with_capacity(capacity: usize, inner: W) -> Self {
         Self {
             inner,
-            buf: Vec::with_capacity(capacity),
+            buf: Vec::with_capacity(capacity.max(1)),
             written: 0,
+            generation: None,
         }
     }
 
@@ -395,8 +557,15 @@ impl<W: AsyncWrite> BufWriter<W> {
 impl<W: AsyncWrite + Unpin> BufWriter<W> {
     fn poll_flush_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.written < self.buf.len() {
-            let written =
-                ready!(Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.written..]))?;
+            let generation = self
+                .generation
+                .get_or_insert_with(super::WriteOperation::new)
+                .generation();
+            let written = ready!(Pin::new(&mut self.inner).poll_write_operation(
+                cx,
+                &self.buf[self.written..],
+                generation,
+            ))?;
             if written == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -408,6 +577,7 @@ impl<W: AsyncWrite + Unpin> BufWriter<W> {
 
         self.buf.clear();
         self.written = 0;
+        self.generation = None;
         Poll::Ready(Ok(()))
     }
 }
@@ -418,25 +588,42 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
         let this = self.get_mut();
-        if this.buf.capacity() == 0 {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
-        }
-
         if this.written > 0 || buf.len() > this.buf.capacity() - this.buf.len() {
             ready!(this.poll_flush_buf(cx))?;
         }
 
         if buf.len() >= this.buf.capacity() {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
+            return Pin::new(&mut this.inner).poll_write_operation(cx, buf, generation);
         }
 
         this.buf.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
