@@ -808,23 +808,25 @@ impl IoUring {
         let overflow = unsafe { ptr::read_volatile(self.cq_overflow) };
         if overflow > self.overflow_seen.get() {
             self.overflow_seen.set(overflow);
-            if self.nodrop {
-                tracing::warn!(
-                    target: "runite::driver",
-                    event = "cq_overflow",
-                    overflow,
-                    "io_uring completion queue overflowed; CQEs were held by the kernel \
-                     (FEAT_NODROP) and flushed, but the ring is undersized for the load",
-                );
+            // `rings->cq_overflow` is only incremented by the kernel's
+            // `io_account_cq_overflow`, which runs on the path where allocating
+            // the overflow CQE failed. Completions preserved by FEAT_NODROP go
+            // onto the backlog list and never touch this counter, so any
+            // increase here means completions were genuinely lost, whether or
+            // not the kernel advertises FEAT_NODROP.
+            let cause = if self.nodrop {
+                "the kernel could not allocate overflow entries"
             } else {
-                tracing::error!(
-                    target: "runite::driver",
-                    event = "cq_overflow_dropped",
-                    overflow,
-                    "io_uring completion queue overflowed and this kernel lacks FEAT_NODROP; \
-                     completions were dropped and their futures may hang",
-                );
-            }
+                "this kernel lacks FEAT_NODROP"
+            };
+            tracing::error!(
+                target: "runite::driver",
+                event = "cq_overflow_dropped",
+                overflow,
+                nodrop = self.nodrop,
+                "io_uring dropped {overflow} completion(s) because {cause}; the operations \
+                 they belonged to cannot complete and their futures will hang",
+            );
         }
     }
 
