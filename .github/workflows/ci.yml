@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
@@ -21,10 +24,13 @@ jobs:
   lint:
     name: Lint & docs (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
       # mise's rust backend delegates to rustup, whose toolchain lives outside the
       # cached mise dir. On a mise cache hit the component install is skipped and
       # rustup auto-installs a minimal toolchain (no rustfmt/clippy), so install the
@@ -32,7 +38,11 @@ jobs:
       - name: Ensure rust components
         run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c rustfmt -c clippy -c llvm-tools --no-self-update'
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Validate workflow YAML
+        run: mise run ci-lint
+      - name: Test CI helper scripts
+        run: mise run ci-script-test
       - name: Formatting
         run: cargo fmt --all --check
       # The main test jobs build with --all-features; this catches breakage of
@@ -51,25 +61,24 @@ jobs:
       # runner's package cache. `cop verify` does NOT auto-restore, so it must
       # run after the cache is warmed, otherwise it fails with
       # "Package not found in any feed" on a clean CI machine.
-      # cop is an experimental external analyzer whose `rust` provider can be
-      # auto-updated to a version the pinned cop binary cannot load. Keep these
-      # steps advisory (non-blocking) so upstream tooling churn never reds CI.
       - name: Cop checks
-        continue-on-error: true
-        run: cop cop-checks/main.cop -t .
+        run: mise run cop
       - name: Cop verify
-        continue-on-error: true
-        run: cop verify cop-checks/
+        run: mise run cop-verify
 
   test-linux:
     name: Test (Linux x86_64, io_uring)
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build
         run: cargo build --workspace --all-targets --all-features
       - name: Test
@@ -85,12 +94,16 @@ jobs:
     # Native arm64 runner (free for public repos) so the io_uring backend is
     # exercised on a real aarch64 kernel rather than under emulation.
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build
         run: cargo build --workspace --all-targets --all-features
       - name: Test
@@ -99,12 +112,16 @@ jobs:
   test-macos:
     name: Test (macOS aarch64, kqueue)
     runs-on: macos-14
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Ensure rust components
         run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
       - name: Build
@@ -117,17 +134,19 @@ jobs:
   test-windows:
     name: Test (Windows x86_64, IOCP)
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       # Install only the pinned Rust: the other mise tools (cop, cargo-public-api)
       # run in the Linux lint job, and skipping them keeps Windows provisioning
       # fast. rust-toolchain.toml pins the same toolchain for rustup either way.
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
+          version: 2026.6.11
           install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Ensure rust components
         run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c clippy --no-self-update'
         shell: bash
@@ -155,11 +174,117 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  miri:
+    name: Miri (mock runtime logic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install stable toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
+      - name: Miri cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: miri-nightly-2026-07-01
+          workspaces: ". -> target/miri"
+      # `cfg(miri)` removes the real Linux driver unit-test modules, and this
+      # task selects only MockRuntimeHarness-backed scheduler/primitive tests.
+      # No io_uring, kqueue, IOCP, network, filesystem, or process I/O runs.
+      - name: Run Miri logic suite
+        run: mise run miri
+
+  asan:
+    name: ASan (Linux io_uring lifecycle)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install stable toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
+      - name: ASan cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: asan-nightly-2026-07-01
+          workspaces: ". -> target/asan"
+      - name: Run cancellation and teardown suite
+        run: mise run asan
+
+  tsan:
+    name: TSan (mock concurrent logic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install stable toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
+      - name: TSan cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: tsan-nightly-2026-07-01
+          workspaces: ". -> target/tsan"
+      # TSan cannot observe or reliably intercept io_uring kernel accesses.
+      # Exercise channel/watch/waker/worker/completion races through the mock
+      # driver instead; ASan and the native Linux jobs own real-ring coverage.
+      - name: Run concurrent logic suite
+        run: mise run tsan
+
+  capability-matrix:
+    name: Linux constrained-opcode matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: capability-matrix
+      # Containers share the runner's host kernel, so they cannot reliably
+      # emulate an old io_uring implementation. Inject the constrained probe
+      # bitmap through the production dispatch seam, then execute the fallback
+      # paths on one known-compatible kernel.
+      - name: Run injected capability matrix
+        run: mise run capability-matrix
+
+  stress-issue-6:
+    name: Stress former intermittent issue #6
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUNITE_STRESS_ITERATIONS: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install toolchain via mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: issue-6-stress
+      - name: Repeat merged doctests and blocking-runtime regressions
+        run: mise run stress-issue-6
+
   msrv:
     name: MSRV (Rust 1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       # Verify the crate honors its declared `rust-version` (Cargo.toml). Pin the
       # exact MSRV floor rather than mise's tracking-stable toolchain so a newly
       # used language/library feature that raises the real MSRV fails here instead
@@ -167,11 +292,15 @@ jobs:
       - name: Install Rust 1.88.0
         run: |
           rustup toolchain install 1.88.0 --profile minimal --no-self-update
-          rustup target add x86_64-pc-windows-msvc --toolchain 1.88.0
+          rustup target add \
+            aarch64-unknown-linux-gnu x86_64-pc-windows-msvc \
+            --toolchain 1.88.0
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Check on MSRV
         run: cargo +1.88.0 check --workspace --all-features
+      - name: Check on MSRV (Linux aarch64 target)
+        run: cargo +1.88.0 check --workspace --all-features --target aarch64-unknown-linux-gnu
       # The Windows backend is cfg'd out of the host check above; a cross-target
       # `cargo check` (no linking, so no MSVC toolchain needed) keeps its MSRV
       # honest from Linux.
@@ -181,31 +310,36 @@ jobs:
   deny:
     name: Licenses & advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:
           command: check
 
   coverage:
     name: Code coverage (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       # cargo-llvm-cov needs the llvm-tools component; install it explicitly because
       # a mise cache hit skips mise's own component install (see the lint job).
       - name: Ensure rust components
         run: mise exec -- bash -c 'rustup toolchain install "$RUSTUP_TOOLCHAIN" -c llvm-tools --no-self-update'
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@9458fed45835344deb5e69e06e831be047c96abf # cargo-llvm-cov
       - name: Collect coverage
         run: cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: lcov
           path: lcov.info
@@ -213,47 +347,130 @@ jobs:
   benches:
     name: Benchmarks (compile + smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build benches
         run: cargo build --benches --all-features
       - name: Smoke-run benches
         run: cargo bench --bench runtime -- --warm-up-time 0.1 --measurement-time 0.3 --sample-size 10
+      # Keep this artifact-only: GitHub-hosted runner hardware variance makes
+      # a cross-run wall-clock threshold too noisy to be a sound merge gate.
+      - name: Capture io_uring immediate/deferred A/B
+        run: mise run bench-io-uring-ab
+      - name: Upload io_uring A/B artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: io-uring-submission-ab
+          path: |
+            target/criterion/tcp_echo
+            target/criterion/io-uring-ab-metadata.txt
+          if-no-files-found: error
 
   api-drift:
     name: Public API drift
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # cargo-public-api (pinned in mise.toml/mise.lock) shells out to a nightly
       # rustdoc to emit rustdoc JSON. The exact nightly is pinned in
-      # xtask/src/main.rs (RUSTDOC_TOOLCHAIN) because the rendered listing
-      # varies across rustdoc versions; install that same toolchain here.
-      - name: Install pinned nightly rustdoc
-        run: mise exec -- rustup toolchain install nightly-2026-07-01 --profile minimal --no-self-update
-      - name: Check docs/public-api.md is current
+      # xtask/src/api_report.rs (RUSTDOC_TOOLCHAIN) because the rendered listing
+      # varies across rustdoc versions. Install all supported targets for both
+      # that nightly and stable: cargo-public-api uses nightly, while xtask's
+      # explicit handle/platform contract probes use stable cargo check.
+      - name: Install API-report toolchains and targets
+        run: |
+          mise exec -- rustup toolchain install nightly-2026-07-01 --profile minimal --no-self-update
+          mise exec -- rustup target add \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+          mise exec -- rustup target add --toolchain nightly-2026-07-01 \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+      - name: Check all target and feature API surfaces
         run: mise run api-report-check
 
   publish-dry-run:
-    name: Publish dry-run
+    name: Package artifacts & publish dry-run
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          version: 2026.6.11
+          install_args: rust
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-      # Only the proc-macro crate can be dry-run before the first release: it has
-      # no path dependencies. The umbrella `runite` crate depends on
-      # runite-proc-macros by path+version and cannot be packaged until that crate
-      # exists on crates.io, so it is verified during the release workflow instead.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install supported targets
+        run: |
+          mise exec -- rustup target add \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-pc-windows-msvc
+      # xtask packages and unpacks both crates, locally patches the packaged
+      # runite manifest to the packaged proc macro, then validates the actual
+      # artifacts without requiring this version to exist on crates.io.
+      - name: Verify both package artifacts
+        run: mise run package-verify
+      # A registry dry-run is possible independently for the proc-macro crate.
+      # The main crate's exact dependency is intentionally unpublished while a
+      # release PR is in CI; its equivalent artifact checks run above.
       - name: Dry-run runite-proc-macros
         run: cargo publish --dry-run -p runite-proc-macros
+
+  required:
+    name: Required CI
+    if: always()
+    needs:
+      - lint
+      - test-linux
+      - test-linux-arm64
+      - test-macos
+      - test-windows
+      - miri
+      - asan
+      - tsan
+      - capability-matrix
+      - stress-issue-6
+      - msrv
+      - deny
+      - coverage
+      - benches
+      - api-drift
+      - publish-dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          jobs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: data["result"]
+              for name, data in jobs.items()
+              if data["result"] != "success"
+          }
+          if failed:
+              raise SystemExit(f"required jobs did not succeed: {failed}")
+          print(f"all {len(jobs)} required jobs succeeded")
+          PY
