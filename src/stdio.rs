@@ -14,8 +14,9 @@
 //! `Stdout` and `Stderr` perform write-through async writes via the active
 //! backend: Linux uses `io_uring`, while macOS aarch64 and Windows offload
 //! blocking writes to the blocking pool. runite does not add userspace buffering
-//! for these writers. Their `poll_flush` and `poll_close` methods are no-ops;
-//! they do not call libc `fflush`, a terminal flush, or `fsync`.
+//! for these writers. `poll_flush` and `poll_close` wait for a write the handle
+//! still owns and report its failure, but never call libc `fflush`, a terminal
+//! flush, or `fsync`, and never close the process stream.
 //!
 //! `Stdin` uses one dedicated blocking reader thread on every platform. That
 //! thread owns a duplicate of the process input handle and, only while a read
@@ -162,8 +163,9 @@ pub struct Stdin {
 /// and implements [`AsyncWrite`] for runtime-driven write-through writes. A
 /// single write may complete after writing fewer bytes than requested; use
 /// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
-/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops and
-/// do not call libc `fflush` or `fsync`.
+/// whole buffer must be written. `poll_flush` and `poll_close` wait for a write
+/// this handle still owns and surface its failure; neither calls libc `fflush`
+/// or `fsync`, and neither closes the process stream.
 ///
 /// Dropping it does not close the process-wide stdout stream.
 pub struct Stdout {
@@ -176,8 +178,9 @@ pub struct Stdout {
 /// and implements [`AsyncWrite`] for runtime-driven write-through writes. A
 /// single write may complete after writing fewer bytes than requested; use
 /// [`AsyncWriteExt::write_all`](crate::io::AsyncWriteExt::write_all) when the
-/// whole buffer must be written. `poll_flush` and `poll_close` are no-ops and
-/// do not call libc `fflush` or `fsync`.
+/// whole buffer must be written. `poll_flush` and `poll_close` wait for a write
+/// this handle still owns and surface its failure; neither calls libc `fflush`
+/// or `fsync`, and neither closes the process stream.
 ///
 /// Dropping it does not close the process-wide stderr stream.
 pub struct Stderr {
@@ -620,8 +623,10 @@ impl AsyncWrite for Stdout {
         self.get_mut().writer.write_state.poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // The process stream itself is never closed; closing still has to wait
+        // for a write this handle owns.
+        self.get_mut().writer.write_state.poll_flush(cx)
     }
 }
 
@@ -670,8 +675,10 @@ impl AsyncWrite for Stderr {
         self.get_mut().writer.write_state.poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // The process stream itself is never closed; closing still has to wait
+        // for a write this handle owns.
+        self.get_mut().writer.write_state.poll_flush(cx)
     }
 }
 

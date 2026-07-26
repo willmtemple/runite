@@ -131,13 +131,17 @@ changes.
   corresponding io_uring opcode. `MKDIRAT` (5.15), `RENAMEAT` (5.11), and
   `UNLINKAT` (5.11) are all newer than the documented 5.6 floor, so these
   operations previously failed outright on a kernel that met it.
-- `AsyncWrite::poll_flush` and `poll_close` now wait for writes the resource
-  still owns, across TCP and Unix-domain sockets, `File`, child pipes, and
-  stdout/stderr. They previously returned `Ok(())` unconditionally, reporting
-  bytes as visible while their operation was still in flight. A failure from
-  such a write is now reported by the flush rather than discarded, and draining
-  one no longer consumes it — a raw `poll_write` caller re-polling its buffer,
-  as `AsyncWrite` requires, resolves to that operation instead of submitting the
+- `AsyncWrite::poll_flush` and `poll_close` wait for writes the resource still
+  owns, across TCP and Unix-domain sockets, `File`, child pipes, and
+  stdout/stderr. `poll_flush` previously returned `Ok(())` unconditionally on
+  all six, reporting bytes as visible while their operation was still in
+  flight; `poll_close` did the same on `File` and the stdio writers, and could
+  shut a socket or pipe down out from under an in-flight write.
+  A failure from a raw `poll_write` the resource still owns is now reported by
+  the flush rather than discarded (a failed write started through
+  `AsyncWriteExt` is still reported only to that future). Draining a successful
+  raw write no longer consumes it either — a caller re-polling its buffer, as
+  `AsyncWrite` requires, resolves to that operation instead of submitting the
   same bytes a second time.
 - `read_dir` no longer ends a partly delivered scan when a refill hits a
   transient blocking-pool queue-full condition; the refill is retried from a

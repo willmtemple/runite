@@ -1420,6 +1420,13 @@ mod windows_interop {
 
     impl File {
         /// Strictly adopts an overlapped owned handle into the current IOCP.
+        ///
+        /// # Errors
+        ///
+        /// Fails for a synchronous handle, one that suppresses completion
+        /// packets on synchronous success, or one already associated with a
+        /// different completion port. **The handle is closed on failure** — it
+        /// is consumed either way and is not handed back to the caller.
         pub fn from_owned(handle: OwnedHandle) -> std::io::Result<Self> {
             crate::sys::windows::fs::adopt_handle(handle).map(Self::from_owned_file)
         }

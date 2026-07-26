@@ -75,10 +75,15 @@
 //! - [`sync`] for [`Mutex`](sync::Mutex), [`Semaphore`](sync::Semaphore),
 //!   [`RwLock`](sync::RwLock), [`Notify`](sync::Notify), and
 //!   [`OnceCell`](sync::OnceCell)
-//! - [`io`] for the crate's `AsyncRead`/`AsyncWrite`/`Stream` traits and
+//! - [`io`] for the crate's `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits and
 //!   [`BufReader`](io::BufReader)/[`BufWriter`](io::BufWriter)
 //! - [`task::JoinSet`] for structured ownership of local child tasks
 //! - [`task::spawn_blocking`] for offloading blocking work to a thread pool
+//!
+//! Upgrading from 0.1? Two changes are invisible to the compiler — [`run`] now
+//! cancels tasks still pending at quiescence, and [`select!`](macro@select)
+//! no longer polls arms in lexical order. See the 0.1 → 0.2 migration guide in
+//! the repository for the full list.
 //!
 //! # Cargo features
 //!

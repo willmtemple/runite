@@ -715,7 +715,7 @@ it, and `AsyncReadExt::lines` adapts any `AsyncRead` into a
 The extension traits in `io` provide concrete future adapters (`Read`, `ReadVectored`, `ReadExact`,
 `ReadToEnd`, `Write`, `WriteVectored`, `WriteAll`, `Seek`, `Flush`, `Close`, `Next`, `Collect`, and
 `ForEach`) and stream adapters (`Map`, `Filter`, `Take`, and `Skip`) that repeatedly drive the poll
-methods. Implementations submit operations with runtime-owned buffers, preserving the phase-7
+methods. Implementations submit operations with runtime-owned buffers, preserving the
 cancellation rule: after a borrowed-buffer operation returns `Pending`, the kernel-visible buffer
 is owned by the runtime and is kept alive by the existing completion/cancel guard path until the
 original operation CQE arrives; a cancel CQE alone never releases that storage.
