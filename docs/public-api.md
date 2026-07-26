@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 921 | 941 | 960 | 980 | 150 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 921 | 941 | 960 | 980 | 150 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 921 | 941 | 960 | 980 | 150 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 837 | 851 | 876 | 890 | 66 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 933 | 953 | 972 | 992 | 150 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 933 | 953 | 972 | 992 | 150 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 933 | 953 | 972 | 992 | 150 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 849 | 863 | 888 | 902 | 66 |
 
-Portable default items: **771**
+Portable default items: **783**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **771**
 
 ## Portable default surface
 
-Items: **771**
+Items: **783**
 
 ### `runite`
 
@@ -92,6 +92,7 @@ pub mod runite::channel
 ### `runite::channel::broadcast`
 
 ```rust
+#[non_exhaustive] pub enum runite::channel::broadcast::RecvError
 impl core::error::Error for runite::channel::broadcast::RecvError
 impl core::fmt::Display for runite::channel::broadcast::RecvError
 impl<T: core::clone::Clone + core::marker::Send + 'static> core::clone::Clone for runite::channel::broadcast::Sender<T>
@@ -102,7 +103,6 @@ impl<T: core::clone::Clone + core::marker::Send + 'static> runite::channel::broa
 impl<T: core::fmt::Debug> core::error::Error for runite::channel::broadcast::SendError<T>
 impl<T> core::fmt::Display for runite::channel::broadcast::SendError<T>
 pub async fn runite::channel::broadcast::Receiver<T>::recv(&mut self) -> core::result::Result<T, runite::channel::broadcast::RecvError>
-pub enum runite::channel::broadcast::RecvError
 pub fn runite::channel::broadcast::Receiver<T>::drop(&mut self)
 pub fn runite::channel::broadcast::Receiver<T>::is_empty(&self) -> bool
 pub fn runite::channel::broadcast::Receiver<T>::len(&self) -> usize
@@ -126,6 +126,8 @@ pub struct runite::channel::broadcast::Sender<T: core::clone::Clone + core::mark
 ### `runite::channel::mpsc`
 
 ```rust
+#[non_exhaustive] pub enum runite::channel::mpsc::TryRecvError
+#[non_exhaustive] pub enum runite::channel::mpsc::TrySendError<T>
 impl core::error::Error for runite::channel::mpsc::TryRecvError
 impl core::fmt::Display for runite::channel::mpsc::TryRecvError
 impl<T: core::fmt::Debug> core::error::Error for runite::channel::mpsc::SendError<T>
@@ -142,8 +144,6 @@ impl<T> core::fmt::Display for runite::channel::mpsc::SendError<T>
 impl<T> core::fmt::Display for runite::channel::mpsc::TrySendError<T>
 pub async fn runite::channel::mpsc::Receiver<T>::recv(&mut self) -> core::option::Option<T>
 pub async fn runite::channel::mpsc::Sender<T>::send(&self, T) -> core::result::Result<(), runite::channel::mpsc::SendError<T>>
-pub enum runite::channel::mpsc::TryRecvError
-pub enum runite::channel::mpsc::TrySendError<T>
 pub fn runite::channel::mpsc::Receiver<T>::close(&mut self)
 pub fn runite::channel::mpsc::Receiver<T>::drop(&mut self)
 pub fn runite::channel::mpsc::Receiver<T>::is_closed(&self) -> bool
@@ -178,6 +178,7 @@ pub type runite::channel::mpsc::Receiver<T>::Item = T
 ### `runite::channel::oneshot`
 
 ```rust
+#[non_exhaustive] pub enum runite::channel::oneshot::TryRecvError
 impl core::error::Error for runite::channel::oneshot::RecvError
 impl core::error::Error for runite::channel::oneshot::TryRecvError
 impl core::fmt::Display for runite::channel::oneshot::RecvError
@@ -189,7 +190,6 @@ impl<T: core::marker::Send + 'static> runite::channel::oneshot::Receiver<T>
 impl<T: core::marker::Send + 'static> runite::channel::oneshot::Sender<T>
 impl<T> core::fmt::Display for runite::channel::oneshot::SendError<T>
 pub async fn runite::channel::oneshot::Receiver<T>::recv(&mut self) -> core::result::Result<T, runite::channel::oneshot::RecvError>
-pub enum runite::channel::oneshot::TryRecvError
 pub fn runite::channel::oneshot::Receiver<T>::close(&mut self)
 pub fn runite::channel::oneshot::Receiver<T>::drop(&mut self)
 pub fn runite::channel::oneshot::Receiver<T>::is_closed(&self) -> bool
@@ -763,13 +763,17 @@ impl core::default::Default for runite::sync::Notify
 impl core::ops::drop::Drop for runite::sync::Permit<'_>
 impl runite::sync::Notify
 impl runite::sync::Semaphore
+impl<'a, T: ?core::marker::Sized> core::future::future::Future for runite::sync::RwLockReadFuture<'a, T>
+impl<'a, T: ?core::marker::Sized> core::future::future::Future for runite::sync::RwLockWriteFuture<'a, T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::MutexGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::RwLockReadGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::RwLockWriteGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::DerefMut for runite::sync::MutexGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::DerefMut for runite::sync::RwLockWriteGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::MutexGuard<'_, T>
+impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::RwLockReadFuture<'_, T>
 impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::RwLockReadGuard<'_, T>
+impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::RwLockWriteFuture<'_, T>
 impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::RwLockWriteGuard<'_, T>
 impl<T: ?core::marker::Sized> runite::sync::Mutex<T>
 impl<T: ?core::marker::Sized> runite::sync::RwLock<T>
@@ -797,12 +801,16 @@ pub fn runite::sync::Permit<'_>::drop(&mut self)
 pub fn runite::sync::RwLock<T>::get_mut(&mut self) -> &mut T
 pub fn runite::sync::RwLock<T>::into_inner(self) -> T
 pub fn runite::sync::RwLock<T>::new(T) -> Self
-pub fn runite::sync::RwLock<T>::read(&self) -> runite::sync::rw_lock::RwLockReadFuture<'_, T>
+pub fn runite::sync::RwLock<T>::read(&self) -> runite::sync::RwLockReadFuture<'_, T>
 pub fn runite::sync::RwLock<T>::try_read(&self) -> core::option::Option<runite::sync::RwLockReadGuard<'_, T>>
 pub fn runite::sync::RwLock<T>::try_write(&self) -> core::option::Option<runite::sync::RwLockWriteGuard<'_, T>>
-pub fn runite::sync::RwLock<T>::write(&self) -> runite::sync::rw_lock::RwLockWriteFuture<'_, T>
+pub fn runite::sync::RwLock<T>::write(&self) -> runite::sync::RwLockWriteFuture<'_, T>
+pub fn runite::sync::RwLockReadFuture<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockReadFuture<'a, T>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::sync::RwLockReadGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::RwLockReadGuard<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockWriteFuture<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockWriteFuture<'a, T>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::sync::RwLockWriteGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::deref_mut(&mut self) -> &mut Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::drop(&mut self)
@@ -815,11 +823,15 @@ pub struct runite::sync::Notify
 pub struct runite::sync::OnceCell<T>
 pub struct runite::sync::Permit<'a>
 pub struct runite::sync::RwLock<T: ?core::marker::Sized>
+pub struct runite::sync::RwLockReadFuture<'a, T: ?core::marker::Sized>
 pub struct runite::sync::RwLockReadGuard<'a, T: ?core::marker::Sized>
+pub struct runite::sync::RwLockWriteFuture<'a, T: ?core::marker::Sized>
 pub struct runite::sync::RwLockWriteGuard<'a, T: ?core::marker::Sized>
 pub struct runite::sync::Semaphore
 pub type runite::sync::MutexGuard<'_, T>::Target = T
+pub type runite::sync::RwLockReadFuture<'a, T>::Output = runite::sync::RwLockReadGuard<'a, T>
 pub type runite::sync::RwLockReadGuard<'_, T>::Target = T
+pub type runite::sync::RwLockWriteFuture<'a, T>::Output = runite::sync::RwLockWriteGuard<'a, T>
 pub type runite::sync::RwLockWriteGuard<'_, T>::Target = T
 ```
 

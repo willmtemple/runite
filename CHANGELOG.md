@@ -34,6 +34,11 @@ changes.
   timer, or I/O operation — is therefore cancelled instead of resumed. The
   `Cancelled` variant itself is unchanged from 0.1, so no `match` needs
   updating; what changed is when it is produced.
+- The channel error enums `mpsc::TrySendError`, `mpsc::TryRecvError`,
+  `oneshot::TryRecvError`, and `broadcast::RecvError` are now
+  `#[non_exhaustive]`, matching every other public enum in the crate. Matches on
+  them need a `_` arm. Done now because 0.2 is already a breaking release —
+  deferring it would only move the same break to 0.3.
 - `select!` rotates its starting arm rather than always polling in lexical
   order. **This change is invisible to the compiler**: existing code keeps
   building and silently changes behavior. Add `biased;` to any `select!` that
@@ -52,6 +57,9 @@ changes.
 - `select!` branch guards (`pattern = future, if condition => ...`), `else`,
   output-pattern matching, async/control-flow handlers, and unbounded arm
   counts. Losing futures are dropped before the handler runs.
+- `sync::RwLockReadFuture` and `sync::RwLockWriteFuture` are exported. They were
+  already returned by `RwLock::read`/`write` but not nameable, so callers could
+  not store or bound on them.
 - `WorkerHandle::join`, `WorkerJoin`, and `WorkerJoinError`. Completion is
   published only after a non-runtime reaper joins the worker OS thread, and
   repeated joins observe the stored result.

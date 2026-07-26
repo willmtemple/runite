@@ -153,6 +153,7 @@ pub struct SendError<T>(pub T);
 
 #[derive(Debug, Eq, PartialEq)]
 /// Error returned by [`Sender::try_send`] when a message cannot be queued immediately.
+#[non_exhaustive]
 pub enum TrySendError<T> {
     /// The bounded queue is currently full.
     Full(T),
@@ -162,6 +163,7 @@ pub enum TrySendError<T> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned by [`Receiver::try_recv`] when no message is available immediately.
+#[non_exhaustive]
 pub enum TryRecvError {
     /// The channel is still open, but currently empty.
     Empty,

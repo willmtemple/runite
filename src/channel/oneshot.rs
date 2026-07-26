@@ -98,6 +98,7 @@ pub struct RecvError;
 
 #[derive(Debug, Eq, PartialEq)]
 /// Non-blocking receive errors for [`Receiver::try_recv`].
+#[non_exhaustive]
 pub enum TryRecvError {
     /// No value has been sent yet, and the sender is still alive.
     Empty,
