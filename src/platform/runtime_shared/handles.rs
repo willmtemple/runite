@@ -370,10 +370,24 @@ impl ThreadHandle {
         self.shared.pending_ops.fetch_add(1, Ordering::AcqRel);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn finish_async_operation(&self) {
         let previous = self.shared.pending_ops.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "async operation count underflow");
+        // The notification exists to make a *parked* thread re-evaluate
+        // quiescence. A thread running this code is not parked -- it is
+        // dispatching the completion -- and will re-evaluate on its own next
+        // turn, so notifying itself only costs a wake round trip. On Linux that
+        // is an `IORING_OP_MSG_RING` to its own ring plus the `io_uring_enter`
+        // to submit it, per completion, which is what collapses submission
+        // batches back to size one.
+        //
+        // Skipping it cannot strand the durable-retry protocol: that tracks
+        // delivered-vs-requested generations, and this path mints no
+        // generation. The waker itself has already taken its own same-thread
+        // fast path in `CompletionState::queue_wake`.
+        if self.is_current() {
+            return;
+        }
         self.shared.notify();
     }
 }

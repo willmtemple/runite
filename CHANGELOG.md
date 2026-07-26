@@ -118,6 +118,12 @@ changes.
   of `Notify`, `Mutex`, and `Semaphore` critical sections.
 - Unified pending read/write/shutdown ownership so cloned file cursor
   reconciliation cannot lose or resubmit an accepted operation.
+- A completion resolved on its own runtime thread no longer notifies that
+  thread. The notification exists to wake a *parked* thread, so notifying the
+  thread already dispatching the completion cost a wake round trip per
+  completion — on Linux an `IORING_OP_MSG_RING` to the ring's own descriptor
+  plus the `io_uring_enter` to submit it, which collapsed deferred-submission
+  batches back to one operation each.
 - Hardened io_uring batching, short-submit rollback, linked-SQE ownership,
   CQ-overflow handling, old-kernel opcode dispatch, cancellation storage, and
   panic-safe teardown. If kernel quiescence cannot be proven, storage is

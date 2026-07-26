@@ -1328,6 +1328,80 @@ fn persistent_notification_retry_stops_at_final_thread_closure() {
     assert!(!internal_wake_ran.load(Ordering::Acquire));
 }
 
+/// A completion resolved on its owning thread must not notify that thread.
+///
+/// The notification exists to make a *parked* thread re-evaluate quiescence, so
+/// notifying the thread that is already dispatching the completion buys nothing
+/// and costs a wake round trip — on Linux an `IORING_OP_MSG_RING` to the ring's
+/// own fd plus the `io_uring_enter` to submit it, per completion, which is what
+/// collapses deferred-submission batches back to one operation each.
+///
+/// Counting notifier calls rather than timing anything keeps this a statement
+/// about syscalls, which is the thing that regressed.
+#[test]
+fn same_thread_completions_do_not_notify_their_own_runtime() {
+    let harness = MockRuntimeHarness::new();
+    let _control = harness.plan_driver();
+    let trace = harness.trace();
+
+    harness.enter(|| {
+        let _ = current_thread_handle::<MockRuntime>();
+        for value in 0..8usize {
+            let (future, source) = completion_for_current_thread::<usize>();
+            // Resolve on this very thread, then drive the loop so the waker and
+            // the liveness release both run here.
+            source.complete(value);
+            assert_eq!(block_on::<MockRuntime, _>(future), value);
+        }
+    });
+
+    let notifies = trace
+        .snapshot()
+        .iter()
+        .filter(|event| matches!(event, MockRuntimeEvent::NotifyAttempted(_)))
+        .count();
+    assert_eq!(
+        notifies, 0,
+        "same-thread completions should not wake their own runtime"
+    );
+}
+
+/// The converse: a completion resolved from another thread still notifies, or
+/// a parked runtime would never learn about it.
+#[test]
+fn cross_thread_completions_still_notify() {
+    let harness = MockRuntimeHarness::new();
+    let control = harness.plan_driver();
+    let trace = harness.trace();
+
+    thread::scope(|scope| {
+        harness.enter(|| {
+            let _ = current_thread_handle::<MockRuntime>();
+            let (future, source) = completion_for_current_thread::<usize>();
+            let controller = control.clone();
+            let sender = scope.spawn(move || {
+                assert!(
+                    controller.wait_until_waiting(TEST_TIMEOUT),
+                    "block_on should park before the completion arrives"
+                );
+                source.complete(7);
+            });
+            assert_eq!(block_on::<MockRuntime, _>(future), 7);
+            sender.join().expect("sender should finish");
+        });
+    });
+
+    let notifies = trace
+        .snapshot()
+        .iter()
+        .filter(|event| matches!(event, MockRuntimeEvent::NotifyAttempted(_)))
+        .count();
+    assert!(
+        notifies >= 1,
+        "a cross-thread completion must notify the parked runtime"
+    );
+}
+
 #[test]
 fn parked_block_on_completion_survives_persistent_notification_failure() {
     let harness = MockRuntimeHarness::new();
