@@ -737,6 +737,58 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
     let on_exit_ran = Arc::new(AtomicBool::new(false));
 
     harness.enter(|| {
+        // Signal after the poll and again after the drop, so a stall names the
+        // operation that stalled. Both take the completion mutex, and a single
+        // combined signal cannot tell "poll blocked" from "drop blocked" from
+        // "join resolved early" -- three different bugs.
+        #[derive(Debug)]
+        enum JoinPollStage {
+            Polled(bool),
+            Dropped,
+        }
+
+        // The poller must be running *before* the worker parks in its TLS
+        // destructor. On Windows a thread inside DLL_THREAD_DETACH holds the
+        // loader lock, which stops any newly created thread from executing its
+        // first instruction, so a poller spawned after the worker parked would
+        // not start until the worker was released -- measuring the loader lock
+        // instead of the join future. It waits here for the future instead.
+        let (join_sender, join_receiver) = mpsc::channel::<super::super::handles::WorkerJoin>();
+        let (poll_sender, poll_receiver) = mpsc::sync_channel(2);
+        let poller = TrackedThread::new(
+            thread::Builder::new()
+                .name("runite-worker-join-poller".into())
+                .spawn(move || {
+                    let Ok(mut join) = join_receiver.recv() else {
+                        return;
+                    };
+                    let reentrant = ReentrantWaker::new(|| {});
+                    let waker = reentrant.waker();
+                    let mut context = Context::from_waker(&waker);
+                    let pending = Pin::new(&mut join).poll(&mut context).is_pending();
+                    let _ = poll_sender.send(JoinPollStage::Polled(pending));
+                    drop(join);
+                    let _ = poll_sender.send(JoinPollStage::Dropped);
+                })
+                .expect("worker join poller should spawn"),
+        );
+
+        // Same constraint: this thread releases the gate, so it has to be
+        // running before the worker takes the loader lock, or nothing can ever
+        // let the worker go.
+        let progress_for_controller = parent_progress.clone();
+        let gate_for_controller = exit_gate.clone();
+        let controller = TrackedThread::new(
+            thread::Builder::new()
+                .name("runite-worker-exit-controller".into())
+                .spawn(move || {
+                    let progressed = progress_for_controller.wait_for_len(1, DELIVERY_TIMEOUT);
+                    gate_for_controller.release();
+                    progressed
+                })
+                .expect("worker exit controller should spawn"),
+        );
+
         let gate_on_worker = exit_gate.clone();
         let on_exit_ran_by_parent = Arc::clone(&on_exit_ran);
         let worker = spawn_worker::<MockRuntime, _, _>(
@@ -754,41 +806,16 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
         );
         assert!(!on_exit_ran.load(Ordering::Acquire));
 
-        // Signal after the poll and again after the drop, so a stall names the
-        // operation that stalled. Both take the completion mutex, and a single
-        // combined signal cannot tell "poll blocked" from "drop blocked" from
-        // "join resolved early" -- three different bugs.
-        #[derive(Debug)]
-        enum JoinPollStage {
-            Polled(bool),
-            Dropped,
-        }
-
-        let join = worker.join();
-        let (poll_sender, poll_receiver) = mpsc::sync_channel(2);
-        let poller = TrackedThread::new(
-            thread::Builder::new()
-                .name("runite-worker-join-poller".into())
-                .spawn(move || {
-                    let reentrant = ReentrantWaker::new(|| {});
-                    let waker = reentrant.waker();
-                    let mut context = Context::from_waker(&waker);
-                    let mut join = join;
-                    let pending = Pin::new(&mut join).poll(&mut context).is_pending();
-                    let _ = poll_sender.send(JoinPollStage::Polled(pending));
-                    drop(join);
-                    let _ = poll_sender.send(JoinPollStage::Dropped);
-                })
-                .expect("worker join poller should spawn"),
-        );
+        join_sender
+            .send(worker.join())
+            .expect("join poller should still be waiting");
 
         let polled = poll_receiver.recv_timeout(DELIVERY_TIMEOUT).ok();
         let dropped = polled.is_some() && poll_receiver.recv_timeout(DELIVERY_TIMEOUT).is_ok();
         if polled.is_none() || !dropped {
-            // Let the worker finish so the poller can be joined below.
+            // Let the worker finish so the helper threads can exit.
             exit_gate.release();
         }
-        poller.join().expect("worker join poller should finish");
 
         match polled {
             None => panic!("polling the join future blocked on the worker OS thread"),
@@ -804,18 +831,6 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
             }
         }
 
-        let progress_for_controller = parent_progress.clone();
-        let gate_for_controller = exit_gate.clone();
-        let controller = TrackedThread::new(
-            thread::Builder::new()
-                .name("runite-worker-exit-controller".into())
-                .spawn(move || {
-                    let progressed = progress_for_controller.wait_for_len(1, DELIVERY_TIMEOUT);
-                    gate_for_controller.release();
-                    progressed
-                })
-                .expect("worker exit controller should spawn"),
-        );
         let progress_on_parent = parent_progress.clone();
         queue_task::<MockRuntime, _>(move || progress_on_parent.record(()));
 
@@ -826,6 +841,10 @@ fn worker_completion_waits_for_os_exit_without_blocking_parent_drain() {
                 .expect("worker exit controller should finish"),
             "parent drain blocked on OS join before running ready parent work"
         );
+        // Only now that the gate is released can a helper thread finish: on
+        // Windows its own TLS teardown needs the loader lock the parked worker
+        // was holding.
+        poller.join().expect("worker join poller should finish");
 
         run::<MockRuntime>();
         assert!(exit_gate.wait_until_completed(TEST_TIMEOUT));
