@@ -440,6 +440,13 @@ pub(crate) struct WriteState {
     operation: Option<PendingWrite>,
     queue: VecDeque<QueuedWrite>,
     completed: HashMap<u64, io::Result<usize>>,
+    /// Completion of the single in-flight *untracked* write, kept with the
+    /// buffer it was submitted for. Untracked callers share one generation, so
+    /// the buffer is the only thing identifying whose result this is. Retaining
+    /// it stops a drain from consuming an operation whose caller has not yet
+    /// observed it -- otherwise that caller's contract-mandated re-poll finds
+    /// no operation and submits the same bytes a second time.
+    untracked_completed: Option<(WriteIdentity, io::Result<usize>)>,
     barrier_waiters: WaiterSet,
     buffered_error: Option<io::Error>,
     shutdown: DirectionShutdown,
@@ -459,6 +466,9 @@ impl WriteState {
 
         self.cleanup_cancelled();
         if let Some(result) = self.completed.remove(&generation) {
+            return Poll::Ready(result);
+        }
+        if let Some(result) = self.take_untracked_completion(generation, buf) {
             return Poll::Ready(result);
         }
 
@@ -486,7 +496,7 @@ impl WriteState {
                 .map(|operation| (operation.kind, operation.identity))
             {
                 match self.poll_pending(cx) {
-                    Poll::Ready((completed_kind, result)) => {
+                    Poll::Ready((completed_kind, completed_identity, result)) => {
                         self.wake_ready_waiters();
                         // An untracked operation only belongs to this caller if
                         // it was submitted for these exact bytes. Otherwise the
@@ -498,7 +508,7 @@ impl WriteState {
                         {
                             return Poll::Ready(result);
                         }
-                        self.retain_completion(completed_kind, result);
+                        self.retain_completion(completed_kind, completed_identity, result);
                         if let Some(error) = self.buffered_error.take() {
                             return Poll::Ready(Err(error));
                         }
@@ -579,10 +589,16 @@ impl WriteState {
 
     pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.poll_drain(cx) {
-            Poll::Ready(()) => match self.buffered_error.take() {
-                Some(error) => Poll::Ready(Err(error)),
-                None => Poll::Ready(Ok(())),
-            },
+            Poll::Ready(()) => {
+                match self
+                    .buffered_error
+                    .take()
+                    .or_else(|| self.take_untracked_error())
+                {
+                    Some(error) => Poll::Ready(Err(error)),
+                    None => Poll::Ready(Ok(())),
+                }
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -592,8 +608,8 @@ impl WriteState {
             self.cleanup_cancelled();
             if self.operation.is_some() {
                 match self.poll_pending(cx) {
-                    Poll::Ready((kind, result)) => {
-                        self.retain_completion(kind, result);
+                    Poll::Ready((kind, identity, result)) => {
+                        self.retain_completion(kind, identity, result);
                         self.wake_ready_waiters();
                         continue;
                     }
@@ -664,7 +680,48 @@ impl WriteState {
         }
     }
 
-    fn retain_completion(&mut self, kind: WriteKind, result: io::Result<usize>) {
+    /// Claims a retained untracked completion if it belongs to this caller.
+    ///
+    /// Untracked callers share one generation, so ownership is decided by the
+    /// buffer the operation was submitted for.
+    fn take_untracked_completion(
+        &mut self,
+        generation: u64,
+        buf: &[u8],
+    ) -> Option<io::Result<usize>> {
+        if is_tracked_write(generation) {
+            return None;
+        }
+        let identity = WriteIdentity::of(buf);
+        match self.untracked_completed.as_ref() {
+            Some((retained, _)) if *retained == identity => {
+                self.untracked_completed.take().map(|(_, result)| result)
+            }
+            _ => None,
+        }
+    }
+
+    /// Takes a retained untracked *failure* so a flush can report it.
+    ///
+    /// A successful count stays retained: it still belongs to the caller whose
+    /// buffer produced it, and that caller's re-poll must resolve to it rather
+    /// than resubmit.
+    fn take_untracked_error(&mut self) -> Option<io::Error> {
+        match self.untracked_completed.as_ref() {
+            Some((_, Err(_))) => match self.untracked_completed.take() {
+                Some((_, Err(error))) => Some(error),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn retain_completion(
+        &mut self,
+        kind: WriteKind,
+        identity: Option<WriteIdentity>,
+        result: io::Result<usize>,
+    ) {
         match kind {
             WriteKind::Operation(generation)
                 if is_tracked_write(generation) && is_live_write(generation) =>
@@ -677,7 +734,14 @@ impl WriteState {
                     self.buffered_error = Some(error);
                 }
             }
-            WriteKind::Operation(_) => {}
+            WriteKind::Operation(_) => {
+                // Untracked. Keep it for whichever caller submitted this
+                // buffer; dropping it here would both lose the error and let a
+                // re-poll resubmit the same bytes.
+                if let Some(identity) = identity {
+                    self.untracked_completed = Some((identity, result));
+                }
+            }
         }
     }
 
@@ -688,15 +752,19 @@ impl WriteState {
         self.barrier_waiters.wake_all();
     }
 
-    fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<(WriteKind, io::Result<usize>)> {
+    fn poll_pending(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<(WriteKind, Option<WriteIdentity>, io::Result<usize>)> {
         let Some(operation) = self.operation.as_mut() else {
-            return Poll::Ready((WriteKind::Operation(0), Ok(0)));
+            return Poll::Ready((WriteKind::Operation(0), None, Ok(0)));
         };
         let kind = operation.kind;
+        let identity = operation.identity;
         match operation.operation.poll(cx) {
             Poll::Ready(result) => {
                 self.operation = None;
-                Poll::Ready((kind, result))
+                Poll::Ready((kind, identity, result))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -750,6 +818,14 @@ impl CursorState {
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Pending => Poll::Pending,
         }
+    }
+
+    /// Drains writes this cursor still owns and reports their failure.
+    ///
+    /// The write state is shared by every clone of the handle, so a flush on
+    /// one clone waits for a sibling's in-flight write as well.
+    pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.write.poll_flush(cx)
     }
 
     pub(crate) fn poll_reconcile(
@@ -1111,6 +1187,68 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    /// Regression: a flush that drains an in-flight untracked write must not
+    /// consume it. `AsyncWrite::poll_write` requires the caller to re-poll the
+    /// same buffer after `Pending`, and if the drain discarded the operation
+    /// that re-poll would submit the same bytes a second time.
+    #[test]
+    fn flush_does_not_make_an_untracked_repoll_write_twice() {
+        const UNTRACKED: u64 = 0;
+        let mut state = WriteState::default();
+        let (gate, handle) = Gate::new();
+        let mut pending = Some(boxed(gate));
+        let buf = *b"exactly once";
+        let mut cx = context();
+        let mut submissions = 0usize;
+
+        assert!(
+            state
+                .poll_write(&mut cx, UNTRACKED, &buf, |_| {
+                    submissions += 1;
+                    pending.take().unwrap()
+                })
+                .is_pending()
+        );
+        handle.complete(Ok(buf.len()));
+
+        // A flush drains the operation the caller has not yet observed.
+        assert!(ready(state.poll_flush(&mut cx)).is_ok());
+
+        // The contract-mandated re-poll must resolve to that operation, not
+        // start another one.
+        assert_eq!(
+            ready(state.poll_write(&mut cx, UNTRACKED, &buf, |_| {
+                panic!("the drained completion must satisfy this re-poll")
+            }))
+            .unwrap(),
+            buf.len()
+        );
+        assert_eq!(submissions, 1, "the bytes must be submitted exactly once");
+    }
+
+    /// A flush must surface the failure of a write the resource still owns;
+    /// dropping it reports success for bytes that never reached the peer.
+    #[test]
+    fn flush_reports_an_untracked_write_failure() {
+        const UNTRACKED: u64 = 0;
+        let mut state = WriteState::default();
+        let (gate, handle) = Gate::new();
+        let mut pending = Some(boxed(gate));
+        let buf = *b"doomed";
+        let mut cx = context();
+
+        assert!(
+            state
+                .poll_write(&mut cx, UNTRACKED, &buf, |_| pending.take().unwrap())
+                .is_pending()
+        );
+        handle.complete(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+
+        let error = ready(state.poll_flush(&mut cx))
+            .expect_err("flush must report the abandoned write's failure");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
     }
 
     /// Regression: raw `AsyncWrite::poll_write` callers all share one untracked

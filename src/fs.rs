@@ -942,12 +942,17 @@ impl AsyncWrite for File {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // The write state is shared across clones of this handle, so an
+        // abandoned write on any clone is still owned here. Returning `Ok`
+        // without draining would report bytes as visible while they are in
+        // flight and would discard that operation's error.
+        self.get_mut().state.borrow_mut().poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // The descriptor closes with the handle; closing still has to flush.
+        self.get_mut().state.borrow_mut().poll_flush(cx)
     }
 }
 
