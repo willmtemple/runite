@@ -223,6 +223,13 @@ impl StdinReader {
     }
 
     #[cfg(test)]
+    pub(super) fn interrupt_released_at_exit_publish(&self) -> bool {
+        self.shared
+            .interrupt_released_at_exit_publish
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
     pub(super) fn interrupt_released(&self) -> bool {
         self.shared
             .interrupt
@@ -244,6 +251,11 @@ struct Shared {
     changed: Condvar,
     io_gate: Mutex<()>,
     interrupt: Mutex<Option<platform::Interrupt>>,
+    /// Records, at the instant `thread_exited` is published, whether the
+    /// interrupt slot had already been drained. `shutdown_and_wait` returns on
+    /// that publication, so this is the ordering a caller depends on.
+    #[cfg(test)]
+    interrupt_released_at_exit_publish: std::sync::atomic::AtomicBool,
     capacity: usize,
 }
 
@@ -255,6 +267,8 @@ impl Shared {
             changed: Condvar::new(),
             io_gate: Mutex::new(()),
             interrupt: Mutex::new(None),
+            #[cfg(test)]
+            interrupt_released_at_exit_publish: std::sync::atomic::AtomicBool::new(false),
             capacity,
         }
     }
@@ -386,6 +400,11 @@ impl Shared {
             state.reader_waiting = false;
             state.read_requested = false;
             state.thread_exited = true;
+            // Sampled while both locks are held, so it captures exactly what a
+            // caller released by this publication can observe.
+            #[cfg(test)]
+            self.interrupt_released_at_exit_publish
+                .store(interrupt_slot.is_none(), Ordering::Release);
             state.take_waiter_wakers()
         };
         drop(interrupt_slot);

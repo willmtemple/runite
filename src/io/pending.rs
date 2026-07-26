@@ -1598,6 +1598,38 @@ mod tests {
         );
     }
 
+    /// A cursor's write state is shared by every clone of the handle, so a
+    /// flush must wait for a write any clone still owns rather than reporting
+    /// success while bytes are in flight.
+    #[test]
+    fn cursor_flush_waits_for_a_write_the_handle_still_owns() {
+        const UNTRACKED: u64 = 0;
+        let mut state = CursorState::default();
+        let (gate, handle) = Gate::new();
+        let mut pending = Some(boxed(gate));
+        let buf = *b"in flight";
+        let mut cx = context();
+
+        assert!(
+            state
+                .poll_write(
+                    &mut cx,
+                    UNTRACKED,
+                    &buf,
+                    |_| Ok(()),
+                    |_| pending.take().unwrap()
+                )
+                .is_pending()
+        );
+        assert!(
+            state.poll_flush(&mut cx).is_pending(),
+            "flush must not report success while the write is outstanding"
+        );
+
+        handle.complete(Ok(buf.len()));
+        assert!(ready(state.poll_flush(&mut cx)).is_ok());
+    }
+
     #[test]
     fn cursor_reconcile_orders_injected_read_before_write_and_rewind() {
         let mut state = CursorState::default();

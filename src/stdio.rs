@@ -1626,6 +1626,27 @@ mod tests {
         assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
     }
 
+    /// Regression: `shutdown_and_wait` returns the instant `thread_exited` is
+    /// published, so everything that flag promises must already be done. The
+    /// interrupt used to be released *after* publication, letting a caller
+    /// observe an exited reader whose interrupt was still installed — a window
+    /// narrow enough to surface as roughly 1 failure in 300 on Windows.
+    ///
+    /// Asserting the post-condition after `shutdown_and_wait` only samples the
+    /// race; this checks the ordering itself, recorded while both locks are
+    /// held.
+    #[test]
+    fn interrupt_is_released_before_thread_exit_is_published() {
+        let (_input, reader, _writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        assert!(
+            reader.interrupt_released_at_exit_publish(),
+            "the interrupt must already be released when thread exit is published"
+        );
+        assert!(reader.interrupt_released());
+    }
+
     #[test]
     fn stdin_shutdown_wakes_pending_reads_and_stops_its_thread() {
         let (mut input, reader, _writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);

@@ -1,7 +1,9 @@
 mod common;
 
+use std::cell::RefCell;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
+use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
 use std::task::Poll;
 
@@ -382,4 +384,60 @@ fn mpsc_abandoned_recv_stays_fifo_with_try_recv() {
     });
 
     assert_eq!(observed, (Ok(1), Some(2)));
+}
+
+/// Regression: blocked senders must be released in the order they parked.
+///
+/// The waiter list is a `VecDeque` drained from the front. A `Vec` with
+/// `swap_remove` would satisfy every other test in this file — none of them
+/// ever has two senders parked at once, which is the only arrangement where
+/// the ordering is observable.
+#[test]
+fn mpsc_blocked_senders_are_released_in_parking_order() {
+    let observed = block_on(|| async {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender.try_send(0).expect("first value fits the capacity");
+
+        let completions = Rc::new(RefCell::new(Vec::new()));
+
+        // Park three senders, each after the previous one is definitely queued.
+        let mut parked = Vec::new();
+        for value in 1..=3u32 {
+            let sender = sender.clone();
+            let completions = Rc::clone(&completions);
+            let mut send = Box::pin(async move {
+                sender.send(value).await.expect("receiver is alive");
+                completions.borrow_mut().push(value);
+            });
+            poll_fn(|cx| {
+                assert!(
+                    send.as_mut().poll(cx).is_pending(),
+                    "a full channel must park the sender"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            parked.push(send);
+        }
+
+        // Drain, letting one parked sender through per receive.
+        let mut received = vec![receiver.recv().await.expect("queued value")];
+        for send in &mut parked {
+            poll_fn(|cx| {
+                let _ = send.as_mut().poll(cx);
+                Poll::Ready(())
+            })
+            .await;
+            received.push(receiver.recv().await.expect("released value"));
+        }
+
+        (received, completions.borrow().clone())
+    });
+
+    assert_eq!(
+        observed.0,
+        vec![0, 1, 2, 3],
+        "values must arrive in the order their senders parked"
+    );
+    assert_eq!(observed.1, vec![1, 2, 3]);
 }
