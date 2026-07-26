@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_IO_COMPLETION, WAIT_TIMEOUT,
+    ERROR_ACCESS_DENIED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_IO_COMPLETION,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatusEx, OVERLAPPED, OVERLAPPED_ENTRY,
@@ -473,12 +474,26 @@ fn ensure_overlapped(handle: RawHandle) -> io::Result<()> {
 
     // SAFETY: `FileIoCompletionNotificationInformation` is the repr(C)
     // payload for this class and consists only of one native `u32`.
-    let notification = unsafe {
+    let notification = match unsafe {
         query_file_information::<FileIoCompletionNotificationInformation>(
             handle,
             FILE_IO_COMPLETION_NOTIFICATION_INFORMATION_CLASS,
         )
-    }?;
+    } {
+        Ok(notification) => notification,
+        // This class requires `FILE_READ_ATTRIBUTES`, which some handles the
+        // runtime legitimately adopts do not carry: std opens the parent's end
+        // of a child's stdin pipe write-only, so the kernel answers
+        // `ACCESS_DENIED`. Treat that as "cannot determine" rather than a
+        // rejection. Nothing runite or std creates sets
+        // `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`, so the packet-per-operation
+        // invariant still holds for every handle produced here; only a foreign
+        // handle that both sets the flag and withholds `FILE_READ_ATTRIBUTES`
+        // could slip past, and issue #17 tracks supporting inline success
+        // properly.
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     if notification.flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0 {
         // Issue #17 tracks an inline-success path. Until then the terminal
         // packet is the unique owner-reclamation event.
