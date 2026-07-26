@@ -405,25 +405,43 @@ fn file_async_seek_reconciles_an_accepted_pending_read() {
             .expect("write fixture");
         let mut file = File::open(&path).await.expect("open fixture");
         let mut large = [0; 10];
-        poll_fn(|cx| {
-            assert!(Pin::new(&mut file).poll_read(cx, &mut large).is_pending());
-            Poll::Ready(())
+        // Submit a read and abandon it without observing the result. Whether it
+        // is still in flight afterwards is a backend property -- io_uring parks,
+        // while the blocking-pool backends can finish first -- so branch on what
+        // actually happened rather than assuming one of them.
+        let accepted = poll_fn(|cx| {
+            let poll = Pin::new(&mut file).poll_read(cx, &mut large);
+            Poll::Ready(match poll {
+                Poll::Pending => None,
+                Poll::Ready(result) => Some(result.expect("read should succeed")),
+            })
         })
         .await;
 
+        let already_read = accepted.unwrap_or(0);
         let mut prefix = [0; 2];
-        file.read_exact(&mut prefix).await.expect("finish read");
-        assert_eq!(&prefix, b"01");
+        if already_read == 0 {
+            // The abandoned read is still owned by the file; a later read must
+            // finish it and hand back its bytes from the start of the file.
+            file.read_exact(&mut prefix).await.expect("finish read");
+            assert_eq!(&prefix, b"01");
+        }
+
+        // Either way the cursor must reflect exactly the bytes delivered so far.
+        let consumed = if already_read == 0 { 2 } else { already_read } as u64;
         assert_eq!(
             AsyncSeekExt::seek(&mut file, SeekFrom::Current(0))
                 .await
                 .expect("seek through trait"),
-            2
+            consumed,
+            "seek must reconcile the accepted read rather than double-count it"
         );
 
-        let mut next = [0; 2];
-        file.read_exact(&mut next).await.expect("read after seek");
-        assert_eq!(&next, b"23");
+        if already_read == 0 {
+            let mut next = [0; 2];
+            file.read_exact(&mut next).await.expect("read after seek");
+            assert_eq!(&next, b"23");
+        }
         drop(file);
         fs::remove_file(&path).await.expect("remove fixture");
     });

@@ -150,6 +150,7 @@ for the full threading and scaling model.
 | ------------------------------ | --------------------------------------------------------------------- |
 | `RUNITE_BLOCKING_THREADS`      | Size of the shared blocking-task pool (clamped 1..=32).               |
 | `RUNITE_REMOTE_QUEUE_CAPACITY` | Bound on the per-thread cross-thread macrotask queue (default 65536). |
+| `RUNITE_IO_URING_DEFER_SUBMISSIONS` | Linux only. Set to `0` to submit each io_uring operation immediately instead of batching per loop turn. Diagnostic; batching is the default. |
 
 ## Examples
 
