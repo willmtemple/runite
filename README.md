@@ -109,7 +109,8 @@ fn main() {
   handle with `.cancel()`), plus `time::{sleep, timeout, interval}` where
   `time::interval` is the awaitable interval.
 - **I/O:** async `fs`, `net` (TCP/UDP everywhere; Unix-domain sockets on Unix), `stdio`, and crate-local
-  `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits with vectored and
+  `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits with vectored
+  method surface (scalar-backed today — no backend issues `readv`/`writev` yet) and
   future adapters; TCP split/reunite, listener `incoming()` streams, async
   stdin/stdout/stderr, and `BufReader`/`BufWriter`.
 - **Control flow:** fair-by-default `select!` with `biased;`, branch guards,
@@ -188,7 +189,7 @@ from 0.1? Read [Migrating to 0.2](./docs/MIGRATING-0.2.md).
 The toolchain is pinned with [mise](https://mise.jdx.dev/). Install it, then:
 
 ```sh
-mise install            # fetch the pinned Rust toolchain and Agent Cop
+mise install            # fetch the pinned Rust toolchain and dev tools
 mise run check          # fmt + clippy + tests + workflow lint (the full local gate)
 ```
 

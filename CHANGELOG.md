@@ -41,7 +41,8 @@ changes.
 
 ### Added
 
-- `io::AsyncBufRead`, `io::AsyncSeek`, their extension futures, and portable
+- `io::AsyncBufRead` (poll-only, with async helpers on `BufReader`),
+  `io::AsyncSeek` with `AsyncSeekExt::seek`, and portable
   vectored methods on `AsyncRead`/`AsyncWrite`, addressing the trait gaps in
   issue #9. `BufReader`, `File`, and both `futures-compat` directions implement
   the applicable buffered and seek contracts. The vectored methods are API

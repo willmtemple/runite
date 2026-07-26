@@ -160,7 +160,6 @@ const FORBIDDEN_PACKAGE_PATHS: &[&str] = &[
     ".github",
     ".claude",
     "target",
-    "cop-checks",
     "proc_macros",
     "xtask",
     "AGENTS.md",

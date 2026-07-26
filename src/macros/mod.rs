@@ -195,6 +195,16 @@ pub use runite_proc_macros::select as __select;
 /// peers. Add `biased;` at the start of the invocation to poll in lexical order
 /// every time:
 ///
+/// <div class="warning">
+///
+/// **Changed in 0.2.** The 0.1 macro always polled in lexical order. Existing
+/// code compiles unchanged and silently changes behavior, with no compiler
+/// diagnostic — audit every `select!` and add `biased;` wherever lexical
+/// priority was intentional (a shutdown arm written first, for example, is no
+/// longer checked first).
+///
+/// </div>
+///
 /// ```
 /// # async fn example() {
 /// let value = runite::select! {

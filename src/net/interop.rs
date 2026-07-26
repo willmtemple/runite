@@ -80,6 +80,12 @@ impl AsRawFd for TcpSocket {
 #[cfg(unix)]
 impl TcpStream {
     /// Fallibly adopts an already-connected owned socket descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self::from_owned_fd(fd))
@@ -98,6 +104,12 @@ impl TcpStream {
 #[cfg(unix)]
 impl TcpListener {
     /// Fallibly adopts an already-listening owned socket descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self::from_owned_fd(fd))
@@ -116,6 +128,12 @@ impl TcpListener {
 #[cfg(unix)]
 impl UdpSocket {
     /// Fallibly adopts an owned UDP socket descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self::from_owned_fd(fd))
@@ -134,6 +152,12 @@ impl UdpSocket {
 #[cfg(unix)]
 impl TcpSocket {
     /// Fallibly adopts an owned TCP socket descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self::from_owned_fd(fd))
@@ -224,6 +248,12 @@ mod windows_interop {
 
     impl TcpStream {
         /// Strictly adopts an already-connected owned socket.
+        ///
+        /// # Errors
+        ///
+        /// Returns the error from configuring the resource for this runtime.
+        /// **The descriptor is closed on failure** — it is consumed either way
+        /// and is not handed back to the caller.
         pub fn from_owned(socket: OwnedSocket) -> io::Result<Self> {
             crate::sys::current::net::adopt_socket(socket).map(Self::from_owned_fd)
         }
@@ -239,6 +269,12 @@ mod windows_interop {
 
     impl TcpListener {
         /// Strictly adopts an already-listening owned socket.
+        ///
+        /// # Errors
+        ///
+        /// Returns the error from configuring the resource for this runtime.
+        /// **The descriptor is closed on failure** — it is consumed either way
+        /// and is not handed back to the caller.
         pub fn from_owned(socket: OwnedSocket) -> io::Result<Self> {
             crate::sys::current::net::adopt_socket(socket).map(Self::from_owned_fd)
         }
@@ -255,6 +291,12 @@ mod windows_interop {
 
     impl UdpSocket {
         /// Strictly adopts an owned UDP socket.
+        ///
+        /// # Errors
+        ///
+        /// Returns the error from configuring the resource for this runtime.
+        /// **The descriptor is closed on failure** — it is consumed either way
+        /// and is not handed back to the caller.
         pub fn from_owned(socket: OwnedSocket) -> io::Result<Self> {
             crate::sys::current::net::adopt_socket(socket).map(Self::from_owned_fd)
         }
@@ -270,6 +312,12 @@ mod windows_interop {
 
     impl TcpSocket {
         /// Strictly adopts an owned TCP socket.
+        ///
+        /// # Errors
+        ///
+        /// Returns the error from configuring the resource for this runtime.
+        /// **The descriptor is closed on failure** — it is consumed either way
+        /// and is not handed back to the caller.
         pub fn from_owned(socket: OwnedSocket) -> io::Result<Self> {
             crate::sys::current::net::adopt_socket(socket).map(Self::from_owned_fd)
         }

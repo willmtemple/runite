@@ -393,12 +393,22 @@ mod runtime_api {
 
     /// Runs the current thread's event loop until all work is complete.
     ///
-    /// Drives queued tasks, microtasks, timers, and I/O completions until the
-    /// runtime is idle (no pending tasks, futures, timers, or active intervals),
-    /// then returns. Stranded spawned tasks are first completed with
-    /// `JoinError::Cancelled`. On an ordinary thread, the driver remains
-    /// installed for later `run`/`block_on` entries. This is what
+    /// Drives queued tasks, microtasks, timers, and I/O completions until no
+    /// ready work, pending timers, live child workers, or in-flight async
+    /// operations remain, then returns. On an ordinary thread, the driver
+    /// remains installed for later `run`/`block_on` entries. This is what
     /// [`main`](crate::main) calls after queueing the entry point.
+    ///
+    /// A spawned task that is still pending at that point is resolved to
+    /// [`JoinError::Cancelled`](crate::task::JoinError) and its future is
+    /// dropped. Note that a task is only kept alive by a wake source the
+    /// scheduler can see: runite channels, timers, I/O, `spawn_blocking`,
+    /// signals, and [`WorkerHandle::join`] all register liveness, but a bare
+    /// [`Waker`](std::task::Waker) clone handed to a foreign thread does not.
+    ///
+    /// **Changed in 0.2**: in 0.1 a pending task outlived `run()` and could be
+    /// resumed by a later call. See the
+    /// [migration guide](https://github.com/willmtemple/runite/blob/main/docs/MIGRATING-0.2.md).
     ///
     /// # Panics
     ///

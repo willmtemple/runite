@@ -1355,7 +1355,14 @@ impl AsRawFd for File {
 
 #[cfg(unix)]
 impl File {
-    /// Fallibly adopts an open owned file descriptor.
+    /// Adopts an open owned file descriptor.
+    ///
+    /// # Errors
+    ///
+    /// On Unix this cannot fail today; the `io::Result` exists so one
+    /// signature works on every platform. On Windows adoption validates
+    /// completion-port affinity and can fail, and **the handle is closed
+    /// on failure** rather than returned to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         Ok(Self::from_owned_file(fd))
     }

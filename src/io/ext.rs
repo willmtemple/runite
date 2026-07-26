@@ -136,9 +136,15 @@ pub trait AsyncReadExt: AsyncRead {
 
     /// Reads into a sequence of byte slices.
     ///
-    /// This performs one vectored read and may fill only part of the supplied
-    /// buffers. The portable default starts with the first non-empty slice;
-    /// empty input completes with `Ok(0)` without polling the reader.
+    /// May fill only part of the supplied buffers; empty input completes with
+    /// `Ok(0)` without polling the reader.
+    ///
+    /// **This is not a scatter/gather optimization today.** No runite backend
+    /// issues `readv` or a multi-buffer io_uring operation: the portable
+    /// default reads into the first non-empty slice only, so filling several
+    /// buffers still costs one operation each. Treat the method as
+    /// forward-compatible API surface, and expect only the first slice to be
+    /// touched per call.
     ///
     /// ```no_run
     /// use std::io::IoSliceMut;
@@ -378,9 +384,13 @@ pub trait AsyncWriteExt: AsyncWrite {
 
     /// Writes from a sequence of byte slices.
     ///
-    /// This performs one vectored write and may accept only part of the
-    /// supplied bytes. The portable default starts with the first non-empty
-    /// slice; empty input completes with `Ok(0)` without polling the writer.
+    /// May accept only part of the supplied bytes; empty input completes with
+    /// `Ok(0)` without polling the writer.
+    ///
+    /// **This is not a scatter/gather optimization today.** No runite backend
+    /// issues `writev` or a multi-buffer io_uring operation: the portable
+    /// default writes the first non-empty slice only. Treat the method as
+    /// forward-compatible API surface.
     ///
     /// ```no_run
     /// use std::io::IoSlice;

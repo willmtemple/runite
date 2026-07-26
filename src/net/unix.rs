@@ -1011,6 +1011,12 @@ impl UnixStream {
     /// the non-blocking mode runite's driver expects.
     ///
     /// Ownership of the descriptor transfers to the returned stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self::from_owned_fd(fd))
@@ -1048,6 +1054,12 @@ impl UnixListener {
     /// non-blocking mode runite's driver expects.
     ///
     /// Ownership of the descriptor transfers to the returned listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self { fd })
@@ -1085,6 +1097,12 @@ impl UnixDatagram {
     /// non-blocking mode runite's driver expects.
     ///
     /// Ownership of the descriptor transfers to the returned socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self { fd })

@@ -8,7 +8,7 @@ a change merged.
 `runite` pins its toolchain with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise install      # installs the pinned Rust toolchain and Agent Cop
+mise install      # installs the pinned Rust toolchain and dev tools
 mise run check    # fmt + clippy + tests + workflow lint — the full local gate
 ```
 
