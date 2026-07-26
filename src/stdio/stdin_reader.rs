@@ -358,6 +358,21 @@ impl Shared {
     }
 
     fn finish(&self, outcome: ThreadOutcome) {
+        // `shutdown_and_wait` returns the moment `thread_exited` is published,
+        // so anything that flag promises has to be done first. Releasing the
+        // interrupt afterwards let a caller observe an exited thread whose
+        // interrupt was still installed.
+        //
+        // Both locks are held across the release, in the same interrupt ->
+        // state order `install_interrupt` uses: taking them in that order keeps
+        // the two from inverting, and holding the interrupt lock while
+        // publishing `thread_exited` stops `install_interrupt` from reinstalling
+        // into a slot this call has already drained.
+        let mut interrupt_slot = self
+            .interrupt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let interrupt = interrupt_slot.take();
         let wakers = {
             let mut state = self.lock();
             if state.terminal.is_running() {
@@ -373,11 +388,7 @@ impl Shared {
             state.thread_exited = true;
             state.take_waiter_wakers()
         };
-        let interrupt = self
-            .interrupt
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        drop(interrupt_slot);
 
         self.space_available.notify_all();
         self.changed.notify_all();
