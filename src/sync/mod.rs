@@ -72,5 +72,5 @@ mod semaphore;
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::Notify;
 pub use once_cell::OnceCell;
-pub use rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use rw_lock::{RwLock, RwLockReadFuture, RwLockReadGuard, RwLockWriteFuture, RwLockWriteGuard};
 pub use semaphore::{Permit, Semaphore};

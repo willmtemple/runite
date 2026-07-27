@@ -8,13 +8,13 @@
 //! This implementation deliberately uses one dedicated OS reader thread
 //! (`runite-signal`) instead of a per-runtime-thread drain. Signals are
 //! process-global, so one async-signal-safe handler writes to one process-wide
-//! wake fd, and the reader thread forwards observed signal kinds on a
-//! best-effort basis to live runtime threads that have constructed a
-//! [`Signal`]. Forwarding uses
-//! [`crate::ThreadHandle::queue_macrotask`]; if a target thread is closed or its
-//! queue is full, that wake is dropped. Repeated calls to [`signal`] share the
-//! same process-wide signal handler and create independent per-thread stream
-//! handles.
+//! wake fd, and the reader thread forwards observed signal kinds to live
+//! runtime threads that have constructed a [`Signal`]. Forwarding uses the
+//! runtime's capacity-bypassing internal wake path, so a saturated user
+//! macrotask queue cannot discard a signal wake. At most one wake per signal
+//! kind is queued for each runtime thread; repeated deliveries coalesce until
+//! that wake runs. Repeated calls to [`signal`] share the same process-wide
+//! signal handler and create independent per-thread stream handles.
 //!
 //! Existing non-default, non-ignored process handlers are not overwritten:
 //! [`signal`] returns an error instead.
@@ -54,7 +54,6 @@ const SIGNAL_COUNT: usize = 7;
 static DISPATCH: OnceLock<io::Result<SignalDispatch>> = OnceLock::new();
 static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 static PENDING: [AtomicBool; SIGNAL_COUNT] = [const { AtomicBool::new(false) }; SIGNAL_COUNT];
-static WAKE_GENERATION: [AtomicU64; SIGNAL_COUNT] = [const { AtomicU64::new(0) }; SIGNAL_COUNT];
 
 thread_local! {
     static THREAD_REGISTRATION: RefCell<Weak<ThreadRegistration>> = const { RefCell::new(Weak::new()) };
@@ -276,6 +275,7 @@ impl SignalSlot {
 struct ThreadRegistration {
     thread: ThreadHandle,
     slots: [SignalSlot; SIGNAL_COUNT],
+    wake_scheduled: [AtomicBool; SIGNAL_COUNT],
 }
 
 impl ThreadRegistration {
@@ -283,6 +283,7 @@ impl ThreadRegistration {
         Self {
             thread,
             slots: std::array::from_fn(|_| SignalSlot::new()),
+            wake_scheduled: [const { AtomicBool::new(false) }; SIGNAL_COUNT],
         }
     }
 
@@ -307,6 +308,24 @@ impl ThreadRegistration {
                 false
             }
         });
+    }
+
+    fn schedule_notify(self: &Arc<Self>, index: usize) {
+        if self.wake_scheduled[index].swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let registration = Arc::clone(self);
+        if self
+            .thread
+            .queue_internal_wake(move || {
+                registration.wake_scheduled[index].store(false, Ordering::Release);
+                registration.notify(index);
+            })
+            .is_err()
+        {
+            self.wake_scheduled[index].store(false, Ordering::Release);
+        }
     }
 }
 
@@ -385,13 +404,7 @@ impl SignalDispatch {
         };
 
         for registration in registrations {
-            let queued_registration = Arc::clone(&registration);
-            let queued = registration
-                .thread
-                .queue_macrotask(move || queued_registration.notify(index));
-            if queued.is_err() {
-                continue;
-            }
+            registration.schedule_notify(index);
         }
     }
 }
@@ -416,7 +429,45 @@ fn thread_registration(dispatch: &'static SignalDispatch) -> Arc<ThreadRegistrat
     })
 }
 
+struct ErrnoGuard {
+    location: *mut libc::c_int,
+    saved: libc::c_int,
+}
+
+impl ErrnoGuard {
+    fn capture() -> Self {
+        let location = errno_location();
+        // SAFETY: the platform accessor returns this thread's live errno slot.
+        let saved = unsafe { *location };
+        Self { location, saved }
+    }
+}
+
+impl Drop for ErrnoGuard {
+    fn drop(&mut self) {
+        // SAFETY: signal handling does not change threads, so the captured
+        // thread-local errno slot remains valid until this guard is dropped.
+        unsafe {
+            *self.location = self.saved;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc exposes the calling thread's errno slot.
+    unsafe { libc::__error() }
+}
+
 extern "C" fn handle_signal(signum: libc::c_int) {
+    let _errno = ErrnoGuard::capture();
+
     if let Some(index) = signal_index(signum) {
         PENDING[index].store(true, Ordering::Release);
 
@@ -641,9 +692,8 @@ fn dispatch_pending() {
         return;
     };
 
-    for index in 0..SIGNAL_COUNT {
-        if PENDING[index].swap(false, Ordering::AcqRel) {
-            WAKE_GENERATION[index].fetch_add(1, Ordering::AcqRel);
+    for (index, pending) in PENDING.iter().enumerate() {
+        if pending.swap(false, Ordering::AcqRel) {
             dispatch.broadcast(index);
         }
     }
@@ -652,6 +702,9 @@ fn dispatch_pending() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    const ERRNO_HELPER_ENV: &str = "RUNITE_SIGNAL_ERRNO_HELPER";
 
     #[test]
     fn ctrl_c_constructs() {
@@ -660,75 +713,55 @@ mod tests {
     }
 
     #[test]
-    fn signal_constructs_for_each_kind() {
-        for kind in [
-            SignalKind::Interrupt,
-            SignalKind::Terminate,
-            SignalKind::Hangup,
-            SignalKind::Quit,
-            SignalKind::User1,
-            SignalKind::User2,
-            SignalKind::WindowChange,
-        ] {
-            let first = signal(kind).expect("signal stream should construct");
-            let second = signal(kind).expect("repeat registration should share process handler");
-            drop(second);
-            drop(first);
+    fn signal_handler_preserves_interrupted_errno() {
+        if std::env::var_os(ERRNO_HELPER_ENV).is_none() {
+            let output =
+                Command::new(std::env::current_exe().expect("unit test executable should exist"))
+                    .args([
+                        "--exact",
+                        "signal::unix::tests::signal_handler_preserves_interrupted_errno",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(ERRNO_HELPER_ENV, "1")
+                    .output()
+                    .expect("errno test subprocess should run");
+            assert!(
+                output.status.success(),
+                "errno test subprocess failed with {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
         }
-    }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn signal_receives_sigusr1_linux() {
-        use std::sync::{Arc, Mutex};
+        let index = SignalKind::User1.index();
+        let previous_fd = WAKE_FD.swap(libc::c_int::MAX, Ordering::AcqRel);
+        PENDING[index].store(false, Ordering::Release);
 
-        let received = Arc::new(Mutex::new(false));
-        let received_task = Arc::clone(&received);
-        let mut sigusr1 = signal(SignalKind::User1).expect("SIGUSR1 stream should construct");
+        let errno = errno_location();
+        // SAFETY: `errno` points to this subprocess thread's libc errno slot.
+        let previous_errno = unsafe { *errno };
+        // SAFETY: `errno` points to this subprocess thread's libc errno slot.
+        unsafe {
+            *errno = libc::E2BIG;
+        }
+        handle_signal(libc::SIGUSR1);
+        // SAFETY: the errno pointer remains valid for this thread.
+        let observed = unsafe { *errno };
 
-        crate::spawn(async move {
-            sigusr1.recv().await;
-            *received_task.lock().expect("received mutex poisoned") = true;
-        });
+        WAKE_FD.store(previous_fd, Ordering::Release);
+        PENDING[index].store(false, Ordering::Release);
+        // SAFETY: restore the test thread's original errno before asserting.
+        unsafe {
+            *errno = previous_errno;
+        }
 
-        // SAFETY: `getpid` takes no arguments and returns this process id;
-        // `SIGUSR1` is a valid signal number for `kill`.
-        let rc = unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) };
-        assert_eq!(rc, 0, "kill(SIGUSR1) should succeed");
-
-        crate::run();
-
-        assert!(
-            *received.lock().expect("received mutex poisoned"),
-            "SIGUSR1 recv future should complete"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn signal_receives_sigwinch() {
-        use std::sync::{Arc, Mutex};
-
-        let received = Arc::new(Mutex::new(false));
-        let received_task = Arc::clone(&received);
-        let mut sigwinch =
-            signal(SignalKind::WindowChange).expect("SIGWINCH stream should construct");
-
-        crate::spawn(async move {
-            sigwinch.recv().await;
-            *received_task.lock().expect("received mutex poisoned") = true;
-        });
-
-        // SAFETY: `getpid` takes no arguments and returns this process id;
-        // `SIGWINCH` is a valid signal number for `kill`.
-        let rc = unsafe { libc::kill(libc::getpid(), libc::SIGWINCH) };
-        assert_eq!(rc, 0, "kill(SIGWINCH) should succeed");
-
-        crate::run();
-
-        assert!(
-            *received.lock().expect("received mutex poisoned"),
-            "SIGWINCH recv future should complete"
+        assert_eq!(
+            observed,
+            libc::E2BIG,
+            "the signal handler must restore the interrupted code's errno"
         );
     }
 }

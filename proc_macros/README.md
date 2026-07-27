@@ -16,7 +16,7 @@ Add `runite` (not this crate) to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-runite = "0.1"
+runite = "0.2"
 ```
 
 Then annotate your entry point. `#[runite::main]` works for both synchronous and
@@ -34,5 +34,5 @@ guide.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option. See the
-[runite repository](https://github.com/willmtemple/runite) for license texts.
+Licensed under either of MIT or Apache-2.0 at your option. Both license texts
+are included in this crate archive.

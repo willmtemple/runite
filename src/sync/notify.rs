@@ -115,7 +115,8 @@ impl Notify {
     /// still allow only one future [`notified`](Self::notified) call to complete
     /// immediately.
     pub fn notify_one(&self) {
-        if let Some(waiter) = self.waiters.borrow_mut().pop_front() {
+        let waiter = self.waiters.borrow_mut().pop_front();
+        if let Some(waiter) = waiter {
             waiter.selected.set(Selection::One);
             waiter.waker.wake();
         } else {
@@ -129,8 +130,11 @@ impl Notify {
     /// not forwarded if a selected `notified()` future is dropped before it
     /// completes.
     pub fn notify_waiters(&self) {
-        for waiter in self.waiters.borrow_mut().drain(..) {
+        let waiters = self.waiters.borrow_mut().drain(..).collect::<Vec<_>>();
+        for waiter in &waiters {
             waiter.selected.set(Selection::Waiters);
+        }
+        for waiter in waiters {
             waiter.waker.wake();
         }
     }
@@ -238,7 +242,10 @@ impl Drop for Notified<'_> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::platform::runtime_shared::test_support::ReentrantWaker;
     use crate::{run, spawn, yield_now};
 
     #[test]
@@ -350,5 +357,84 @@ mod tests {
 
         let mut next = Box::pin(notify.notified());
         assert!(next.as_mut().poll(&mut cx).is_pending());
+    }
+
+    #[test]
+    fn notify_one_releases_waiter_queue_before_reentrant_wake() {
+        let notify = Notify::new();
+        let notify_address = (&notify as *const Notify) as usize;
+        let reentrant = ReentrantWaker::new(move || {
+            // SAFETY: `wake` runs synchronously on this test thread while
+            // `notify` is alive, and the primitive is never moved.
+            unsafe { &*(notify_address as *const Notify) }.notify_one();
+        });
+        let reentrant_waker = reentrant.waker();
+        let mut reentrant_cx = Context::from_waker(&reentrant_waker);
+        let mut noop_cx = Context::from_waker(Waker::noop());
+        let mut first = Box::pin(notify.notified());
+        let mut second = Box::pin(notify.notified());
+        assert!(first.as_mut().poll(&mut reentrant_cx).is_pending());
+        assert!(second.as_mut().poll(&mut noop_cx).is_pending());
+
+        notify.notify_one();
+
+        assert_eq!(reentrant.wake_count(), 1);
+        assert!(first.as_mut().poll(&mut noop_cx).is_ready());
+        assert!(second.as_mut().poll(&mut noop_cx).is_ready());
+    }
+
+    #[test]
+    fn notify_waiters_releases_waiter_queue_before_reentrant_wake() {
+        let notify = Notify::new();
+        let notify_address = (&notify as *const Notify) as usize;
+        let reentrant = ReentrantWaker::new(move || {
+            // SAFETY: `wake` runs synchronously on this test thread while
+            // `notify` is alive, and the primitive is never moved.
+            unsafe { &*(notify_address as *const Notify) }.notify_one();
+        });
+        let reentrant_waker = reentrant.waker();
+        let mut reentrant_cx = Context::from_waker(&reentrant_waker);
+        let mut first = Box::pin(notify.notified());
+        assert!(first.as_mut().poll(&mut reentrant_cx).is_pending());
+
+        notify.notify_waiters();
+
+        assert_eq!(reentrant.wake_count(), 1);
+        let mut noop_cx = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut noop_cx).is_ready());
+        let mut next = Box::pin(notify.notified());
+        assert!(next.as_mut().poll(&mut noop_cx).is_ready());
+    }
+
+    #[test]
+    fn notify_waiters_selects_all_waiters_before_reentrant_poll() {
+        let notify = Notify::new();
+        let mut second = Box::pin(Notified::new(&notify));
+        let second_address = second.as_mut().get_mut() as *mut Notified<'_> as usize;
+        let second_was_ready = Arc::new(AtomicBool::new(false));
+        let second_was_ready_on_wake = Arc::clone(&second_was_ready);
+        let reentrant = ReentrantWaker::new(move || {
+            // SAFETY: the future is pinned and alive for this synchronous wake,
+            // and its initial mutable poll has completed before notification.
+            let second = unsafe { &mut *(second_address as *mut Notified<'_>) };
+            let mut cx = Context::from_waker(Waker::noop());
+            second_was_ready_on_wake
+                .store(Pin::new(second).poll(&mut cx).is_ready(), Ordering::Release);
+        });
+        let reentrant_waker = reentrant.waker();
+        let mut first_cx = Context::from_waker(&reentrant_waker);
+        let mut noop_cx = Context::from_waker(Waker::noop());
+        let mut first = Box::pin(Notified::new(&notify));
+        assert!(first.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second.as_mut().poll(&mut noop_cx).is_pending());
+
+        notify.notify_waiters();
+
+        assert_eq!(reentrant.wake_count(), 1);
+        assert!(
+            second_was_ready.load(Ordering::Acquire),
+            "all broadcast waiters must be selected before the first wake"
+        );
+        assert!(first.as_mut().poll(&mut noop_cx).is_ready());
     }
 }

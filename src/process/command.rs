@@ -339,6 +339,10 @@ impl Command {
     ///
     /// If any standard stream was configured with [`Stdio::piped`], the
     /// corresponding field on the returned [`Child`] contains an async pipe.
+    /// When stdin is inherited, runite's process-wide stdin reader is paused
+    /// until the child's exit is observed or the returned handle is dropped.
+    /// On Windows, spawning returns [`io::ErrorKind::WouldBlock`] if a console
+    /// stdin read is already active and therefore cannot be handed off safely.
     ///
     /// # Examples
     ///
@@ -355,7 +359,11 @@ impl Command {
     /// # }
     /// ```
     pub fn spawn(&mut self) -> io::Result<Child> {
-        crate::sys::current::process::spawn(&self.spec).map(Child::from_inner)
+        let stdin_handoff = (self.spec.stdin == StdioKind::Inherit)
+            .then(crate::stdio::handoff_stdin_to_child)
+            .transpose()?;
+        let inner = crate::sys::current::process::spawn(&self.spec)?;
+        Ok(Child::from_inner(inner, stdin_handoff))
     }
 
     /// Spawns the command and waits asynchronously for it to exit.

@@ -4,7 +4,32 @@
 //! resolves and returns its output. Each test runs on a freshly spawned OS
 //! thread so `block_on` installs and drives an isolated runtime.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+use runite::QueueError;
+
+struct PendingDrop {
+    dropped: Arc<AtomicBool>,
+}
+
+impl Future for PendingDrop {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
+impl Drop for PendingDrop {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
 
 /// Returns the future's output and can borrow non-`'static` local state (the
 /// future is driven in place, not spawned).
@@ -71,5 +96,58 @@ fn nested_block_on_panics() {
     assert!(
         result.is_err(),
         "a nested block_on must panic via the reentrancy guard"
+    );
+}
+
+/// Runtime ownership is tied to the OS thread rather than to a single driver
+/// entry. The final TLS teardown closes external handles even when the thread
+/// only used `block_on` and never called `run`.
+#[test]
+fn thread_exit_after_block_on_closes_external_handle() {
+    let handle = std::thread::spawn(|| {
+        let handle = runite::current_thread_handle();
+        runite::block_on(async {});
+        assert!(handle.is_current());
+        assert!(!handle.is_closed());
+        handle
+    })
+    .join()
+    .expect("runtime thread should exit cleanly");
+
+    assert!(handle.is_closed());
+    assert!(!handle.is_current());
+    assert!(matches!(
+        handle.queue_macrotask(|| {}),
+        Err(QueueError::Closed)
+    ));
+}
+
+/// Unix may safely run full fallback cleanup from its TLS destructor. Windows
+/// invokes TLS destructors under the loader lock, so arbitrary user threads
+/// publish `Closed` but deliberately leak residual driver/task state; owned
+/// runite workers use an explicit pre-return teardown guard instead.
+#[test]
+fn ordinary_thread_exit_uses_platform_safe_cleanup() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let dropped_by_future = Arc::clone(&dropped);
+
+    std::thread::spawn(move || {
+        runite::spawn(PendingDrop {
+            dropped: dropped_by_future,
+        });
+        runite::block_on(async {});
+    })
+    .join()
+    .expect("ordinary runtime thread should exit cleanly");
+
+    #[cfg(not(windows))]
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "Unix TLS teardown should perform full task cleanup"
+    );
+    #[cfg(windows)]
+    assert!(
+        !dropped.load(Ordering::Acquire),
+        "Windows loader-lock fallback must not run arbitrary task destructors"
     );
 }

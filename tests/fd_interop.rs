@@ -30,14 +30,14 @@ async fn tcp_listener_from_std_accepts() {
     server.await.expect("server task");
 }
 
-/// `From<OwnedFd>` adopts a raw owned descriptor without touching its mode.
+/// `from_owned` adopts a raw owned descriptor through the fallible common API.
 #[runite::test]
 async fn tcp_listener_from_owned_fd_constructs() {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("std bind");
     let owned = OwnedFd::from(std_listener);
     let raw = owned.as_raw_fd();
 
-    let listener = runite::net::TcpListener::from(owned);
+    let listener = runite::net::TcpListener::from_owned(owned).expect("from_owned");
     assert_eq!(listener.as_raw_fd(), raw);
 }
 
@@ -53,7 +53,7 @@ async fn file_from_std_reads() {
     }
 
     let std_file = std::fs::File::open(&path).expect("std open");
-    let mut file = runite::fs::File::from_std(std_file);
+    let mut file = runite::fs::File::from_std(std_file).expect("from_std");
     assert!(file.as_raw_fd() >= 0);
 
     let mut contents = Vec::new();

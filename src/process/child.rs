@@ -30,6 +30,7 @@ use super::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
 /// until some handle waits for it. Call [`wait`](Self::wait) to reap it.
 pub struct Child {
     inner: crate::sys::current::process::Child,
+    stdin_handoff: Option<crate::stdio::InheritedStdinHandoff>,
     /// Handle to child stdin when configured with [`super::Stdio::piped`].
     pub stdin: Option<ChildStdin>,
     /// Handle to child stdout when configured with [`super::Stdio::piped`].
@@ -39,12 +40,16 @@ pub struct Child {
 }
 
 impl Child {
-    pub(crate) fn from_inner(mut inner: crate::sys::current::process::Child) -> Self {
+    pub(crate) fn from_inner(
+        mut inner: crate::sys::current::process::Child,
+        stdin_handoff: Option<crate::stdio::InheritedStdinHandoff>,
+    ) -> Self {
         let stdin = inner.stdin.take().map(ChildStdin::from_pipe);
         let stdout = inner.stdout.take().map(ChildStdout::from_pipe);
         let stderr = inner.stderr.take().map(ChildStderr::from_pipe);
         Self {
             inner,
+            stdin_handoff,
             stdin,
             stdout,
             stderr,
@@ -87,9 +92,14 @@ impl Child {
     /// # }
     /// ```
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.inner
+        let status = self
+            .inner
             .try_wait()
-            .map(|status| status.map(ExitStatus::from_std))
+            .map(|status| status.map(ExitStatus::from_std))?;
+        if status.is_some() {
+            self.stdin_handoff = None;
+        }
+        Ok(status)
     }
 
     /// Waits asynchronously for the child to exit.
@@ -111,7 +121,9 @@ impl Child {
     /// # }
     /// ```
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.inner.wait().await.map(ExitStatus::from_std)
+        let status = self.inner.wait().await.map(ExitStatus::from_std)?;
+        self.stdin_handoff = None;
+        Ok(status)
     }
 
     /// Sends a forceful termination request to the child.

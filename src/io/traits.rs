@@ -1,8 +1,9 @@
 //! Poll-based asynchronous byte I/O traits.
 //!
-//! This module contains the core [`AsyncRead`] and [`AsyncWrite`] traits used by
-//! runite's files, sockets, process pipes, and adapters. Implementations expose
-//! non-blocking poll methods; extension traits such as
+//! This module contains the core [`AsyncRead`], [`AsyncBufRead`],
+//! [`AsyncWrite`], and [`AsyncSeek`] traits used by runite's files, sockets,
+//! process pipes, and adapters. Implementations expose non-blocking poll
+//! methods; extension traits such as
 //! [`AsyncReadExt`](super::AsyncReadExt) turn those poll methods into futures for
 //! everyday async code.
 //!
@@ -71,7 +72,7 @@
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut, SeekFrom};
 
 /// Asynchronous byte-oriented input.
 ///
@@ -130,6 +131,82 @@ pub trait AsyncRead {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>>;
+
+    /// Attempts to read into a sequence of byte slices.
+    ///
+    /// The default implementation reads into the first non-empty slice using
+    /// [`poll_read`](Self::poll_read). Implementations may override this to use
+    /// a platform vectored-I/O primitive. Returning `Ok(0)` means EOF only when
+    /// at least one supplied slice was non-empty; an empty slice list (or a
+    /// list containing only empty slices) completes with `Ok(0)` immediately.
+    fn poll_read_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter_mut().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_read(cx, buf),
+            None => Poll::Ready(Ok(0)),
+        }
+    }
+}
+
+/// Asynchronous buffered input.
+///
+/// `AsyncBufRead` exposes bytes already read from the underlying transport so
+/// parsers can inspect them without copying. After a successful
+/// [`poll_fill_buf`](Self::poll_fill_buf), call [`consume`](Self::consume) with
+/// the number of bytes used before requesting more input.
+///
+/// Implementations must keep the returned slice valid until the reader is
+/// polled or consumed again. An empty slice means EOF.
+///
+/// # Examples
+///
+/// ```
+/// use core::pin::Pin;
+/// use core::task::{Context, Poll, Waker};
+/// use std::io;
+///
+/// use runite::io::{AsyncBufRead, AsyncRead, BufReader};
+///
+/// struct Bytes(&'static [u8]);
+///
+/// impl AsyncRead for Bytes {
+///     fn poll_read(
+///         mut self: Pin<&mut Self>,
+///         _cx: &mut Context<'_>,
+///         buf: &mut [u8],
+///     ) -> Poll<io::Result<usize>> {
+///         let read = buf.len().min(self.0.len());
+///         buf[..read].copy_from_slice(&self.0[..read]);
+///         self.0 = &self.0[read..];
+///         Poll::Ready(Ok(read))
+///     }
+/// }
+///
+/// let mut reader = BufReader::with_capacity(4, Bytes(b"head:body"));
+/// let mut cx = Context::from_waker(Waker::noop());
+/// let Poll::Ready(Ok(bytes)) =
+///     AsyncBufRead::poll_fill_buf(Pin::new(&mut reader), &mut cx)
+/// else {
+///     panic!("memory reader should be ready");
+/// };
+/// assert_eq!(bytes, b"head");
+/// AsyncBufRead::consume(Pin::new(&mut reader), 4);
+/// ```
+pub trait AsyncBufRead: AsyncRead {
+    /// Returns currently buffered bytes, refilling the buffer when necessary.
+    ///
+    /// Returns [`Poll::Pending`] when a refill is in progress. A successful
+    /// empty slice indicates EOF.
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>>;
+
+    /// Marks `amount` bytes from the most recent filled buffer as consumed.
+    ///
+    /// Implementations should clamp values larger than the available buffer
+    /// rather than advancing beyond initialized data.
+    fn consume(self: Pin<&mut Self>, amount: usize);
 }
 
 /// Asynchronous byte-oriented output.
@@ -194,11 +271,64 @@ pub trait AsyncWrite {
     /// the latest waker when the operation would block, `Poll::Ready(Ok(n))`
     /// after accepting `n` bytes, or `Poll::Ready(Err(error))` for an I/O error.
     /// Returning `Ok(0)` for a non-empty buffer signals that no progress was made.
+    ///
+    /// A direct caller must keep polling the same logical operation after
+    /// `Pending`. Cancellation-capable adapters should use
+    /// [`poll_write_operation`](Self::poll_write_operation) with a fresh
+    /// generation for each future.
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>>;
+
+    /// Attempts to write from a sequence of byte slices.
+    ///
+    /// The default implementation writes from the first non-empty slice using
+    /// [`poll_write`](Self::poll_write). Implementations may override this to
+    /// use a platform vectored-I/O primitive. Empty input completes with
+    /// `Ok(0)` without polling the scalar write path.
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write(cx, buf),
+            None => Poll::Ready(Ok(0)),
+        }
+    }
+
+    /// Polls a registered logical write operation.
+    ///
+    /// Runtime I/O implementations use `generation` to distinguish a re-poll
+    /// from a later future after cancellation. Custom writers can rely on the
+    /// default forwarding implementation.
+    #[doc(hidden)]
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        _generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write(cx, buf)
+    }
+
+    /// Polls a registered logical vectored write operation.
+    ///
+    /// This is the cancellation-aware counterpart to
+    /// [`poll_write_vectored`](Self::poll_write_vectored). The default forwards
+    /// to that method so custom vectored implementations remain effective.
+    /// Runtime-backed writers that use `generation` override this hook.
+    #[doc(hidden)]
+    fn poll_write_vectored_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        _generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_vectored(cx, bufs)
+    }
 
     /// Attempts to flush buffered output to the underlying destination.
     ///
@@ -211,4 +341,19 @@ pub trait AsyncWrite {
     /// After a successful close, further writes are implementation-defined and
     /// should generally be treated as errors by callers.
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+}
+
+/// Asynchronous cursor positioning.
+///
+/// Implementors reposition a logical stream cursor without blocking. If a seek
+/// cannot complete immediately, return [`Poll::Pending`], arrange a wakeup, and
+/// require the caller to continue polling the same `position` until completion.
+/// A successful result is the new byte offset from the start of the stream.
+pub trait AsyncSeek {
+    /// Attempts to reposition the stream cursor.
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        position: SeekFrom,
+    ) -> Poll<io::Result<u64>>;
 }

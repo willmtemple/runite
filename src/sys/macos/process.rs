@@ -4,8 +4,11 @@ use std::io;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command as StdCommand, ExitStatus as StdExitStatus};
-use std::time::Duration;
 
+use crate::op::completion::completion_for_current_thread;
+use crate::platform::current::runtime::{
+    QueueError, cancel_process_exit, current_thread_handle, with_current_driver,
+};
 use crate::process::pipe::Pipe;
 use crate::process::{CommandSpec, EnvChange, StdioKind};
 
@@ -102,7 +105,7 @@ impl Child {
             if let Some(status) = self.try_wait()? {
                 return Ok(status);
             }
-            wait_proc_exit_kqueue(pid).await?;
+            wait_proc_exit(pid).await?;
         }
     }
 
@@ -113,12 +116,19 @@ impl Child {
         if let Some(pid) = self.pid {
             // SAFETY: `pid` is the process id returned by spawn; `SIGKILL` has
             // no pointer arguments and does not alias Rust memory.
-            let result = unsafe { libc::kill(pid, libc::SIGKILL) };
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
+            loop {
+                let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+                if result == 0 {
+                    return Ok(());
                 }
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.raw_os_error() == Some(libc::ESRCH) && self.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                return Err(error);
             }
         }
         Ok(())
@@ -174,74 +184,42 @@ async fn write_pipe(fd: RawFd, data: Vec<u8>) -> io::Result<usize> {
     }
 }
 
-async fn wait_proc_exit_kqueue(pid: libc::pid_t) -> io::Result<()> {
-    let kqueue = Kqueue::new()?;
-    if let Err(error) = kqueue.register_proc(pid) {
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+async fn wait_proc_exit(pid: libc::pid_t) -> io::Result<()> {
+    let (future, handle) = completion_for_current_thread::<io::Result<()>>();
+    let owner = current_thread_handle();
+    let token = with_current_driver(|driver| driver.register_process_exit(pid, handle.clone()));
+    match token {
+        Ok(token) => {
+            handle.set_cancel({
+                let handle = handle.clone();
+                move || {
+                    let queued_handle = handle.clone();
+                    let queued = owner.queue_macrotask(move || {
+                        cancel_process_exit(token);
+                        queued_handle.finish(None);
+                    });
+                    match queued {
+                        Ok(()) => {}
+                        Err(QueueError::Closed) => handle.finish(None),
+                        Err(QueueError::Full) => {
+                            tracing::error!(
+                                target: crate::trace_targets::SCHEDULER,
+                                event = "process_cancel_dropped",
+                                "dropping process-wait cancellation because the remote queue is full"
+                            );
+                            handle.finish(None);
+                        }
+                    }
+                }
+            });
         }
-        return Err(error);
-    }
-    loop {
-        crate::time::sleep(Duration::from_millis(1)).await;
-        if kqueue.poll_proc_exit()? {
-            return Ok(());
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            handle.complete(Ok(()));
         }
-    }
-}
-
-struct Kqueue(RawFd);
-
-impl Kqueue {
-    fn new() -> io::Result<Self> {
-        // SAFETY: `kqueue` takes no arguments and returns a fresh descriptor or
-        // -1 with errno set.
-        let fd = cvt(unsafe { libc::kqueue() })?;
-        Ok(Self(fd))
+        Err(error) => handle.complete(Err(error)),
     }
 
-    fn register_proc(&self, pid: libc::pid_t) -> io::Result<()> {
-        let event = libc::kevent {
-            ident: pid as usize,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        // SAFETY: `self.0` is an open kqueue descriptor and `event` points to a
-        // fully initialized one-element changelist.
-        let result =
-            unsafe { libc::kevent(self.0, &event, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
-        cvt(result).map(|_| ())
-    }
-
-    fn poll_proc_exit(&self) -> io::Result<bool> {
-        // SAFETY: `kevent` is a plain C struct where all-zero is a valid output
-        // buffer before the kernel fills it.
-        let mut event = unsafe { std::mem::zeroed::<libc::kevent>() };
-        let timeout = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: `self.0` is an open kqueue descriptor, `event` is a writable
-        // one-element event buffer, and `timeout` is a valid zero timeout.
-        let result = unsafe { libc::kevent(self.0, std::ptr::null(), 0, &mut event, 1, &timeout) };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(result > 0)
-        }
-    }
-}
-
-impl Drop for Kqueue {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is owned by this Kqueue and is closed exactly once.
-        unsafe {
-            libc::close(self.0);
-        }
-    }
+    future.await
 }
 
 fn stdio(kind: StdioKind) -> std::process::Stdio {
@@ -302,5 +280,59 @@ fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
         Err(io::Error::last_os_error())
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    use std::time::Duration;
+
+    #[test]
+    fn child_wait_uses_kqueue_without_periodic_runtime_timers() {
+        crate::block_on(async {
+            let mut child = crate::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn sleeping child");
+
+            let mut wait = Box::pin(child.wait());
+            poll_fn(|cx| {
+                assert!(wait.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            assert!(
+                !crate::platform::current::runtime::with_current_driver(
+                    |driver| driver.has_armed_timer_for_test()
+                ),
+                "waiting for a child must not arm a polling timer"
+            );
+
+            drop(wait);
+            child.kill().expect("kill child");
+            let status = crate::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .expect("killed child wait should finish")
+                .expect("collect killed child");
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+        });
+    }
+
+    #[test]
+    fn child_exit_is_delivered_through_runtime_kqueue() {
+        crate::block_on(async {
+            let mut child = crate::process::Command::new("sh")
+                .args(["-c", "exit 23"])
+                .spawn()
+                .expect("spawn child");
+            let status = crate::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .expect("child wait should finish")
+                .expect("collect child");
+            assert_eq!(status.code(), Some(23));
+        });
     }
 }

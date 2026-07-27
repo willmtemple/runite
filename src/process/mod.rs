@@ -20,8 +20,9 @@
 //!
 //! On Linux, child-exit waits use pidfd readability followed by
 //! `waitpid`; runite does not rely on `SIGCHLD` for this path. On macOS aarch64,
-//! waits register `EVFILT_PROC` with kqueue and poll it after a 1ms runtime
-//! sleep. On Windows, `RegisterWaitForSingleObject` parks the process handle on
+//! waits register `EVFILT_PROC` with `NOTE_EXIT` on the runtime's own kqueue and
+//! are woken by the exit event, then reap with `waitpid`; a child that already
+//! exited is reaped directly rather than waiting for an event. On Windows, `RegisterWaitForSingleObject` parks the process handle on
 //! the OS wait-thread pool, which completes a runtime completion when the
 //! process exits. Each approach fits runite's event-loop-per-thread model:
 //! futures and handles remain on their creating runtime thread, and completions

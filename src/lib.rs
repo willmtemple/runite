@@ -1,3 +1,7 @@
+#![cfg_attr(windows, allow(clippy::arc_with_non_send_sync))]
+// Windows socket owners are intentionally !Send because of IOCP affinity;
+// the portable split-handle representation still uses Arc for local sharing.
+
 //! An event-loop-per-thread async runtime with JavaScript-style scheduling,
 //! built for interactive applications.
 //!
@@ -64,17 +68,22 @@
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
 //! - [`run`], [`queue_macrotask`], [`queue_microtask`], and [`spawn`] for
 //!   driving and feeding the event loop
-//! - [`spawn_worker`] and [`ThreadHandle`] for multi-threaded work
+//! - [`spawn_worker`], [`WorkerHandle`], and [`ThreadHandle`] for multi-threaded work
 //! - [`fs`], [`net`], [`process`], [`time`], [`signal`], and [`stdio`] for async
 //!   runtime services
 //! - [`channel`] for `mpsc`/`oneshot`/`broadcast`/`watch` channels
 //! - [`sync`] for [`Mutex`](sync::Mutex), [`Semaphore`](sync::Semaphore),
 //!   [`RwLock`](sync::RwLock), [`Notify`](sync::Notify), and
 //!   [`OnceCell`](sync::OnceCell)
-//! - [`io`] for the crate's `AsyncRead`/`AsyncWrite`/`Stream` traits and
+//! - [`io`] for the crate's `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits and
 //!   [`BufReader`](io::BufReader)/[`BufWriter`](io::BufWriter)
 //! - [`task::JoinSet`] for structured ownership of local child tasks
 //! - [`task::spawn_blocking`] for offloading blocking work to a thread pool
+//!
+//! Upgrading from 0.1? Two changes are invisible to the compiler — [`run`] now
+//! cancels tasks still pending at quiescence, and [`select!`](macro@select)
+//! no longer polls arms in lexical order. See the 0.1 → 0.2 migration guide in
+//! the repository for the full list.
 //!
 //! # Cargo features
 //!
@@ -100,29 +109,37 @@
 //!
 //! ## Minimum Linux kernel
 //!
-//! The io_uring backend targets **Linux 6.1 or newer** (the current LTS line),
-//! which is what CI and the maintainers test against. It may run on older
-//! kernels subject to the feature notes below, but that is not tested.
+//! The io_uring backend recommends **Linux 6.1 or newer**. The hard floor is
+//! 5.6; newer opcodes are selected opportunistically. CI runs on GitHub-hosted
+//! Ubuntu runners (currently 6.8+) without pinning a kernel version, so the
+//! fallback paths below are exercised by opcode-capability injection tests
+//! rather than against an actual older kernel.
 //!
 //! Hard requirements (no fallback — the runtime will not function without them):
 //! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
 //!   and friends, which every file and socket operation builds on.
-//! - **5.18** — `IORING_OP_MSG_RING`, used to wake one runtime thread from
-//!   another. A single-threaded runtime can run without it, but
-//!   [`spawn_worker`]-based multithreading (and any cross-thread
-//!   [`ThreadHandle`] wake) requires 5.18+.
 //!
-//! Soft requirements (a synchronous syscall fallback runs transparently on
-//! older kernels, so only native-io_uring performance is affected):
+//! Optional kernel acceleration:
+//! - **5.18** — `IORING_OP_MSG_RING`, preferred for cross-thread runtime wakes.
+//!   Older kernels transparently use a nonblocking `eventfd` watched by the
+//!   target ring, including for blocking-pool completions and [`spawn_worker`].
+//!
+//! Other fallbacks affect native-io_uring coverage, not API availability:
 //! - File truncation ([`OpenOptions::truncate`](fs::OpenOptions::truncate),
 //!   [`File::set_len`](fs::File::set_len)) uses `IORING_OP_FTRUNCATE` (6.9) and
 //!   falls back to `ftruncate(2)`.
+//! - Directory operations ([`create_dir`](fs::create_dir),
+//!   [`rename`](fs::rename), [`remove_file`](fs::remove_file),
+//!   [`remove_dir`](fs::remove_dir)) use `IORING_OP_MKDIRAT` (5.15),
+//!   `IORING_OP_RENAMEAT` (5.11), and `IORING_OP_UNLINKAT` (5.11), falling back
+//!   to the corresponding `*at(2)` syscall on the blocking pool.
 //! - The socket lifecycle operations — `socket` (5.19), `bind`/`listen` (6.11),
-//!   and `connect`/`accept`/`shutdown`/`send`/`recv` — fall back to their
-//!   blocking equivalents when the kernel lacks the opcode.
+//!   and later `connect`/`accept`/`shutdown`/`send`/`recv` opcodes — fall back
+//!   to nonblocking control calls or an io_uring readiness wait, never a
+//!   blocking-pool data operation.
 //!
-//! So the recommended 6.1 LTS floor exercises every feature; the only hard
-//! lower bounds are 5.6 (single-threaded) and 5.18 (multithreaded).
+//! Thus the recommended 6.1 baseline does not imply every newer native opcode.
+//! The hard lower bound remains 5.6 for both single- and multithreaded runtimes.
 
 #![deny(missing_docs)]
 // docs.rs passes --cfg docsrs (see [package.metadata.docs.rs]); `doc_cfg`
@@ -171,6 +188,9 @@ pub(crate) mod sys;
 pub mod task;
 pub mod time;
 
+#[cfg(test)]
+mod logic_safety_tests;
+
 #[doc(hidden)]
 pub mod macros;
 
@@ -205,6 +225,7 @@ mod runtime_api {
         AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
         WorkerHandle, YieldNow, yield_now,
     };
+    pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
 
     /// Queues a one-shot closure to run as a macrotask on the current runtime thread.
     ///
@@ -272,9 +293,12 @@ mod runtime_api {
     /// Spawns `future` onto the current runtime thread and returns a [`JoinHandle`].
     ///
     /// The future runs concurrently with other tasks on this thread. Awaiting the
-    /// returned handle yields `Result<T, JoinError>`: `Ok` with the output, or
-    /// [`Err(JoinError::Aborted)`](crate::task::JoinError) if the task was aborted.
-    /// Dropping the handle detaches the task; it keeps running to completion.
+    /// returned handle yields `Result<T, JoinError>`: `Ok` with the output,
+    /// [`Err(JoinError::Aborted)`](crate::task::JoinError) after explicit
+    /// abort, or [`Err(JoinError::Cancelled)`](crate::task::JoinError) if
+    /// `run()` reaches quiescence with no scheduler-visible wake source.
+    /// Dropping the handle detaches the task; it remains scheduled but may
+    /// still be shutdown-cancelled at quiescence.
     ///
     /// The future is `!Send` and never migrates off this thread. It is first
     /// scheduled as a microtask; its first poll happens when the runtime drains
@@ -315,14 +339,16 @@ mod runtime_api {
     /// runs first on the worker. After the worker completes, `on_exit` is queued
     /// as a macrotask on the parent runtime thread, so its captured state does
     /// not need to be `Send`.
-    /// Returns a [`WorkerHandle`] for joining or queueing further work via
-    /// [`ThreadHandle::queue_macrotask`]. This is the building block for scaling across
-    /// cores: start one worker per core. See the crate's architecture guide.
+    /// Returns a [`WorkerHandle`] for queueing further work or awaiting full
+    /// worker teardown with [`WorkerHandle::join`]. This is the building block
+    /// for scaling across cores: start one worker per core. See the crate's
+    /// architecture guide.
     ///
     /// # Panics
     ///
     /// Panics if the parent runtime state cannot be initialized, the worker
-    /// runtime driver cannot be created, or the OS thread cannot be spawned.
+    /// runtime driver cannot be created, or the worker/reaper OS threads cannot
+    /// be spawned.
     ///
     /// # Examples
     ///
@@ -330,7 +356,7 @@ mod runtime_api {
     /// use std::sync::mpsc;
     ///
     /// let (tx, rx) = mpsc::channel();
-    /// let _worker = runite::spawn_worker(
+    /// let worker = runite::spawn_worker(
     ///     move || {
     ///         runite::spawn(async move {
     ///             tx.send(7u32).unwrap();
@@ -338,6 +364,7 @@ mod runtime_api {
     ///     },
     ///     || {},
     /// );
+    /// runite::block_on(worker.join()).expect("worker should exit normally");
     /// assert_eq!(rx.recv().unwrap(), 7);
     /// ```
     pub fn spawn_worker<Init, Exit>(initial_task: Init, on_exit: Exit) -> WorkerHandle
@@ -371,10 +398,22 @@ mod runtime_api {
 
     /// Runs the current thread's event loop until all work is complete.
     ///
-    /// Drives queued tasks, microtasks, timers, and I/O completions until the
-    /// runtime is idle (no pending tasks, futures, timers, or active intervals),
-    /// then returns. This is what [`main`](crate::main) calls after queueing the
-    /// entry point.
+    /// Drives queued tasks, microtasks, timers, and I/O completions until no
+    /// ready work, pending timers, live child workers, or in-flight async
+    /// operations remain, then returns. On an ordinary thread, the driver
+    /// remains installed for later `run`/`block_on` entries. This is what
+    /// [`main`](crate::main) calls after queueing the entry point.
+    ///
+    /// A spawned task that is still pending at that point is resolved to
+    /// [`JoinError::Cancelled`](crate::task::JoinError) and its future is
+    /// dropped. Note that a task is only kept alive by a wake source the
+    /// scheduler can see: runite channels, timers, I/O, `spawn_blocking`,
+    /// signals, and [`WorkerHandle::join`] all register liveness, but a bare
+    /// [`Waker`](std::task::Waker) clone handed to a foreign thread does not.
+    ///
+    /// **Changed in 0.2**: in 0.1 a pending task outlived `run()` and could be
+    /// resumed by a later call. See the
+    /// [migration guide](https://github.com/willmtemple/runite/blob/main/docs/MIGRATING-0.2.md).
     ///
     /// # Panics
     ///
@@ -441,8 +480,9 @@ mod runtime_api {
     ///
     /// # Panics
     ///
-    /// Panics if runtime or driver initialization fails, or if the platform
-    /// driver returns an unexpected error while polling ready events.
+    /// Panics if runtime or driver initialization fails, if the platform
+    /// driver returns an unexpected error while polling ready events, or if
+    /// called while this thread is already driving the runtime.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
     }
@@ -455,7 +495,8 @@ mod runtime_api {
     /// # Panics
     ///
     /// Panics if the current thread's runtime state or driver cannot be
-    /// initialized.
+    /// initialized, or if called while this thread is already driving the
+    /// runtime.
     pub fn run_ready_tasks() {
         imp::run_ready_tasks()
     }

@@ -1,0 +1,5 @@
+error: runite test functions cannot take parameters
+ --> tests/ui/fail/test_macro_argument.rs:5:23
+  |
+5 | async fn invalid_test(_value: usize) {}
+  |                       ^^^^^^^^^^^^^

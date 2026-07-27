@@ -4,12 +4,19 @@
 # Reproducibility model: the version specs below are intentionally loose
 # (track stable). Exact resolved versions + checksums are pinned in `mise.lock`
 # (committed), so `mise install` is fully reproducible. To intentionally update
-# the toolchain, run `mise upgrade` (bumps within the spec) followed by
-# `mise lock`, then commit the refreshed `mise.lock`.
+# the toolchain, use the mise release pinned in CONTRIBUTING.md and every
+# jdx/mise-action invocation, run `mise upgrade` followed by `mise lock`, then
+# commit the refreshed lockfile and any mise-version pin update together.
 
 [settings]
 # Pin exact versions + checksums in mise.lock instead of hard-coding them here.
 lockfile = true
+
+[env]
+# Shared by API reporting, Miri, and sanitizer jobs. Keep this synchronized
+# with `RUSTDOC_TOOLCHAIN` in xtask/src/api_report.rs.
+RUNITE_CI_NIGHTLY = "nightly-2026-07-01"
+RUNITE_SANITIZER_TARGET = "x86_64-unknown-linux-gnu"
 
 [tools]
 # Track stable Rust 1.x; `mise.lock` pins the exact patch release. runite is
@@ -20,15 +27,15 @@ lockfile = true
 # backend installs a minimal profile otherwise.
 rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 
-# Agent Cop static-analysis tool, installed from GitHub release binaries; the
-# exact release is pinned in `mise.lock`. https://github.com/KrzysztofCwalina/cop
-"github:KrzysztofCwalina/cop" = { version = "latest", exe = "cop" }
-
 # `cargo public-api` powers `mise run api-report`, which renders the crate's
 # public surface as reviewable markdown (docs/public-api.md). It shells out to a
 # nightly rustdoc to emit rustdoc JSON, so the report is a local/dev tool rather
 # than part of the `check` gate.
 "cargo:cargo-public-api" = "0.52.0"
+
+# Workflow syntax and expression validation. The exact binary/checksum is
+# recorded in mise.lock like the other GitHub-hosted tools.
+"github:rhysd/actionlint" = "1.7.7"
 
 [tasks.build]
 description = "Build the workspace"
@@ -51,12 +58,199 @@ description = "Build documentation"
 run = "cargo doc --workspace --all-features --no-deps"
 
 [tasks.api-report]
-description = "Render the public API surface to docs/public-api.md for review"
+description = "Render portable, per-target, and per-feature public API surfaces"
 run = "cargo run --quiet --package xtask -- api-report"
 
 [tasks.api-report-check]
-description = "Fail if docs/public-api.md is stale (regenerate with api-report)"
+description = "Check all supported target/feature API surfaces and the committed report"
 run = "cargo run --quiet --package xtask -- api-report --check"
+
+[tasks.package-verify]
+description = "Package, unpack, patch, and verify both release artifacts"
+run = "cargo run --quiet --package xtask -- release-verify"
+
+[tasks.release-verify]
+description = "Verify both release artifacts on current Rust and the MSRV"
+run = "cargo run --quiet --package xtask -- release-verify --msrv"
+
+[tasks.ci-script-test]
+description = "Test focused CI selectors, benchmark artifacts, workflow pins, and release gating"
+run = "python3 -m unittest discover -s .github/scripts -p 'test_*.py'"
+
+[tasks.ci-lint]
+description = "Validate GitHub Actions workflow YAML and expressions"
+run = "actionlint .github/workflows/*.yml"
+
+[tasks.ci-nightly-install]
+description = "Install the pinned nightly with Miri and sanitizer components"
+run = """
+rustup toolchain install "$RUNITE_CI_NIGHTLY" \
+  --profile minimal \
+  --component miri \
+  --component rust-src \
+  --component llvm-tools \
+  --no-self-update
+"""
+
+[tasks.miri]
+description = "Run driver-free scheduler, task, timer, channel, sync, and pending-state tests"
+depends = ["ci-nightly-install"]
+shell = "bash -c"
+run = """
+set -euo pipefail
+export CARGO_TARGET_DIR=target/miri
+export MIRIFLAGS='-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check'
+timeout --signal=TERM --kill-after=30s 25m \
+  python3 .github/scripts/ci_test_selector.py --contract logic-safety -- \
+    cargo +"$RUNITE_CI_NIGHTLY" miri test \
+      --locked --package runite --all-features --lib \
+      logic_safety_tests:: -- --test-threads=1
+"""
+
+[tasks.asan]
+description = "Run Linux cancellation, resource-churn, and io_uring teardown tests under ASan"
+depends = ["ci-nightly-install"]
+shell = "bash -c"
+run = """
+set -euo pipefail
+export CARGO_TARGET_DIR=target/asan
+export RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes'
+export ASAN_OPTIONS='detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1'
+deadline=$((SECONDS + 1500))
+asan_test() {
+  local contract=$1
+  shift
+  local remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then
+    echo 'ASan suite exceeded 25 minutes' >&2
+    return 124
+  fi
+  timeout --signal=TERM --kill-after=30s "${remaining}s" \
+    python3 .github/scripts/ci_test_selector.py --contract "$contract" -- \
+      cargo +"$RUNITE_CI_NIGHTLY" test -Zbuild-std \
+        --target "$RUNITE_SANITIZER_TARGET" \
+        --locked --package runite --all-features "$@"
+}
+asan_test asan-cancellation --test cancellation -- --test-threads=1
+asan_test asan-io-compat --test io_compat compat_file_ -- --test-threads=1
+asan_test asan-io-traits --test io_traits cancel -- --test-threads=1
+asan_test asan-driver-shutdown --lib \
+  platform::linux::driver::tests::shutdown_flushes_cancel_and_drains_original_terminal_cqe \
+  -- --exact --test-threads=1
+asan_test asan-runtime-read-teardown --lib \
+  platform::linux::runtime::tests::pending_read_teardown_quiesces_before_retained_handle_drops \
+  -- --exact --test-threads=1
+asan_test asan-fs-read-drop --lib fs::tests::read_drop_during_inflight_does_not_uaf \
+  -- --exact --test-threads=1
+asan_test asan-net-accept --lib \
+  sys::linux::net::tests::uninterested_accept_completion_closes_owned_descriptor \
+  -- --exact --test-threads=1
+"""
+
+[tasks.tsan]
+description = "Run driver-free channel, watch, waker, worker, and completion tests under TSan"
+depends = ["ci-nightly-install"]
+shell = "bash -c"
+run = """
+set -euo pipefail
+export CARGO_TARGET_DIR=target/tsan
+export RUSTFLAGS='-Zsanitizer=thread -Cforce-frame-pointers=yes'
+export TSAN_OPTIONS='halt_on_error=1:second_deadlock_stack=1:history_size=7'
+timeout --signal=TERM --kill-after=30s 25m \
+  python3 .github/scripts/ci_test_selector.py --contract logic-safety -- \
+    cargo +"$RUNITE_CI_NIGHTLY" test -Zbuild-std \
+      --target "$RUNITE_SANITIZER_TARGET" \
+      --locked --package runite --all-features --lib \
+      logic_safety_tests:: -- --test-threads=1
+"""
+
+[tasks.capability-matrix]
+description = "Test injected old-kernel io_uring dispatch on a compatible Linux kernel"
+shell = "bash -c"
+run = """
+set -euo pipefail
+uname -srvo
+timeout --signal=TERM --kill-after=30s 10m \
+  python3 .github/scripts/ci_test_selector.py --contract capability-matrix -- \
+    cargo test --locked --package runite --all-features --lib \
+      capability_matrix_ -- --test-threads=1
+"""
+
+[tasks.stress-issue-6]
+description = "Repeat merged doctests and blocking-runtime liveness regressions"
+shell = "bash -c"
+run = """
+set -euo pipefail
+iterations=${RUNITE_STRESS_ITERATIONS:-10}
+deadline=$((SECONDS + 1200))
+stress_command() {
+  local remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then
+    echo 'issue #6 stress suite exceeded 20 minutes' >&2
+    return 124
+  fi
+  timeout --signal=TERM --kill-after=30s "${remaining}s" "$@"
+}
+stress_command python3 .github/scripts/ci_test_selector.py \
+  --preflight-only --contract stress-task -- \
+  cargo test --locked --package runite --all-features --lib \
+    task::tests:: -- --test-threads=1
+stress_command python3 .github/scripts/ci_test_selector.py \
+  --preflight-only --contract stress-completion -- \
+  cargo test --locked --package runite --all-features --lib \
+    platform::runtime_shared::test_support::tests::completion_between_ready_check_and_idle_commit_is_not_cancelled \
+    -- --exact --test-threads=1
+for iteration in $(seq 1 "$iterations"); do
+  echo "== issue #6 stress iteration $iteration/$iterations"
+  stress_command cargo test --locked --workspace --all-features --doc
+  stress_command cargo test --locked --package runite --all-features --lib \
+    task::tests:: -- --test-threads=1
+  stress_command cargo test --locked --package runite --all-features --lib \
+    platform::runtime_shared::test_support::tests::completion_between_ready_check_and_idle_commit_is_not_cancelled \
+    -- --exact --test-threads=1
+done
+"""
+
+[tasks.bench-io-uring-ab]
+description = "Capture immediate-vs-deferred io_uring Criterion artifacts without a timing gate"
+shell = "bash -c"
+run = """
+set -euo pipefail
+benchmark_filter=${RUNITE_IO_URING_BENCH_FILTER:-tcp_echo/loopback_16k}
+rm -rf target/criterion/tcp_echo target/criterion/io-uring-ab-metadata.txt
+deadline=$((SECONDS + 1200))
+bench_mode() {
+  local mode=$1
+  local setting=$2
+  local remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then
+    echo 'io_uring A/B benchmark exceeded 20 minutes' >&2
+    return 124
+  fi
+  echo "== io_uring submission mode: $mode"
+  RUNITE_IO_URING_DEFER_SUBMISSIONS=$setting \
+    timeout --signal=TERM --kill-after=30s "${remaining}s" \
+      cargo bench --locked --package runite --all-features --bench io -- \
+        "$benchmark_filter" --warm-up-time 0.2 --measurement-time 1 \
+        --sample-size 10 --noplot --save-baseline "$mode"
+}
+bench_mode immediate 0
+bench_mode deferred 1
+python3 .github/scripts/criterion_ab.py \
+  --criterion-root target/criterion \
+  --benchmark tcp_echo/loopback_16k \
+  --baseline immediate \
+  --baseline deferred \
+  --minimum-samples 10
+mkdir -p target/criterion
+{
+  echo "benchmark_filter=$benchmark_filter"
+  echo "rust=$(rustc --version)"
+  echo "kernel=$(uname -srvo)"
+  echo "commit=$(git rev-parse --verify HEAD)"
+  echo 'gate=artifact-only (hardware variance makes a wall-clock threshold unsound)'
+} >target/criterion/io-uring-ab-metadata.txt
+"""
 
 [tasks.examples]
 description = "Smoke-run every example to completion (the interactive ones via --demo)"
@@ -94,14 +288,6 @@ run = [
 description = "Emit lcov coverage for CI consumption"
 run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info"
 
-[tasks.cop]
-description = "Run Agent Cop static-analysis checks"
-run = "cop cop-checks/main.cop -t ."
-
-[tasks.cop-verify]
-description = "Verify cop rule files compile"
-run = "cop verify cop-checks/"
-
 [tasks.check]
-description = "Run the full local gate (fmt, lint, test, cop)"
-depends = ["fmt", "lint", "test", "cop"]
+description = "Run the full local gate (fmt, lint, test, workflows, release gate)"
+depends = ["fmt", "lint", "test", "ci-lint", "ci-script-test"]

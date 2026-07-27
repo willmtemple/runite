@@ -21,11 +21,12 @@
 //! runite::run();
 //! ```
 
+use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::ffi::c_void;
-use std::io;
+use std::io::{self, IoSlice};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -34,11 +35,7 @@ use std::os::unix::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::io::{AsyncRead, AsyncWrite, ReadOverflow, Stream};
-
-type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
-type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
-type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
+use crate::io::{AsyncRead, AsyncWrite, ReadState, Stream, WriteState};
 use crate::op::net::NetOp;
 
 /// Async Unix domain stream socket.
@@ -55,12 +52,10 @@ use crate::op::net::NetOp;
 /// runite stream types it is effectively `!Send` and should be driven on its
 /// owning runtime thread.
 pub struct UnixStream {
+    // Pending operations must be dropped before the socket owner.
+    read_state: RefCell<ReadState>,
+    write_state: RefCell<WriteState>,
     inner: Arc<UnixStreamInner>,
-    pending_read: Option<PendingRead>,
-    read_overflow: Option<Box<ReadOverflow>>,
-    pending_write: Option<PendingWrite>,
-    pending_write_ident: Option<(*const u8, usize)>,
-    pending_shutdown: Option<PendingShutdown>,
 }
 
 #[derive(Debug)]
@@ -152,7 +147,9 @@ impl UnixStream {
     /// [`write_all`](Self::write_all) to keep writing until the full buffer is
     /// sent.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
+        let generation = crate::io::next_operation_id();
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write_operation(cx, buf, generation))
+            .await
     }
 
     /// Writes the entire buffer to the stream.
@@ -192,7 +189,16 @@ impl UnixStream {
 
     /// Shuts down the read, write, or both halves of the connection.
     pub async fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        crate::sys::current::net::shutdown_future(self.raw_fd(), how).await
+        core::future::poll_fn(|cx| {
+            poll_unix_stream_shutdown(
+                &mut self.read_state.borrow_mut(),
+                &mut self.write_state.borrow_mut(),
+                &self.inner,
+                cx,
+                how,
+            )
+        })
+        .await
     }
 
     /// Splits this stream into independently owned read and write halves.
@@ -202,11 +208,17 @@ impl UnixStream {
     /// read and write concurrently. Recombine them with
     /// [`UnixStream::reunite`].
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        let read = Self::from_shared(Arc::clone(&self.inner));
-        let write = Self::from_shared(self.inner);
+        let Self {
+            read_state,
+            write_state,
+            inner,
+        } = self;
         (
-            OwnedReadHalf { stream: read },
-            OwnedWriteHalf { stream: write },
+            OwnedReadHalf {
+                read_state,
+                inner: Arc::clone(&inner),
+            },
+            OwnedWriteHalf { write_state, inner },
         )
     }
 
@@ -216,9 +228,18 @@ impl UnixStream {
     /// Returns [`ReuniteError`] if the halves came from different streams.
     #[allow(clippy::result_large_err)]
     pub fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<Self, ReuniteError> {
-        if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
-            drop(read);
-            Ok(write.stream)
+        if Arc::ptr_eq(&read.inner, &write.inner) {
+            let OwnedReadHalf {
+                read_state,
+                inner: read_inner,
+            } = read;
+            let OwnedWriteHalf { write_state, inner } = write;
+            drop(read_inner);
+            Ok(Self {
+                read_state,
+                write_state,
+                inner,
+            })
         } else {
             Err(ReuniteError(read, write))
         }
@@ -230,17 +251,79 @@ impl UnixStream {
 
     fn from_shared(inner: Arc<UnixStreamInner>) -> Self {
         Self {
+            read_state: RefCell::new(ReadState::default()),
+            write_state: RefCell::new(WriteState::default()),
             inner,
-            pending_read: None,
-            read_overflow: None,
-            pending_write: None,
-            pending_write_ident: None,
-            pending_shutdown: None,
         }
     }
 
     fn raw_fd(&self) -> RawFd {
         self.inner.fd.as_raw_fd()
+    }
+}
+
+fn poll_unix_read(
+    read_state: &mut ReadState,
+    inner: &UnixStreamInner,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let fd = inner.fd.as_raw_fd();
+    read_state.poll_slice(cx, buf, move |len| {
+        crate::sys::current::net::recv_future(fd, len)
+    })
+}
+
+fn poll_unix_write(
+    write_state: &mut WriteState,
+    inner: &UnixStreamInner,
+    cx: &mut Context<'_>,
+    generation: u64,
+    buf: &[u8],
+) -> Poll<io::Result<usize>> {
+    let fd = inner.fd.as_raw_fd();
+    write_state.poll_write(cx, generation, buf, move |data| {
+        crate::sys::current::net::send_future(fd, data)
+    })
+}
+
+fn poll_unix_shutdown(
+    write_state: &mut WriteState,
+    inner: &UnixStreamInner,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    let fd = inner.fd.as_raw_fd();
+    write_state.poll_shutdown(cx, move || {
+        crate::sys::current::net::shutdown_future(fd, Shutdown::Write)
+    })
+}
+
+fn poll_unix_stream_shutdown(
+    read_state: &mut ReadState,
+    write_state: &mut WriteState,
+    inner: &UnixStreamInner,
+    cx: &mut Context<'_>,
+    how: Shutdown,
+) -> Poll<io::Result<()>> {
+    let fd = inner.fd.as_raw_fd();
+    match how {
+        Shutdown::Read => read_state.poll_shutdown(cx, move || {
+            crate::sys::current::net::shutdown_future(fd, Shutdown::Read)
+        }),
+        Shutdown::Write => poll_unix_shutdown(write_state, inner, cx),
+        Shutdown::Both => {
+            let read = read_state.poll_shutdown(cx, move || {
+                crate::sys::current::net::shutdown_future(fd, Shutdown::Read)
+            });
+            let write = poll_unix_shutdown(write_state, inner, cx);
+            match (read, write) {
+                (Poll::Ready(read), Poll::Ready(write)) => match (read, write) {
+                    (Err(error), _) | (_, Err(error)) => Poll::Ready(Err(error)),
+                    (Ok(()), Ok(())) => Poll::Ready(Ok(())),
+                },
+                _ => Poll::Pending,
+            }
+        }
     }
 }
 
@@ -250,47 +333,8 @@ impl AsyncRead for UnixStream {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
         let this = self.get_mut();
-
-        // Serve bytes a previous read produced that overflowed a smaller caller
-        // buffer before submitting or polling a new read.
-        if let Some(overflow) = this.read_overflow.as_mut() {
-            let n = overflow.drain_into(buf);
-            if overflow.is_drained() {
-                this.read_overflow = None;
-            }
-            return Poll::Ready(Ok(n));
-        }
-
-        if this.pending_read.is_none() {
-            this.pending_read = Some(crate::sys::current::net::recv_future(
-                this.raw_fd(),
-                buf.len(),
-            ));
-        }
-
-        match this
-            .pending_read
-            .as_mut()
-            .expect("pending read must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_read = None;
-                let data = result?;
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                if data.len() > n {
-                    this.read_overflow = Some(Box::new(ReadOverflow::new(&data[n..])));
-                }
-                Poll::Ready(Ok(n))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        poll_unix_read(this.read_state.get_mut(), &this.inner, cx, buf)
     }
 }
 
@@ -300,69 +344,41 @@ impl AsyncWrite for UnixStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        let this = self.get_mut();
-        let ident = (buf.as_ptr(), buf.len());
-        if this.pending_write.is_none() {
-            this.pending_write = Some(crate::sys::current::net::send_future(
-                this.raw_fd(),
-                buf.to_vec(),
-            ));
-            this.pending_write_ident = Some(ident);
-        } else if this.pending_write_ident != Some(ident) {
-            // A write is in flight for a *different* buffer: the future that
-            // submitted it was dropped mid-flight. Those bytes are already
-            // committed to the kernel, so counting this op against the new
-            // buffer would corrupt the stream. Reject instead.
-            return Poll::Ready(Err(io::Error::other(
-                "write buffer changed while a previous write was still in flight",
-            )));
-        }
+        self.poll_write_operation(cx, buf, 0)
+    }
 
-        match this
-            .pending_write
-            .as_mut()
-            .expect("pending write must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_write = None;
-                this.pending_write_ident = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        poll_unix_write(this.write_state.get_mut(), &this.inner, cx, generation, buf)
+    }
+
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // An abandoned write stays owned by the socket, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.get_mut().poll_flush(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.pending_shutdown.is_none() {
-            this.pending_shutdown = Some(crate::sys::current::net::shutdown_future(
-                this.raw_fd(),
-                Shutdown::Write,
-            ));
-        }
-
-        match this
-            .pending_shutdown
-            .as_mut()
-            .expect("pending shutdown must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_shutdown = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        poll_unix_shutdown(this.write_state.get_mut(), &this.inner, cx)
     }
 }
 
@@ -370,7 +386,9 @@ impl AsyncWrite for UnixStream {
 /// [`UnixStream::into_split`]. Implements [`AsyncRead`].
 #[derive(Debug)]
 pub struct OwnedReadHalf {
-    stream: UnixStream,
+    // Pending reads must be dropped before the socket owner.
+    read_state: RefCell<ReadState>,
+    inner: Arc<UnixStreamInner>,
 }
 
 /// Owned write half of a [`UnixStream`], created by
@@ -378,7 +396,9 @@ pub struct OwnedReadHalf {
 /// use [`shutdown`](Self::shutdown) to half-close the write direction.
 #[derive(Debug)]
 pub struct OwnedWriteHalf {
-    stream: UnixStream,
+    // Pending writes and shutdown must be dropped before the socket owner.
+    write_state: RefCell<WriteState>,
+    inner: Arc<UnixStreamInner>,
 }
 
 impl OwnedReadHalf {
@@ -393,7 +413,10 @@ impl OwnedWriteHalf {
     /// Half-closes the write direction of the connection with
     /// [`Shutdown::Write`].
     pub async fn shutdown(&self) -> io::Result<()> {
-        self.stream.shutdown(Shutdown::Write).await
+        core::future::poll_fn(|cx| {
+            poll_unix_shutdown(&mut self.write_state.borrow_mut(), &self.inner, cx)
+        })
+        .await
     }
 
     /// Reassembles the original [`UnixStream`] with the matching read half.
@@ -409,7 +432,8 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+        let this = self.get_mut();
+        poll_unix_read(this.read_state.get_mut(), &this.inner, cx, buf)
     }
 }
 
@@ -419,15 +443,41 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        poll_unix_write(this.write_state.get_mut(), &this.inner, cx, generation, buf)
+    }
+
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+        // An abandoned write stays owned by the socket, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.get_mut().poll_flush(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().stream).poll_close(cx)
+        let this = self.get_mut();
+        poll_unix_shutdown(this.write_state.get_mut(), &this.inner, cx)
     }
 }
 
@@ -948,22 +998,34 @@ impl AsRawFd for UnixStream {
     }
 }
 
-impl From<OwnedFd> for UnixStream {
-    /// Adopts an already-connected Unix-domain stream socket. Use
-    /// [`UnixStream::from_std`] to adopt a [`std::os::unix::net::UnixStream`] and
-    /// set the mode runite's backend expects.
-    fn from(fd: OwnedFd) -> Self {
-        Self::from_owned_fd(fd)
+impl TryFrom<OwnedFd> for UnixStream {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixStream {
+    /// Adopts an already-connected Unix-domain stream socket, switching it to
+    /// the non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self::from_owned_fd(fd))
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixStream`] and switches it to
     /// the non-blocking mode runite's driver expects.
     pub fn from_std(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
-        let fd = OwnedFd::from(stream);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self::from_owned_fd(fd))
+        Self::from_owned(OwnedFd::from(stream))
     }
 }
 
@@ -979,21 +1041,34 @@ impl AsRawFd for UnixListener {
     }
 }
 
-impl From<OwnedFd> for UnixListener {
-    /// Adopts an already-listening Unix-domain socket. Use
-    /// [`UnixListener::from_std`] to adopt a std listener and set the mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self { fd }
+impl TryFrom<OwnedFd> for UnixListener {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixListener {
+    /// Adopts an already-listening Unix-domain socket, switching it to the
+    /// non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixListener`] and switches it to
     /// non-blocking mode.
     pub fn from_std(listener: std::os::unix::net::UnixListener) -> io::Result<Self> {
-        let fd = OwnedFd::from(listener);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self { fd })
+        Self::from_owned(OwnedFd::from(listener))
     }
 }
 
@@ -1009,21 +1084,34 @@ impl AsRawFd for UnixDatagram {
     }
 }
 
-impl From<OwnedFd> for UnixDatagram {
-    /// Adopts an existing Unix-domain datagram socket. Use
-    /// [`UnixDatagram::from_std`] to adopt a std datagram socket and set the mode.
-    fn from(fd: OwnedFd) -> Self {
-        Self { fd }
+impl TryFrom<OwnedFd> for UnixDatagram {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> io::Result<Self> {
+        Self::from_owned(fd)
     }
 }
 
 impl UnixDatagram {
+    /// Adopts an existing Unix-domain datagram socket, switching it to the
+    /// non-blocking mode runite's driver expects.
+    ///
+    /// Ownership of the descriptor transfers to the returned socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from configuring the resource for this runtime.
+    /// **The descriptor is closed on failure** — it is consumed either way
+    /// and is not handed back to the caller.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self { fd })
+    }
+
     /// Adopts a blocking [`std::os::unix::net::UnixDatagram`] and switches it to
     /// non-blocking mode.
     pub fn from_std(socket: std::os::unix::net::UnixDatagram) -> io::Result<Self> {
-        let fd = OwnedFd::from(socket);
-        crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self { fd })
+        Self::from_owned(OwnedFd::from(socket))
     }
 }
 
@@ -1032,8 +1120,9 @@ impl UnixDatagram {
 /// `hyper::rt` transport impls for [`UnixStream`], mirroring the
 /// [`TcpStream`](crate::net::TcpStream) integration so hyper can speak HTTP
 /// over Unix-domain sockets (Docker socket, systemd services, local RPC).
-/// Uses the same stashed pending-op + `ReadOverflow` machinery as the
-/// `AsyncRead`/`AsyncWrite` impls, so reads stay cancel-safe.
+/// Uses the same shared pending-operation state as the
+/// `AsyncRead`/`AsyncWrite` impls, so reads stay cancel-safe and abandoned
+/// write completions cannot satisfy a different buffer.
 #[cfg(feature = "hyper")]
 mod hyper_impl {
     use core::pin::Pin;
@@ -1056,49 +1145,17 @@ mod hyper_impl {
                 return Poll::Ready(Ok(()));
             }
 
-            // Serve any surplus from a previous read before submitting a new one.
-            if let Some(overflow) = this.read_overflow.as_mut() {
-                let n = buf.remaining().min(overflow.remaining());
-                buf.put_slice(overflow.front(n));
-                overflow.advance(n);
-                if overflow.is_drained() {
-                    this.read_overflow = None;
-                }
-                return Poll::Ready(Ok(()));
-            }
-
-            if this.pending_read.is_none() {
-                this.pending_read = Some(crate::sys::current::net::recv_future(
-                    this.raw_fd(),
-                    buf.remaining(),
-                ));
-            }
-
-            let poll = this
-                .pending_read
-                .as_mut()
-                .expect("pending read future should exist")
-                .as_mut()
-                .poll(cx);
-            match poll {
-                Poll::Ready(Ok(data)) => {
-                    this.pending_read = None;
-                    // `put_slice` panics if given more than the cursor can hold,
-                    // so copy only what fits and retain the surplus.
-                    let n = data.len().min(buf.remaining());
-                    buf.put_slice(&data[..n]);
-                    if data.len() > n {
-                        this.read_overflow =
-                            Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
-                    }
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Ready(Err(error)) => {
-                    this.pending_read = None;
-                    Poll::Ready(Err(error))
-                }
-                Poll::Pending => Poll::Pending,
-            }
+            let capacity = buf.remaining();
+            let fd = this.raw_fd();
+            this.read_state
+                .get_mut()
+                .poll_with(
+                    cx,
+                    capacity,
+                    move |len| crate::sys::current::net::recv_future(fd, len),
+                    |bytes| buf.put_slice(bytes),
+                )
+                .map(|result| result.map(|_| ()))
         }
     }
 
@@ -1113,30 +1170,14 @@ mod hyper_impl {
                 return Poll::Ready(Ok(0));
             }
 
-            if this.pending_write.is_none() {
-                this.pending_write = Some(crate::sys::current::net::send_future(
-                    this.raw_fd(),
-                    buf.to_vec(),
-                ));
-            }
-
-            let poll = this
-                .pending_write
-                .as_mut()
-                .expect("pending write future should exist")
-                .as_mut()
-                .poll(cx);
-            match poll {
-                Poll::Ready(result) => {
-                    this.pending_write = None;
-                    Poll::Ready(result)
-                }
-                Poll::Pending => Poll::Pending,
-            }
+            let fd = this.raw_fd();
+            this.write_state
+                .get_mut()
+                .poll_buffered_write(cx, buf, move |data| send_all_future(fd, data))
         }
 
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-            Poll::Ready(Ok(()))
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            self.get_mut().write_state.get_mut().poll_flush(cx)
         }
 
         fn poll_shutdown(
@@ -1144,27 +1185,29 @@ mod hyper_impl {
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), io::Error>> {
             let this = self.get_mut();
-            if this.pending_shutdown.is_none() {
-                this.pending_shutdown = Some(crate::sys::current::net::shutdown_future(
-                    this.raw_fd(),
-                    Shutdown::Write,
-                ));
-            }
-
-            let poll = this
-                .pending_shutdown
-                .as_mut()
-                .expect("pending shutdown future should exist")
-                .as_mut()
-                .poll(cx);
-            match poll {
-                Poll::Ready(result) => {
-                    this.pending_shutdown = None;
-                    Poll::Ready(result)
-                }
-                Poll::Pending => Poll::Pending,
-            }
+            let fd = this.raw_fd();
+            this.write_state.get_mut().poll_shutdown(cx, move || {
+                crate::sys::current::net::shutdown_future(fd, Shutdown::Write)
+            })
         }
+    }
+
+    fn send_all_future(fd: std::os::fd::RawFd, data: Vec<u8>) -> crate::io::IoFuture<usize> {
+        Box::pin(async move {
+            let mut written = 0;
+            while written < data.len() {
+                let count =
+                    crate::sys::current::net::send_future(fd, data[written..].to_vec()).await?;
+                if count == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write buffered Hyper data",
+                    ));
+                }
+                written += count;
+            }
+            Ok(written)
+        })
     }
 }
 
@@ -1176,6 +1219,43 @@ mod tests {
     use crate::{queue_macrotask, run, spawn};
 
     use super::{UnixDatagram, UnixListener, UnixStream};
+
+    fn is_nonblocking(fd: std::os::fd::RawFd) -> bool {
+        // SAFETY: `F_GETFL` reads the descriptor's status flags and takes no
+        // user pointer.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1, "F_GETFL should succeed for a live descriptor");
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    /// Adopting an owned descriptor must apply the non-blocking mode the driver
+    /// expects. The infallible `From` these types used to offer skipped that
+    /// step, so a blocking descriptor could be adopted into a readiness-based
+    /// backend and then block the event loop on the first read.
+    #[test]
+    fn adoption_switches_owned_descriptors_to_nonblocking() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+
+        let (blocking, _peer) =
+            std::os::unix::net::UnixStream::pair().expect("std stream pair should open");
+        assert!(
+            !is_nonblocking(blocking.as_raw_fd()),
+            "a std socket pair starts out blocking"
+        );
+        let adopted = UnixStream::try_from(OwnedFd::from(blocking)).expect("adoption succeeds");
+        assert!(
+            is_nonblocking(adopted.as_raw_fd()),
+            "try_from must switch the adopted stream to non-blocking"
+        );
+
+        let (blocking, _peer) =
+            std::os::unix::net::UnixDatagram::pair().expect("std datagram pair should open");
+        let adopted = UnixDatagram::try_from(OwnedFd::from(blocking)).expect("adoption succeeds");
+        assert!(
+            is_nonblocking(adopted.as_raw_fd()),
+            "try_from must switch the adopted datagram socket to non-blocking"
+        );
+    }
 
     #[test]
     fn unix_stream_pair_round_trip() {
@@ -1204,6 +1284,167 @@ mod tests {
             received.lock().unwrap().as_deref(),
             Some(b"ping".as_slice())
         );
+    }
+
+    #[test]
+    fn unix_split_and_reunite_preserve_pending_directional_state() {
+        use core::future::Future;
+        use core::pin::Pin;
+        use core::task::{Context, Poll};
+        use std::future::poll_fn;
+        use std::io;
+        use std::net::Shutdown;
+
+        use crate::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct PendingOnce<T> {
+            pending: bool,
+            result: Option<io::Result<T>>,
+        }
+
+        impl<T> PendingOnce<T> {
+            fn new(result: io::Result<T>) -> Self {
+                Self {
+                    pending: true,
+                    result: Some(result),
+                }
+            }
+        }
+
+        impl<T: Unpin> Future for PendingOnce<T> {
+            type Output = io::Result<T>;
+
+            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.pending {
+                    self.pending = false;
+                    Poll::Pending
+                } else {
+                    Poll::Ready(self.result.take().expect("polled after completion"))
+                }
+            }
+        }
+
+        let preserved = Arc::new(Mutex::new(false));
+        let preserved_for_task = Arc::clone(&preserved);
+        queue_macrotask(move || {
+            spawn(async move {
+                let (mut stream, mut peer) = UnixStream::pair().expect("stream pair");
+                let write_buf = b"tag".to_vec();
+                let write_generation = crate::io::next_operation_id();
+                let mut discarded = [0; 8];
+
+                poll_fn(|cx| {
+                    assert!(
+                        stream
+                            .read_state
+                            .borrow_mut()
+                            .poll_slice(cx, &mut discarded, |_| {
+                                Box::pin(PendingOnce::new(Ok(b"read".to_vec())))
+                            })
+                            .is_pending()
+                    );
+                    assert!(
+                        stream
+                            .write_state
+                            .get_mut()
+                            .poll_write(cx, write_generation, &write_buf, |_| {
+                                Box::pin(PendingOnce::new(Ok(write_buf.len())))
+                            })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+
+                let (read, write) = stream.into_split();
+                let mut stream = UnixStream::reunite(read, write).expect("reunite");
+                let mut read_buf = [0; 4];
+                assert_eq!(stream.read(&mut read_buf).await.expect("finish read"), 4);
+                assert_eq!(&read_buf, b"read");
+                assert_eq!(
+                    poll_fn(|cx| stream.write_state.get_mut().poll_write(
+                        cx,
+                        write_generation,
+                        &write_buf,
+                        |_| panic!("write already started")
+                    ))
+                    .await
+                    .expect("finish write"),
+                    write_buf.len()
+                );
+
+                let old_buf = b"old".to_vec();
+                let old_generation = crate::io::next_operation_id();
+                poll_fn(|cx| {
+                    assert!(
+                        stream
+                            .write_state
+                            .get_mut()
+                            .poll_write(cx, old_generation, &old_buf, |_| {
+                                Box::pin(PendingOnce::new(Ok(old_buf.len())))
+                            })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                let new_buf = b"new bytes".to_vec();
+                assert_eq!(
+                    stream.write(&new_buf).await.expect("new write"),
+                    new_buf.len()
+                );
+                let mut received = vec![0; new_buf.len()];
+                peer.read_exact(&mut received)
+                    .await
+                    .expect("peer reads new write");
+                assert_eq!(received, new_buf);
+
+                let before_shutdown = b"before shutdown".to_vec();
+                let shutdown_write_generation = crate::io::next_operation_id();
+                poll_fn(|cx| {
+                    assert!(
+                        stream
+                            .write_state
+                            .get_mut()
+                            .poll_write(cx, shutdown_write_generation, &before_shutdown, |_| {
+                                Box::pin(PendingOnce::new(Ok(before_shutdown.len())))
+                            })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                stream
+                    .shutdown(Shutdown::Write)
+                    .await
+                    .expect("ordered shutdown");
+                let mut eof = [0];
+                assert_eq!(peer.read(&mut eof).await.expect("peer EOF"), 0);
+                drop(stream);
+                drop(peer);
+
+                let (mut stream, peer) = UnixStream::pair().expect("shutdown stream pair");
+                poll_fn(|cx| {
+                    assert!(
+                        stream
+                            .write_state
+                            .get_mut()
+                            .poll_shutdown(cx, || { Box::pin(PendingOnce::new(Ok(()))) })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                let (read, write) = stream.into_split();
+                let mut stream = UnixStream::reunite(read, write).expect("reunite shutdown");
+                stream.close().await.expect("finish shutdown");
+                drop(peer);
+                *preserved_for_task.lock().unwrap() = true;
+            });
+        });
+        run();
+
+        assert!(*preserved.lock().unwrap());
     }
 
     #[test]

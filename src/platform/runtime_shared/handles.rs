@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use super::future_task::{JoinState, TaskShared};
@@ -17,14 +17,16 @@ use super::state::{ThreadShared, WorkerCompletion};
 #[cfg(debug_assertions)]
 use crate::trace_targets;
 
-/// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime is shutting
-/// down or its cross-thread macrotask queue is full.
+/// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime has
+/// terminated or cannot currently accept and wake remote work.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum QueueError {
-    /// The target thread has finished shutting down; no further work can be queued.
+    /// The target thread has committed to final shutdown; no further work can
+    /// be queued.
     Closed,
-    /// The cross-thread macrotask queue is at capacity. Try again later; callers
+    /// The cross-thread macrotask queue is at capacity, or both attempts to
+    /// notify the target driver failed. The task was not accepted; callers
     /// decide whether to retry, drop the work, or panic.
     Full,
 }
@@ -33,7 +35,7 @@ impl std::fmt::Display for QueueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => f.write_str("target runtime thread is closed"),
-            Self::Full => f.write_str("target runtime thread remote queue is full"),
+            Self::Full => f.write_str("target runtime thread cannot currently accept remote work"),
         }
     }
 }
@@ -66,6 +68,79 @@ pub struct WorkerHandle {
     pub(crate) completion: Arc<WorkerCompletion>,
 }
 
+/// Future returned by [`WorkerHandle::join`].
+///
+/// Dropping this future before the worker exits unregisters its waker. It does
+/// not cancel or detach the worker; another join future may observe the stored
+/// result later. While pending, it also keeps every runtime that has polled it
+/// live so run-to-quiescence cannot cancel a valid worker observation.
+#[must_use = "futures do nothing unless polled or awaited"]
+pub struct WorkerJoin {
+    completion: Arc<WorkerCompletion>,
+    waiter_id: Option<u64>,
+    waiter_active: Option<Arc<AtomicBool>>,
+    liveness: Vec<WorkerJoinLiveness>,
+}
+
+struct WorkerJoinLiveness {
+    thread: ThreadHandle,
+}
+
+impl WorkerJoinLiveness {
+    fn new(thread: ThreadHandle) -> Self {
+        thread.begin_async_operation();
+        Self { thread }
+    }
+
+    fn belongs_to(&self, thread: &ThreadHandle) -> bool {
+        Arc::ptr_eq(&self.thread.shared, &thread.shared)
+    }
+}
+
+impl Drop for WorkerJoinLiveness {
+    fn drop(&mut self) {
+        self.thread.finish_async_operation();
+    }
+}
+
+/// Error returned by [`WorkerHandle::join`].
+///
+/// The panic itself is still reported through the process panic hook. Its
+/// platform-specific payload is intentionally not exposed, keeping this error
+/// portable and `Copy`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum WorkerJoinError {
+    /// The worker panicked while installing its runtime driver.
+    SetupPanicked,
+    /// The worker runtime panicked outside the per-task/callback panic
+    /// firewall while driving its event loop or tearing down.
+    RuntimePanicked,
+}
+
+impl WorkerJoinError {
+    /// Returns `true` if the worker panicked during runtime setup.
+    pub fn is_setup_panicked(&self) -> bool {
+        matches!(self, Self::SetupPanicked)
+    }
+
+    /// Returns `true` if the worker panicked while running or tearing down.
+    pub fn is_runtime_panicked(&self) -> bool {
+        matches!(self, Self::RuntimePanicked)
+    }
+}
+
+impl std::fmt::Display for WorkerJoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SetupPanicked => f.write_str("worker runtime setup panicked"),
+            Self::RuntimePanicked => f.write_str("worker runtime panicked"),
+        }
+    }
+}
+
+impl std::error::Error for WorkerJoinError {}
+
 #[derive(Clone)]
 /// Handle returned by [`time::set_timeout`](crate::time::set_timeout).
 ///
@@ -79,8 +154,11 @@ pub struct TimeoutHandle {
 }
 
 impl TimeoutHandle {
-    /// Cancels the pending timeout. If the callback has already fired, this is
-    /// a no-op.
+    /// Cancels the pending timeout.
+    ///
+    /// Cancellation still suppresses a callback whose deadline has expired
+    /// but whose macrotask has not started. Once the callback begins, this is a
+    /// no-op.
     ///
     /// Dropping a `TimeoutHandle` does **not** cancel the timeout; the handle is
     /// a cloneable cancellation token, so you must keep it and call `cancel` to
@@ -118,11 +196,14 @@ impl IntervalHandle {
 /// Awaiting a join handle yields `Result<T, JoinError>` rather than the queued
 /// future's output directly: `Ok(output)` contains the future's output, while
 /// [`Err(JoinError::Aborted)`](crate::task::JoinError) means the task was
-/// aborted via [`abort`](Self::abort) before it completed.
+/// aborted via [`abort`](Self::abort) before it completed, and
+/// [`Err(JoinError::Cancelled)`](crate::task::JoinError) means `run()` reached
+/// quiescence with no scheduler-visible event capable of waking the task.
 ///
-/// Dropping a `JoinHandle` does **not** cancel the task — it continues to run
-/// to completion detached. Use [`abort`](Self::abort) (or an
-/// [`AbortHandle`]) to cancel.
+/// Dropping a `JoinHandle` does **not** itself cancel the task — it continues
+/// detached until completion, explicit abort, or shutdown cancellation at
+/// `run()` quiescence. Use [`abort`](Self::abort) (or an [`AbortHandle`]) to
+/// cancel explicitly.
 pub struct JoinHandle<T> {
     pub(crate) state: Rc<JoinState<T>>,
 }
@@ -140,7 +221,8 @@ impl<T> JoinHandle<T> {
         self.state.shared.abort();
     }
 
-    /// Returns `true` once the task has completed or been aborted.
+    /// Returns `true` once the task has completed, been aborted, been
+    /// shutdown-cancelled, or panicked.
     pub fn is_finished(&self) -> bool {
         self.state.shared.is_finished()
     }
@@ -182,7 +264,7 @@ impl AbortHandle {
         self.shared.abort();
     }
 
-    /// Returns `true` once the associated task has completed or been aborted.
+    /// Returns `true` once the associated task has reached any terminal state.
     pub fn is_finished(&self) -> bool {
         self.shared.is_finished()
     }
@@ -223,8 +305,9 @@ impl ThreadHandle {
     /// queue. They run in that queue only after the target thread drains all
     /// ready microtasks.
     ///
-    /// Returns [`QueueError::Closed`] if the target thread is already closed, or
-    /// [`QueueError::Full`] if the cross-thread macrotask queue is at capacity.
+    /// Returns [`QueueError::Closed`] if the target thread is already closed,
+    /// or [`QueueError::Full`] if the queue is at capacity or the target driver
+    /// could not be notified. On either error the closure was not accepted.
     pub fn queue_macrotask<F>(&self, task: F) -> Result<(), QueueError>
     where
         F: FnOnce() + Send + 'static,
@@ -246,11 +329,12 @@ impl ThreadHandle {
     ///
     /// Used by the completion machinery and the task waker to deliver a wake to
     /// its owning thread. Unlike [`queue_macrotask`](Self::queue_macrotask)
-    /// this never returns [`QueueError::Full`]: such a wake must not be dropped
-    /// (it would strand a completion whose result is already stored, or a task
-    /// with no other scheduling signal), and the number of outstanding wakes is
-    /// bounded by in-flight operations and live tasks rather than by user
-    /// input. See
+    /// this bypasses capacity and retries notification once immediately. If
+    /// notification remains unavailable, the accepted wake stays queued while
+    /// one helper retries with bounded backoff until delivery or final thread
+    /// closure. It therefore never returns [`QueueError::Full`]. The number of
+    /// accepted wakes is bounded by in-flight operations and live tasks rather
+    /// than by user input. See
     /// [`ThreadShared::enqueue_internal_wake`](super::state::ThreadShared::enqueue_internal_wake).
     pub(crate) fn queue_internal_wake<F>(&self, task: F) -> Result<(), QueueError>
     where
@@ -259,7 +343,8 @@ impl ThreadHandle {
         self.shared.enqueue_internal_wake(Box::new(task))
     }
 
-    /// Returns `true` if the target runtime thread has shut down.
+    /// Returns `true` once the target runtime thread has committed to final
+    /// shutdown.
     pub fn is_closed(&self) -> bool {
         self.shared.closed.load(Ordering::Acquire)
     }
@@ -285,10 +370,24 @@ impl ThreadHandle {
         self.shared.pending_ops.fetch_add(1, Ordering::AcqRel);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn finish_async_operation(&self) {
         let previous = self.shared.pending_ops.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "async operation count underflow");
+        // The notification exists to make a *parked* thread re-evaluate
+        // quiescence. A thread running this code is not parked -- it is
+        // dispatching the completion -- and will re-evaluate on its own next
+        // turn, so notifying itself only costs a wake round trip. On Linux that
+        // is an `IORING_OP_MSG_RING` to its own ring plus the `io_uring_enter`
+        // to submit it, per completion, which is what collapses submission
+        // batches back to size one.
+        //
+        // Skipping it cannot strand the durable-retry protocol: that tracks
+        // delivered-vs-requested generations, and this path mints no
+        // generation. The waker itself has already taken its own same-thread
+        // fast path in `CompletionState::queue_wake`.
+        if self.is_current() {
+            return;
+        }
         self.shared.notify();
     }
 }
@@ -300,7 +399,7 @@ impl WorkerHandle {
     /// macrotask after the worker drains its microtasks.
     ///
     /// Returns [`QueueError::Closed`] if the worker has already shut down, or
-    /// [`QueueError::Full`] if its cross-thread macrotask queue is at capacity.
+    /// [`QueueError::Full`] if it cannot currently accept and notify the work.
     pub fn queue_macrotask<F>(&self, task: F) -> Result<(), QueueError>
     where
         F: FnOnce() + Send + 'static,
@@ -308,13 +407,68 @@ impl WorkerHandle {
         self.thread.queue_macrotask(task)
     }
 
-    /// Returns `true` once the worker thread has fully exited.
+    /// Returns `true` once the worker OS thread, including its TLS destructors,
+    /// has fully exited.
     pub fn is_finished(&self) -> bool {
         self.completion.finished.load(Ordering::Acquire)
+    }
+
+    /// Waits for the worker's runtime state and OS thread to finish.
+    ///
+    /// The result remains stored after completion, so this method may be
+    /// awaited repeatedly. Worker setup and runtime panics are isolated to the
+    /// worker thread and returned as [`WorkerJoinError`] values. A panic from a
+    /// scheduled task or callback remains governed by the runtime's ordinary
+    /// per-task panic isolation and does not itself fail the worker. OS joining
+    /// runs on a dedicated non-runtime reaper, so polling this future never
+    /// blocks a runtime thread.
+    pub fn join(&self) -> WorkerJoin {
+        WorkerJoin {
+            completion: Arc::clone(&self.completion),
+            waiter_id: None,
+            waiter_active: None,
+            liveness: Vec::new(),
+        }
     }
 
     /// Returns a generic [`ThreadHandle`] for the worker thread.
     pub fn thread(&self) -> ThreadHandle {
         self.thread.clone()
+    }
+}
+
+impl Future for WorkerJoin {
+    type Output = Result<(), WorkerJoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(current) = super::scheduler::try_current_thread_handle()
+            && !this
+                .liveness
+                .iter()
+                .any(|liveness| liveness.belongs_to(&current))
+        {
+            this.liveness.push(WorkerJoinLiveness::new(current));
+        }
+
+        let result = this
+            .completion
+            .poll_join(&mut this.waiter_id, &mut this.waiter_active, cx);
+        if result.is_ready() {
+            this.liveness.clear();
+        }
+        result
+    }
+}
+
+impl Drop for WorkerJoin {
+    fn drop(&mut self) {
+        if let Some(active) = self.waiter_active.take() {
+            active.store(false, Ordering::Release);
+        }
+        if let Some(id) = self.waiter_id.take() {
+            self.completion.remove_waiter(id);
+        }
+        self.liveness.clear();
     }
 }

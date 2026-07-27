@@ -45,12 +45,17 @@ pub trait DriverBackend: Send + 'static {
     fn drain_timer(&self) -> Option<u64>;
 
     /// Installs any thread-local state the driver needs. Called once after
-    /// the driver is moved into a runtime thread.
+    /// the driver is moved into a runtime thread. The shared runtime owner is
+    /// installed afterwards so its TLS destructor runs first at thread exit.
     fn bind_current_thread(&self);
 
     /// Tears down any thread-local state installed by
-    /// [`Self::bind_current_thread`]. Called immediately before the driver is
-    /// dropped on its owning thread.
+    /// [`Self::bind_current_thread`]. Runtime-owned workers call this from an
+    /// explicit scope guard before their thread function returns. On Unix,
+    /// arbitrary runtime threads also use it from final TLS teardown. Windows
+    /// cannot safely run arbitrary cleanup from a TLS destructor under the
+    /// loader lock, so an unscoped user thread's last-resort destructor only
+    /// publishes closure and deliberately leaks the remaining driver state.
     fn unbind_current_thread(&self);
 
     /// Downcast hook used by per-platform `runtime.rs` shims to reach

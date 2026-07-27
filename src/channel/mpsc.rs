@@ -119,13 +119,13 @@ pub struct UnboundedSender<T: Send + 'static> {
 /// Single consumer for both bounded and unbounded MPSC channels.
 ///
 /// The receiver drains messages in FIFO order and returns `None` from
-/// [`recv`](Self::recv) once all senders are gone and the queue is empty. The
-/// [`Stream`] implementation has the same cancellation behavior as `recv`: a
-/// value already delivered into the runtime completion can be lost if the stream
-/// future is dropped before it yields readiness.
+/// [`recv`](Self::recv) once all senders are gone and the queue is empty.
+/// Async receive completions are readiness signals only; messages remain in
+/// the channel queue until `recv`, `try_recv`, or [`Stream::poll_next`]
+/// consumes them.
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
-    stream_wait: Option<CompletionFuture<Option<T>>>,
+    stream_wait: Option<CompletionFuture<()>>,
 }
 
 struct State<T: Send + 'static> {
@@ -133,9 +133,12 @@ struct State<T: Send + 'static> {
     capacity: Option<usize>,
     sender_count: usize,
     receiver_closed: bool,
-    recv_waiter: Option<CompletionHandle<Option<T>>>,
+    recv_waiter: Option<CompletionHandle<()>>,
     send_waiters: VecDeque<SendWaiter<T>>,
     next_waiter_id: usize,
+    #[cfg(test)]
+    send_waiter_publication_gate:
+        Option<crate::platform::runtime_shared::test_support::ExecutionGate>,
 }
 
 struct SendWaiter<T: Send + 'static> {
@@ -150,6 +153,7 @@ pub struct SendError<T>(pub T);
 
 #[derive(Debug, Eq, PartialEq)]
 /// Error returned by [`Sender::try_send`] when a message cannot be queued immediately.
+#[non_exhaustive]
 pub enum TrySendError<T> {
     /// The bounded queue is currently full.
     Full(T),
@@ -159,6 +163,7 @@ pub enum TrySendError<T> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned by [`Receiver::try_recv`] when no message is available immediately.
+#[non_exhaustive]
 pub enum TryRecvError {
     /// The channel is still open, but currently empty.
     Empty,
@@ -204,8 +209,7 @@ impl std::error::Error for TryRecvError {}
 /// `CompletionHandle::complete` directly; the caller fires them after dropping
 /// the `MutexGuard`.
 enum PendingCompletion<T: Send + 'static> {
-    RecvSome(CompletionHandle<Option<T>>, T),
-    RecvNone(CompletionHandle<Option<T>>),
+    RecvReady(CompletionHandle<()>),
     SendOk(CompletionHandle<Result<(), SendError<T>>>),
     SendErr(CompletionHandle<Result<(), SendError<T>>>, T),
 }
@@ -213,8 +217,7 @@ enum PendingCompletion<T: Send + 'static> {
 fn fire_completions<T: Send + 'static>(completions: Vec<PendingCompletion<T>>) {
     for c in completions {
         match c {
-            PendingCompletion::RecvSome(h, v) => h.complete(Some(v)),
-            PendingCompletion::RecvNone(h) => h.complete(None),
+            PendingCompletion::RecvReady(h) => h.complete(()),
             PendingCompletion::SendOk(h) => h.complete(Ok(())),
             PendingCompletion::SendErr(h, v) => h.complete(Err(SendError(v))),
         }
@@ -231,6 +234,8 @@ impl<T: Send + 'static> State<T> {
             recv_waiter: None,
             send_waiters: VecDeque::new(),
             next_waiter_id: 1,
+            #[cfg(test)]
+            send_waiter_publication_gate: None,
         }
     }
 
@@ -243,11 +248,6 @@ impl<T: Send + 'static> State<T> {
             return Err(TrySendError::Closed(value));
         }
 
-        if let Some(waiter) = self.recv_waiter.take() {
-            completions.push(PendingCompletion::RecvSome(waiter, value));
-            return Ok(());
-        }
-
         if self
             .capacity
             .is_some_and(|capacity| self.queue.len() >= capacity)
@@ -256,31 +256,32 @@ impl<T: Send + 'static> State<T> {
         }
 
         self.queue.push_back(value);
+        self.wake_receiver(completions);
         Ok(())
     }
 
-    fn enqueue_send_waiter(
-        &mut self,
-        value: T,
-        handle: CompletionHandle<Result<(), SendError<T>>>,
-    ) -> usize {
+    fn allocate_send_waiter_id(&mut self) -> usize {
         let id = self.next_waiter_id;
         self.next_waiter_id = self.next_waiter_id.wrapping_add(1);
-        self.send_waiters
-            .push_back(SendWaiter { id, value, handle });
         id
     }
 
-    fn remove_send_waiter(&mut self, waiter_id: usize) -> bool {
-        let Some(index) = self
+    fn publish_send_waiter(
+        &mut self,
+        id: usize,
+        value: T,
+        handle: CompletionHandle<Result<(), SendError<T>>>,
+    ) {
+        self.send_waiters
+            .push_back(SendWaiter { id, value, handle });
+    }
+
+    fn remove_send_waiter(&mut self, waiter_id: usize) -> Option<SendWaiter<T>> {
+        let index = self
             .send_waiters
             .iter()
-            .position(|waiter| waiter.id == waiter_id)
-        else {
-            return false;
-        };
-        self.send_waiters.remove(index);
-        true
+            .position(|waiter| waiter.id == waiter_id)?;
+        self.send_waiters.remove(index)
     }
 
     fn pump_senders(&mut self, completions: &mut Vec<PendingCompletion<T>>) {
@@ -301,19 +302,19 @@ impl<T: Send + 'static> State<T> {
                 break;
             };
 
-            if let Some(receiver) = self.recv_waiter.take() {
-                completions.push(PendingCompletion::RecvSome(receiver, waiter.value));
-            } else {
-                self.queue.push_back(waiter.value);
-            }
+            self.queue.push_back(waiter.value);
+            self.wake_receiver(completions);
             completions.push(PendingCompletion::SendOk(waiter.handle));
         }
 
-        if self.queue.is_empty()
-            && self.sender_count == 0
-            && let Some(waiter) = self.recv_waiter.take()
-        {
-            completions.push(PendingCompletion::RecvNone(waiter));
+        if self.queue.is_empty() && self.sender_count == 0 {
+            self.wake_receiver(completions);
+        }
+    }
+
+    fn wake_receiver(&mut self, completions: &mut Vec<PendingCompletion<T>>) {
+        if let Some(waiter) = self.recv_waiter.take() {
+            completions.push(PendingCompletion::RecvReady(waiter));
         }
     }
 
@@ -326,11 +327,7 @@ impl<T: Send + 'static> State<T> {
     fn close_receiver(&mut self, completions: &mut Vec<PendingCompletion<T>>) {
         self.receiver_closed = true;
         self.fail_pending_senders(completions);
-        if self.queue.is_empty()
-            && let Some(waiter) = self.recv_waiter.take()
-        {
-            completions.push(PendingCompletion::RecvNone(waiter));
-        }
+        self.wake_receiver(completions);
     }
 
     fn drop_sender(&mut self, completions: &mut Vec<PendingCompletion<T>>) {
@@ -338,13 +335,28 @@ impl<T: Send + 'static> State<T> {
             .sender_count
             .checked_sub(1)
             .expect("sender count underflow: more drops than creates");
-        if self.sender_count == 0
-            && self.queue.is_empty()
-            && let Some(waiter) = self.recv_waiter.take()
-        {
-            completions.push(PendingCompletion::RecvNone(waiter));
+        if self.sender_count == 0 && self.queue.is_empty() {
+            self.wake_receiver(completions);
         }
     }
+}
+
+fn set_cancel_send_waiter<T: Send + 'static>(
+    handle: &CompletionHandle<Result<(), SendError<T>>>,
+    shared: &Arc<Mutex<State<T>>>,
+    waiter_id: usize,
+) {
+    let cancel_shared = Arc::clone(shared);
+    let cancel_handle = handle.clone();
+    handle.set_cancel(move || {
+        let mut state = cancel_shared
+            .lock()
+            .expect("mpsc state should not be poisoned");
+        let waiter = state.remove_send_waiter(waiter_id);
+        drop(state);
+        drop(waiter);
+        cancel_handle.finish(None);
+    });
 }
 
 impl<T: Send + 'static> Clone for Sender<T> {
@@ -478,6 +490,8 @@ impl<T: Send + 'static> Sender<T> {
                     let (future, handle) = runtime_waiter::<Result<(), SendError<T>>>();
                     let state_shared = Arc::clone(&self.shared);
                     let mut completions = Vec::new();
+                    #[cfg(test)]
+                    let mut publication_gate = None;
                     let registration = {
                         let mut state = state_shared
                             .lock()
@@ -486,11 +500,22 @@ impl<T: Send + 'static> Sender<T> {
                             Ok(()) => Ok(None),
                             Err(TrySendError::Closed(value)) => Err(SendError(value)),
                             Err(TrySendError::Full(value)) => {
-                                Ok(Some(state.enqueue_send_waiter(value, handle.clone())))
+                                let waiter_id = state.allocate_send_waiter_id();
+                                set_cancel_send_waiter(&handle, &state_shared, waiter_id);
+                                state.publish_send_waiter(waiter_id, value, handle.clone());
+                                #[cfg(test)]
+                                {
+                                    publication_gate = state.send_waiter_publication_gate.take();
+                                }
+                                Ok(Some(waiter_id))
                             }
                         }
                     };
                     fire_completions(completions);
+                    #[cfg(test)]
+                    if let Some(gate) = publication_gate {
+                        gate.arrive_and_wait();
+                    }
                     match registration {
                         Ok(None) => {
                             handle.complete(Ok(()));
@@ -502,17 +527,7 @@ impl<T: Send + 'static> Sender<T> {
                             *wait = Some(future);
                             self.poll_send(cx, value_slot, wait)
                         }
-                        Ok(Some(waiter_id)) => {
-                            let cancel_shared = Arc::clone(&self.shared);
-                            let cancel_handle = handle.clone();
-                            handle.set_cancel(move || {
-                                let mut state = cancel_shared
-                                    .lock()
-                                    .expect("mpsc state should not be poisoned");
-                                let _ = state.remove_send_waiter(waiter_id);
-                                drop(state);
-                                cancel_handle.finish(None);
-                            });
+                        Ok(Some(_)) => {
                             *wait = Some(future);
                             self.poll_send(cx, value_slot, wait)
                         }
@@ -581,10 +596,9 @@ impl<T: Send + 'static> Receiver<T> {
     /// # Cancel safety
     ///
     /// This method is cancel-safe. `recv` and the [`Stream`] implementation share
-    /// one persistent wait slot on the receiver, so a value delivered to a
-    /// `recv` future that is dropped before being polled ready is retained and
-    /// returned by the next `recv`/`poll_next` rather than lost. The two APIs may
-    /// therefore be interleaved freely without dropping or reordering messages.
+    /// one persistent readiness slot on the receiver. Messages stay in the
+    /// channel queue until `recv`, [`try_recv`](Self::try_recv), or `poll_next`
+    /// consumes them, so the APIs may be interleaved without loss or reordering.
     ///
     /// # Examples
     ///
@@ -604,10 +618,9 @@ impl<T: Send + 'static> Receiver<T> {
     ///
     /// Panics if this future is first polled outside a runtime-managed thread.
     pub async fn recv(&mut self) -> Option<T> {
-        // Use the receiver's persistent wait slot (shared with the `Stream`
-        // impl) rather than a local one, so a value delivered to a cancelled
-        // `recv` future survives to the next call and `recv`/`poll_next` can
-        // never register two waiters at once.
+        // Use the receiver's persistent readiness slot (shared with `Stream`)
+        // so abandoning this method cannot register a second waiter or remove
+        // a queued message.
         let shared = Arc::clone(&self.shared);
         let wait = &mut self.stream_wait;
         poll_fn(move |cx| Self::poll_recv(&shared, cx, wait)).await
@@ -642,6 +655,9 @@ impl<T: Send + 'static> Receiver<T> {
             }
         };
         fire_completions(completions);
+        if !matches!(&result, Err(TryRecvError::Empty)) {
+            self.stream_wait.take();
+        }
         result
     }
 
@@ -692,18 +708,36 @@ impl<T: Send + 'static> Receiver<T> {
     fn poll_recv(
         shared: &Arc<Mutex<State<T>>>,
         cx: &mut Context<'_>,
-        wait: &mut Option<CompletionFuture<Option<T>>>,
+        wait: &mut Option<CompletionFuture<()>>,
     ) -> Poll<Option<T>> {
-        if let Some(future) = wait.as_mut() {
-            match Pin::new(future).poll(cx) {
-                Poll::Ready(result) => {
-                    wait.take();
-                    Poll::Ready(result)
+        loop {
+            if let Some(future) = wait.as_mut() {
+                match Pin::new(future).poll(cx) {
+                    Poll::Ready(()) => {
+                        wait.take();
+                    }
+                    Poll::Pending => return Poll::Pending,
                 }
-                Poll::Pending => Poll::Pending,
             }
-        } else {
-            let (future, handle) = runtime_waiter::<Option<T>>();
+
+            let mut completions = Vec::new();
+            let result = {
+                let mut state = shared.lock().expect("mpsc state should not be poisoned");
+                if let Some(value) = state.queue.pop_front() {
+                    state.pump_senders(&mut completions);
+                    Poll::Ready(Some(value))
+                } else if state.receiver_closed || state.sender_count == 0 {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                }
+            };
+            fire_completions(completions);
+            if result.is_ready() {
+                return result;
+            }
+
+            let (future, handle) = runtime_waiter::<()>();
             let cancel_shared = Arc::clone(shared);
             let cancel_handle = handle.clone();
             handle.set_cancel(move || {
@@ -715,26 +749,24 @@ impl<T: Send + 'static> Receiver<T> {
                 cancel_handle.finish(None);
             });
 
-            let mut completions = Vec::new();
-            {
+            let immediate = {
                 let mut state = shared.lock().expect("mpsc state should not be poisoned");
-                if let Some(value) = state.queue.pop_front() {
-                    state.pump_senders(&mut completions);
-                    completions.push(PendingCompletion::RecvSome(handle.clone(), value));
-                } else if state.receiver_closed || state.sender_count == 0 {
-                    completions.push(PendingCompletion::RecvNone(handle.clone()));
+                if !state.queue.is_empty() || state.receiver_closed || state.sender_count == 0 {
+                    true
                 } else {
                     assert!(
                         state.recv_waiter.is_none(),
                         "only one mpsc receive operation may wait at a time"
                     );
                     state.recv_waiter = Some(handle.clone());
+                    false
                 }
+            };
+            if immediate {
+                handle.complete(());
             }
-            fire_completions(completions);
 
             *wait = Some(future);
-            Self::poll_recv(shared, cx, wait)
         }
     }
 }
@@ -796,6 +828,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::io::StreamExt;
+    use crate::platform::runtime_shared::test_support::{DropSpy, ExecutionGate, TrackedThread};
     use crate::time::sleep;
     use crate::{queue_macrotask, run, spawn, spawn_worker};
 
@@ -872,6 +905,56 @@ mod tests {
         run();
 
         assert_eq!(*observed.lock().unwrap(), Some((Some(1), Some(2))));
+    }
+
+    #[test]
+    fn send_waiter_publication_race_does_not_create_cancellation_cycle() {
+        struct Message(Option<DropSpy>);
+
+        let (spy, observed) = DropSpy::new("pending send");
+        let outcome = Arc::new(Mutex::new(None));
+        let outcome_for_task = Arc::clone(&outcome);
+        let (sender, mut receiver) = channel(1);
+        sender.try_send(Message(None)).unwrap_or_else(|_| {
+            panic!("initial message should fit");
+        });
+        let shared = Arc::downgrade(&sender.shared);
+        let gate = ExecutionGate::default();
+        sender.shared.lock().unwrap().send_waiter_publication_gate = Some(gate.clone());
+
+        let receiver_gate = gate.clone();
+        let receiver_thread = TrackedThread::new(std::thread::spawn(move || {
+            let release = receiver_gate.release_on_drop();
+            assert!(
+                receiver_gate.wait_until_arrived(Duration::from_secs(5)),
+                "send waiter should reach its publication gate"
+            );
+            let first = receiver
+                .try_recv()
+                .unwrap_or_else(|_| panic!("initial message should be received"));
+            assert!(first.0.is_none());
+            drop(first);
+            release.release();
+            drop(receiver);
+        }));
+
+        queue_macrotask(move || {
+            spawn(async move {
+                let send_succeeded = sender.send(Message(Some(spy))).await.is_ok();
+                let receiver_joined = receiver_thread.join().is_ok();
+                drop(sender);
+                *outcome_for_task.lock().unwrap() = Some((send_succeeded, receiver_joined));
+            });
+        });
+        run();
+
+        assert_eq!(*outcome.lock().unwrap(), Some((true, true)));
+        assert_eq!(observed.count(), 1);
+        assert_eq!(observed.trace(), ["pending send"]);
+        assert!(
+            shared.upgrade().is_none(),
+            "completion cancellation must not retain the channel state"
+        );
     }
 
     #[test]

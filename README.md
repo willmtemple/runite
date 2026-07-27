@@ -12,7 +12,8 @@ deliberately prefers simple per-thread event loops, thread-local state, and
 predictable scheduling over work-stealing, `Send`-future ergonomics, and maximum
 I/O throughput.
 
-> **Status:** pre-release. APIs may change before 1.0.
+> **Status:** early 0.x release. APIs may change before 1.0; breaking 0.2
+> changes are documented in the [migration guide](./docs/MIGRATING-0.2.md).
 
 ## Platform support
 
@@ -26,7 +27,8 @@ I/O throughput.
 The Windows backend drives sockets, files, and child-process pipes with
 overlapped I/O through one I/O completion port per runtime thread, offloading
 to the blocking pool only where Windows has no asynchronous form (open,
-metadata, directory scans, DNS, console stdio). See
+metadata, directory scans, DNS, console output). Stdin instead uses the same
+demand-driven, bounded process-wide dedicated reader as the Unix backends. See
 [docs/WINDOWS.md](./docs/WINDOWS.md) for the design. Windows-only differences:
 `runite::fd` (descriptor readiness) and `runite::net::unix` (Unix-domain
 sockets) are not available, `TcpSocket::set_reuseport` reports
@@ -36,28 +38,37 @@ platforms). Unsupported targets fail to compile with a clear error.
 
 ### Minimum Linux kernel
 
-The io_uring backend targets **Linux 6.1+** (current LTS), which is what CI
-tests. Older kernels may work subject to these io_uring feature requirements:
+The io_uring backend recommends **Linux 6.1+**. The hard floor is 5.6; newer
+opcodes are used opportunistically. CI runs on GitHub-hosted Ubuntu runners
+(currently 6.8 and newer) and does not pin or assert a kernel version, so the
+older-kernel paths below are covered by opcode-capability injection tests rather
+than by running against an actual older kernel.
 
 - **5.6** — base ring operations (`openat`/`read`/`write`/`fsync`/`statx`/…);
   required.
-- **5.18** — `MSG_RING`, used for cross-thread wakeups; required for
-  multithreaded runtimes (`spawn_worker`), optional for a single event loop.
-- File truncation (`OpenOptions::truncate`, `File::set_len`) uses `FTRUNCATE`
-  (6.9) and falls back to `ftruncate(2)` on older kernels.
-- Socket operations (`socket` 5.19, `bind`/`listen` 6.11, and
-  `connect`/`accept`/`send`/`recv`/`shutdown`) transparently fall back to
-  blocking syscalls on kernels that lack the opcode, so networking works below
-  these versions with reduced native-io_uring coverage.
+- **5.18** — `MSG_RING`, preferred for cross-thread wakeups. Older kernels use
+  a nonblocking `eventfd` fallback, including for `spawn_worker` and blocking
+  completions.
+- `File::set_len` uses `FTRUNCATE` (6.9) and falls back to `ftruncate(2)` on
+  older kernels. `OpenOptions::truncate` uses `OPENAT | O_TRUNC`.
+- Directory operations use `MKDIRAT` (5.15), `RENAMEAT` (5.11), and `UNLINKAT`
+  (5.11), falling back to `mkdirat(2)`/`renameat(2)`/`unlinkat(2)` on the
+  blocking pool below those versions.
+- Socket operations (`socket` 5.19, `bind`/`listen` 6.11, and later
+  `connect`/`accept`/`send`/`recv`/`shutdown` opcodes) transparently fall back.
+  Control operations run inline on nonblocking sockets; data operations wait
+  for io_uring poll readiness before retrying, so the event loop and blocking
+  pool are not parked.
 
-So the recommended 6.1 floor exercises every feature; the only hard lower bounds
-are 5.6 (single-threaded) and 5.18 (multithreaded).
+Thus 6.1 is the tested/recommended baseline, not a requirement for every newer
+native opcode. The hard lower bound is 5.6 for both single- and
+multithreaded runtimes.
 
 ## Installation
 
 ```toml
 [dependencies]
-runite = "0.1"
+runite = "0.2"
 ```
 
 ## Quick start
@@ -87,22 +98,36 @@ fn main() {
   `#[runite::test]`, and `block_on` for driving one future to completion.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
   `queue_microtask`, `spawn`, `yield_now`.
-- **Workers:** `spawn_worker` plus the `Send`-only cross-thread `ThreadHandle::queue_macrotask`.
+- **Workers:** `spawn_worker`, nonblocking `WorkerHandle::join`, and the
+  `Send`-only cross-thread `ThreadHandle::queue_macrotask`.
 - **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;
   use `abort`, `abort_handle`, `is_finished`, and cloneable `AbortHandle`s for cancellation,
   and `task::JoinSet` for structured ownership of a group of local tasks.
+  `JoinError::Cancelled` identifies tasks terminalized when `run()` reaches
+  quiescence without a scheduler-visible wake source.
 - **Timers:** `time::set_timeout` and `time::set_interval` (each returns a
   handle with `.cancel()`), plus `time::{sleep, timeout, interval}` where
   `time::interval` is the awaitable interval.
 - **I/O:** async `fs`, `net` (TCP/UDP everywhere; Unix-domain sockets on Unix), `stdio`, and crate-local
-  `AsyncRead`/`AsyncWrite`/`Stream` traits with extension adapters; TCP split/reunite,
-  listener `incoming()` streams, async stdin/stdout/stderr, and `BufReader`/`BufWriter`.
+  `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits with vectored
+  method surface (scalar-backed today — no backend issues `readv`/`writev` yet) and
+  future adapters; TCP split/reunite, listener `incoming()` streams, async
+  stdin/stdout/stderr, and `BufReader`/`BufWriter`.
+- **Control flow:** fair-by-default `select!` with `biased;`, branch guards,
+  `else`, output patterns, and handlers that can await or leave the surrounding
+  control-flow context.
 - **Processes:** `process::{Command, Child}` with piped async stdio, `kill`, and `wait`.
 - **Channels & sync:** `channel::{mpsc, oneshot, broadcast, watch}`,
   `sync::{Mutex, RwLock, Semaphore, Notify, OnceCell}`.
 - **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
 - **Signals:** portable `signal::ctrl_c`, async Unix signal handling (including SIGWINCH
   via `SignalKind::WindowChange`), and Windows console control events (`signal::windows`).
+
+Accepted reads are resource-owned and cancel-safe: bytes remain available to a
+later caller. Cancelling an accepted write does not promise that the OS write
+was undone, but its completion is tied to that logical write and is never
+credited to a later buffer. Stdin uses one bounded, demand-driven process
+reader; `read_dir` uses bounded resumable blocking-pool batches.
 
 ### Scaling across cores
 
@@ -125,6 +150,7 @@ for the full threading and scaling model.
 | ------------------------------ | --------------------------------------------------------------------- |
 | `RUNITE_BLOCKING_THREADS`      | Size of the shared blocking-task pool (clamped 1..=32).               |
 | `RUNITE_REMOTE_QUEUE_CAPACITY` | Bound on the per-thread cross-thread macrotask queue (default 65536). |
+| `RUNITE_IO_URING_DEFER_SUBMISSIONS` | Linux only. Set to `0` to submit each io_uring operation immediately instead of batching per loop turn. Diagnostic; batching is the default. |
 
 ## Examples
 
@@ -156,15 +182,16 @@ cargo run --example hyper_http_client --features hyper
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the threading model, micro/macro task
 scheduling, run lifecycle, cancellation and buffer-ownership rules, the driver abstraction,
-the platform parity matrix, and the documented safety invariants.
+the platform parity matrix, and the documented safety invariants. Upgrading
+from 0.1? Read [Migrating to 0.2](./docs/MIGRATING-0.2.md).
 
 ## Development
 
 The toolchain is pinned with [mise](https://mise.jdx.dev/). Install it, then:
 
 ```sh
-mise install            # fetch the pinned Rust toolchain and Agent Cop
-mise run check          # fmt + clippy + tests + cop (the full local gate)
+mise install            # fetch the pinned Rust toolchain and dev tools
+mise run check          # fmt + clippy + tests + workflow lint (the full local gate)
 ```
 
 Individual tasks:
@@ -176,7 +203,12 @@ Individual tasks:
 | `mise run lint`     | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Lint with warnings denied.         |
 | `mise run bench`    | `cargo bench --workspace --all-features`                               | Criterion benchmarks (`benches/`). |
 | `mise run coverage` | `cargo llvm-cov --workspace --all-features ...`                        | HTML + lcov coverage report.       |
-| `mise run cop`      | `cop cop-checks/main.cop -t .`                                         | Agent Cop static-analysis checks.  |
+| `mise run api-report-check` | `cargo run -p xtask -- api-report --check`                    | Check target/feature API surfaces. |
+| `mise run package-verify` | `cargo run -p xtask -- release-verify`                         | Verify unpacked release artifacts. |
+| `mise run miri` / `asan` / `tsan` | Pinned-nightly focused safety suites.                  | Driver-free Miri/TSan; Linux ASan. |
+| `mise run capability-matrix` | Injected constrained-opcode production dispatch tests.       | Verify old-kernel fallbacks.       |
+| `mise run stress-issue-6` | Repeated doctest and blocking-runtime liveness tests.             | Guard the former intermittent race. |
+| `mise run ci-lint` | `actionlint .github/workflows/*.yml`                                    | Validate workflow YAML.            |
 
 ### Testing
 

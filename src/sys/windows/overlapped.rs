@@ -19,22 +19,28 @@
 //!    `CancelIoEx(handle, overlapped)`; the operation then completes with
 //!    `ERROR_OPERATION_ABORTED` and its packet reclaims the context as usual.
 
+use std::future::{Future, poll_fn};
 use std::io;
+use std::task::Poll;
+use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, HANDLE};
+use windows_sys::Win32::Foundation::{
+    ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, HANDLE,
+};
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::IO::{CancelIoEx, OVERLAPPED};
 
 use crate::op::completion::{CompletionHandle, completion_for_current_thread};
 use crate::platform::current::runtime::with_current_driver;
 use crate::platform::windows::driver::{OverlappedHeader, OverlappedResult};
-use crate::sys::handle::RawFile;
+use crate::sys::handle::{OverlappedOwner, RawFile};
 
 /// One in-flight overlapped operation: the driver-visible header followed by
 /// the operation's owned state and result mapper.
 #[repr(C)]
 struct OverlappedOp<D, M, T> {
     header: OverlappedHeader,
+    _owner: OverlappedOwner,
     data: D,
     map: Option<M>,
     handle: CompletionHandle<io::Result<T>>,
@@ -64,10 +70,9 @@ where
 
 /// Submits one overlapped operation and awaits its completion packet.
 ///
-/// * `cancel_handle` — the OS handle the operation runs on, used only for
-///   `CancelIoEx` when the future is dropped. The caller must guarantee the
-///   handle outlives the returned future (the public wrappers do: their
-///   pending-operation futures never outlive the owning handle object).
+/// * `owner` — an affinity-checked reference to the OS object. The packet
+///   retains it through terminal completion and uses the same handle for
+///   `CancelIoEx` if the future is dropped.
 /// * `data` — operation-owned state (staging buffers, address storage). It is
 ///   moved into the packet context, so pointers into it that are handed to the
 ///   kernel stay stable for the life of the operation.
@@ -77,7 +82,7 @@ where
 /// * `map` — translates the raw completion into the operation's result, with
 ///   access to the owned state.
 pub(crate) async fn submit<D, S, M, T>(
-    cancel_handle: RawFile,
+    owner: OverlappedOwner,
     data: D,
     start: S,
     map: M,
@@ -88,10 +93,44 @@ where
     M: FnOnce(D, OverlappedResult) -> io::Result<T> + 'static,
     T: Send + 'static,
 {
+    submit_inner(owner, data, start, map, None).await
+}
+
+pub(crate) async fn submit_with_timeout<D, S, M, T>(
+    owner: OverlappedOwner,
+    data: D,
+    start: S,
+    map: M,
+    timeout: Duration,
+) -> io::Result<T>
+where
+    D: 'static,
+    S: FnOnce(&mut D, *mut OVERLAPPED) -> io::Result<()>,
+    M: FnOnce(D, OverlappedResult) -> io::Result<T> + 'static,
+    T: Send + 'static,
+{
+    submit_inner(owner, data, start, map, Some(timeout)).await
+}
+
+async fn submit_inner<D, S, M, T>(
+    owner: OverlappedOwner,
+    data: D,
+    start: S,
+    map: M,
+    timeout: Option<Duration>,
+) -> io::Result<T>
+where
+    D: 'static,
+    S: FnOnce(&mut D, *mut OVERLAPPED) -> io::Result<()>,
+    M: FnOnce(D, OverlappedResult) -> io::Result<T> + 'static,
+    T: Send + 'static,
+{
+    owner.ensure_current()?;
     let (future, handle) = completion_for_current_thread::<io::Result<T>>();
 
     let op = Box::new(OverlappedOp {
         header: OverlappedHeader::new(complete_thunk::<D, M, T>),
+        _owner: owner.clone(),
         data,
         map: Some(map),
         handle: handle.clone(),
@@ -108,22 +147,21 @@ where
             // The packet context now belongs to the kernel until the packet is
             // dispatched. Wire up drop-cancellation; the aborted operation's
             // packet still arrives and reclaims the context.
-            let cancel_target = cancel_handle;
+            let cancel_target = owner;
             let cancel_overlapped = overlapped as usize;
+            let cancel_for_drop = cancel_target.clone();
             handle.set_cancel(move || {
                 // SAFETY: dispatch, drop, and cancel all run on the owning
                 // runtime thread, so the packet cannot have been freed here:
                 // if it had been dispatched, `finished` would be set and this
                 // callback would not run. A completed-but-undequeued operation
                 // makes this a no-op (`ERROR_NOT_FOUND`).
-                unsafe {
-                    CancelIoEx(
-                        cancel_target.as_handle() as HANDLE,
-                        cancel_overlapped as *const OVERLAPPED,
-                    );
-                }
+                cancel_operation(&cancel_for_drop, cancel_overlapped as *const OVERLAPPED);
             });
-            future.await
+            await_terminal(future, timeout, move || {
+                cancel_operation(&cancel_target, cancel_overlapped as *const OVERLAPPED);
+            })
+            .await
         }
         Err(error) => {
             // No packet will arrive: reclaim the context and fail inline.
@@ -136,28 +174,89 @@ where
     }
 }
 
-/// Associates a file/pipe handle with the current thread's completion port.
-pub(crate) fn associate_file(fd: RawFile) -> io::Result<()> {
-    with_current_driver(|driver| driver.associate_handle(fd.as_handle()))
+async fn await_terminal<T>(
+    future: impl Future<Output = io::Result<T>>,
+    timeout: Option<Duration>,
+    cancel: impl FnOnce(),
+) -> io::Result<T> {
+    let Some(timeout) = timeout else {
+        return future.await;
+    };
+    await_terminal_after(future, crate::time::sleep(timeout), cancel).await
 }
 
-/// Associates a file/pipe handle, tolerating handles whose underlying file
-/// object is already associated with a completion port.
-///
-/// Duplicated handles (`try_clone`, `WSADuplicateSocketW`) share the original
-/// file object, and a file object can only ever be bound to one port — the
-/// association call then fails with `ERROR_INVALID_PARAMETER`. Completions for
-/// the duplicate are delivered to the original port, whose completion routing
-/// wakes the operation's owner thread either way.
-pub(crate) fn associate_file_reused(fd: RawFile) -> io::Result<()> {
-    match associate_file(fd) {
-        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER_CODE) => Ok(()),
-        result => result,
+async fn await_terminal_after<T>(
+    future: impl Future<Output = io::Result<T>>,
+    deadline: impl Future<Output = ()>,
+    cancel: impl FnOnce(),
+) -> io::Result<T> {
+    let mut future = std::pin::pin!(future);
+    let mut deadline = std::pin::pin!(deadline);
+    let mut cancel = Some(cancel);
+    let mut expired = false;
+
+    poll_fn(|cx| {
+        // Completion wins when both the IOCP packet and deadline are visible
+        // in the same turn.
+        if let Poll::Ready(result) = future.as_mut().poll(cx) {
+            return Poll::Ready(match result {
+                Err(error)
+                    if expired && error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) =>
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "operation timed out",
+                    ))
+                }
+                result => result,
+            });
+        }
+
+        if !expired && deadline.as_mut().poll(cx).is_ready() {
+            expired = true;
+            cancel
+                .take()
+                .expect("deadline cancellation runs at most once")();
+        }
+
+        Poll::Pending
+    })
+    .await
+}
+
+fn cancel_operation(owner: &OverlappedOwner, overlapped: *const OVERLAPPED) {
+    // SAFETY: `owner` keeps the underlying kernel object alive, and
+    // `overlapped` remains allocated until the terminal completion packet.
+    let cancelled = unsafe { CancelIoEx(owner.as_handle() as HANDLE, overlapped) };
+    if cancelled != 0 {
+        return;
     }
+
+    // `ERROR_NOT_FOUND` is the expected benign race: the operation already
+    // completed and its packet is on the way, so the waiter still terminates.
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+        return;
+    }
+
+    // Anything else means the request is neither cancelled nor completing. The
+    // owning reference is only released by the terminal packet, so the handle
+    // stays alive and the waiter parks indefinitely. Nothing here can force the
+    // packet, so record it rather than discarding the only evidence.
+    tracing::error!(
+        target: "runite::driver",
+        event = "cancel_io_failed",
+        error = %error,
+        "CancelIoEx failed for an in-flight overlapped operation; its completion \
+         packet may never arrive and the waiting task cannot make progress",
+    );
 }
 
-const ERROR_INVALID_PARAMETER_CODE: i32 =
-    windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER as i32;
+pub(crate) fn associate_raw_handle(
+    handle: std::os::windows::io::RawHandle,
+) -> io::Result<crate::platform::windows::driver::DriverId> {
+    with_current_driver(|driver| driver.associate_handle(handle))
+}
 
 /// Overlapped `ReadFile` at an explicit offset (or offset 0 for pipes).
 ///
@@ -167,7 +266,7 @@ const ERROR_INVALID_PARAMETER_CODE: i32 =
 pub(crate) async fn read_at(fd: RawFile, len: usize, offset: u64) -> io::Result<Vec<u8>> {
     let buffer = vec![0u8; len.max(1)];
     let result = submit(
-        fd,
+        fd.clone().into(),
         buffer,
         |buffer, overlapped| {
             // SAFETY: `overlapped` points at the packet header; the offset
@@ -211,7 +310,7 @@ pub(crate) async fn read_at(fd: RawFile, len: usize, offset: u64) -> io::Result<
 /// Overlapped `WriteFile` at an explicit offset (or offset 0 for pipes).
 pub(crate) async fn write_at(fd: RawFile, data: Vec<u8>, offset: u64) -> io::Result<usize> {
     submit(
-        fd,
+        fd.clone().into(),
         data,
         |data, overlapped| {
             // SAFETY: as in `read_at`.
@@ -257,4 +356,104 @@ pub(crate) fn is_end_of_stream(error: &io::Error) -> bool {
         error.raw_os_error(),
         Some(code) if code == ERROR_HANDLE_EOF as i32 || code == ERROR_BROKEN_PIPE as i32
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::future::{Future, ready};
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    use super::{ERROR_OPERATION_ABORTED, await_terminal_after};
+
+    struct Gate<T> {
+        state: Rc<RefCell<GateState<T>>>,
+    }
+
+    struct GateState<T> {
+        value: Option<T>,
+        waker: Option<Waker>,
+    }
+
+    impl<T> Gate<T> {
+        fn new() -> (Self, Rc<RefCell<GateState<T>>>) {
+            let state = Rc::new(RefCell::new(GateState {
+                value: None,
+                waker: None,
+            }));
+            (
+                Self {
+                    state: Rc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    impl<T> Future for Gate<T> {
+        type Output = T;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut state = self.state.borrow_mut();
+            match state.value.take() {
+                Some(value) => Poll::Ready(value),
+                None => {
+                    state.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }
+    }
+
+    fn complete<T>(state: &Rc<RefCell<GateState<T>>>, value: T) {
+        let waker = {
+            let mut state = state.borrow_mut();
+            state.value = Some(value);
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    #[test]
+    fn completion_wins_when_deadline_is_also_ready() {
+        let cancelled = Rc::new(std::cell::Cell::new(false));
+        let mark_cancelled = Rc::clone(&cancelled);
+        let result = crate::block_on(await_terminal_after(
+            ready(Ok::<_, std::io::Error>(17)),
+            ready(()),
+            move || mark_cancelled.set(true),
+        ));
+
+        assert_eq!(result.unwrap(), 17);
+        assert!(!cancelled.get());
+    }
+
+    #[test]
+    fn deadline_waits_for_aborted_terminal_result() {
+        let (operation, state) = Gate::new();
+        let result = crate::block_on(await_terminal_after(operation, ready(()), move || {
+            complete(
+                &state,
+                Err::<usize, _>(std::io::Error::from_raw_os_error(
+                    ERROR_OPERATION_ABORTED as i32,
+                )),
+            );
+        }));
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn successful_completion_after_cancel_request_is_returned() {
+        let (operation, state) = Gate::new();
+        let result = crate::block_on(await_terminal_after(operation, ready(()), move || {
+            complete(&state, Ok::<_, std::io::Error>(23))
+        }));
+
+        assert_eq!(result.unwrap(), 23);
+    }
 }

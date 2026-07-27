@@ -14,6 +14,7 @@ use crate::platform::runtime_shared::{DriverBackend, Notifier};
 pub use crate::platform::runtime_shared::ReadyEvents;
 
 type FdCompletion = CompletionHandle<io::Result<()>>;
+type ProcessCompletion = CompletionHandle<io::Result<()>>;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) struct FdReadinessToken(u64);
@@ -33,6 +34,14 @@ struct FdKey {
 struct FdWaiter {
     token: FdReadinessToken,
     completion: FdCompletion,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub(crate) struct ProcessExitToken(u64);
+
+struct ProcessWaiter {
+    token: ProcessExitToken,
+    completion: ProcessCompletion,
 }
 
 #[derive(Clone)]
@@ -104,7 +113,9 @@ pub struct Driver {
     pending_wakes: Cell<u64>,
     pending_timers: Cell<u64>,
     next_fd_token: Cell<u64>,
-    fd_waiters: RefCell<HashMap<FdKey, FdWaiter>>,
+    fd_waiters: RefCell<HashMap<FdKey, Vec<FdWaiter>>>,
+    next_process_token: Cell<u64>,
+    process_waiters: RefCell<HashMap<libc::pid_t, Vec<ProcessWaiter>>>,
 }
 
 /// Creates a new driver and its paired [`ThreadNotifier`].
@@ -159,6 +170,8 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
         pending_timers: Cell::new(0),
         next_fd_token: Cell::new(1),
         fd_waiters: RefCell::new(HashMap::new()),
+        next_process_token: Cell::new(1),
+        process_waiters: RefCell::new(HashMap::new()),
     };
 
     // The notifier holds its own dup of the write end so a cross-thread wake can
@@ -264,52 +277,104 @@ impl Driver {
         completion: FdCompletion,
     ) -> io::Result<FdReadinessToken> {
         let key = FdKey { fd, interest };
-        let removed_stale_waiter = {
+        let needs_registration = {
             let mut waiters = self.fd_waiters.borrow_mut();
-            match waiters.get(&key) {
-                Some(waiter) if !waiter.completion.is_interested() => {
-                    waiters.remove(&key);
-                    true
+            match waiters.get_mut(&key) {
+                Some(entries) => {
+                    entries.retain(|waiter| waiter.completion.is_interested());
+                    entries.is_empty()
                 }
-                Some(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "fd readiness already has a waiter for this interest",
-                    ));
-                }
-                None => false,
+                None => true,
             }
         };
-        if removed_stale_waiter {
-            let _ = self.update_fd_interest(key, libc::EV_DELETE);
+        if needs_registration {
+            self.fd_waiters.borrow_mut().remove(&key);
+            self.update_fd_interest(key, libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT)?;
         }
 
         let token = self.allocate_fd_token();
-        self.update_fd_interest(key, libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT)?;
         self.fd_waiters
             .borrow_mut()
-            .insert(key, FdWaiter { token, completion });
+            .entry(key)
+            .or_default()
+            .push(FdWaiter { token, completion });
         Ok(token)
     }
 
     pub(crate) fn cancel_fd_readiness(&self, token: FdReadinessToken) {
-        let mut empty_key = None;
+        let mut key_to_delete = None;
         {
             let mut waiters = self.fd_waiters.borrow_mut();
-            for (key, entry) in waiters.iter() {
-                if entry.token == token {
-                    empty_key = Some(*key);
+            for (key, entries) in waiters.iter_mut() {
+                if let Some(index) = entries.iter().position(|entry| entry.token == token) {
+                    entries.remove(index);
+                    if entries.is_empty() {
+                        key_to_delete = Some(*key);
+                    }
                     break;
                 }
             }
 
-            if let Some(key) = empty_key {
+            if let Some(key) = key_to_delete {
                 waiters.remove(&key);
             }
         }
 
-        if let Some(key) = empty_key {
+        if let Some(key) = key_to_delete {
             let _ = self.update_fd_interest(key, libc::EV_DELETE);
+        }
+    }
+
+    pub(crate) fn register_process_exit(
+        &self,
+        pid: libc::pid_t,
+        completion: ProcessCompletion,
+    ) -> io::Result<ProcessExitToken> {
+        let needs_registration = {
+            let mut waiters = self.process_waiters.borrow_mut();
+            match waiters.get_mut(&pid) {
+                Some(entries) => {
+                    entries.retain(|waiter| waiter.completion.is_interested());
+                    entries.is_empty()
+                }
+                None => true,
+            }
+        };
+        if needs_registration {
+            self.process_waiters.borrow_mut().remove(&pid);
+            self.update_process_interest(pid, libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT)?;
+        }
+
+        let token = self.allocate_process_token();
+        self.process_waiters
+            .borrow_mut()
+            .entry(pid)
+            .or_default()
+            .push(ProcessWaiter { token, completion });
+        Ok(token)
+    }
+
+    pub(crate) fn cancel_process_exit(&self, token: ProcessExitToken) {
+        let mut pid_to_delete = None;
+        {
+            let mut waiters = self.process_waiters.borrow_mut();
+            for (pid, entries) in waiters.iter_mut() {
+                if let Some(index) = entries.iter().position(|entry| entry.token == token) {
+                    entries.remove(index);
+                    if entries.is_empty() {
+                        pid_to_delete = Some(*pid);
+                    }
+                    break;
+                }
+            }
+
+            if let Some(pid) = pid_to_delete {
+                waiters.remove(&pid);
+            }
+        }
+
+        if let Some(pid) = pid_to_delete {
+            let _ = self.update_process_interest(pid, libc::EV_DELETE);
         }
     }
 
@@ -341,18 +406,31 @@ impl Driver {
 
         let mut saw_any = false;
         let count = result.max(0) as usize;
+        // Every registration is `EV_ONESHOT`, so the kernel deleted these knotes
+        // as it dequeued them: an event dropped here exists nowhere else and its
+        // waiter would hang forever. Dispatch the whole batch and only then
+        // surface a wake-pipe failure.
+        let mut drain_error = None;
         if count > 0 {
             saw_any = true;
             for event in events.iter().take(count) {
-                if event.ident as RawFd == self.wake_read_fd {
+                if event.filter == libc::EVFILT_READ && event.ident as RawFd == self.wake_read_fd {
                     ready.wake = true;
-                    let wakes = drain_wake_pipe(self.wake_read_fd)?;
-                    self.pending_wakes
-                        .set(self.pending_wakes.get().saturating_add(wakes));
+                    match drain_wake_pipe(self.wake_read_fd) {
+                        Ok(wakes) => self
+                            .pending_wakes
+                            .set(self.pending_wakes.get().saturating_add(wakes)),
+                        Err(error) => drain_error = drain_error.or(Some(error)),
+                    }
                 } else if let Some(interest) = interest_from_filter(event.filter) {
                     self.complete_fd_waiters(event.ident as RawFd, interest, event);
+                } else if event.filter == libc::EVFILT_PROC {
+                    self.complete_process_waiters(event.ident as libc::pid_t, event);
                 }
             }
+        }
+        if let Some(error) = drain_error {
+            return Err(error);
         }
 
         if let Some(deadline) = self.timer_deadline.get()
@@ -376,6 +454,16 @@ impl Driver {
                 .expect("fd readiness token space exhausted"),
         );
         FdReadinessToken(token)
+    }
+
+    fn allocate_process_token(&self) -> ProcessExitToken {
+        let token = self.next_process_token.get();
+        self.next_process_token.set(
+            token
+                .checked_add(1)
+                .expect("process exit token space exhausted"),
+        );
+        ProcessExitToken(token)
     }
 
     fn update_fd_interest(&self, key: FdKey, flags: u16) -> io::Result<()> {
@@ -404,15 +492,62 @@ impl Driver {
         }
     }
 
+    fn update_process_interest(&self, pid: libc::pid_t, flags: u16) -> io::Result<()> {
+        let event = libc::kevent {
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
+            flags,
+            fflags: if flags & libc::EV_DELETE == 0 {
+                libc::NOTE_EXIT
+            } else {
+                0
+            },
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let submitted = unsafe {
+            libc::kevent(
+                self.kqueue_fd,
+                &event,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if submitted < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     fn complete_fd_waiters(&self, fd: RawFd, interest: FdInterest, event: &libc::kevent) {
         let key = FdKey { fd, interest };
-        let waiter = self.fd_waiters.borrow_mut().remove(&key);
-        let Some(waiter) = waiter else {
+        let waiters = self.fd_waiters.borrow_mut().remove(&key);
+        let Some(waiters) = waiters else {
             return;
         };
 
-        let result = fd_event_result(event, interest);
-        waiter.completion.complete(result);
+        for waiter in waiters {
+            waiter.completion.complete(fd_event_result(event, interest));
+        }
+    }
+
+    fn complete_process_waiters(&self, pid: libc::pid_t, event: &libc::kevent) {
+        let waiters = self.process_waiters.borrow_mut().remove(&pid);
+        let Some(waiters) = waiters else {
+            return;
+        };
+
+        for waiter in waiters {
+            waiter.completion.complete(event_result(event));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_armed_timer_for_test(&self) -> bool {
+        self.timer_deadline.get().is_some()
     }
 }
 
@@ -498,14 +633,21 @@ fn interest_from_filter(filter: i16) -> Option<FdInterest> {
     }
 }
 
-fn fd_event_result(event: &libc::kevent, interest: FdInterest) -> io::Result<()> {
+fn event_result(event: &libc::kevent) -> io::Result<()> {
     if event.flags & libc::EV_ERROR != 0 && event.data != 0 {
         Err(io::Error::from_raw_os_error(event.data as i32))
-    } else if event.flags & libc::EV_EOF != 0 && interest == FdInterest::Writable {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "fd write side reached EOF",
-        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn fd_event_result(event: &libc::kevent, interest: FdInterest) -> io::Result<()> {
+    event_result(event)?;
+    // Readable EOF can still carry buffered bytes in `data`; let read/recv
+    // drain them and report the terminal condition on a later syscall.
+    // Writable EOF has no drain step, and `fflags` is connect's SO_ERROR.
+    if interest == FdInterest::Writable && event.flags & libc::EV_EOF != 0 && event.fflags != 0 {
+        Err(io::Error::from_raw_os_error(event.fflags as i32))
     } else {
         Ok(())
     }
@@ -558,4 +700,36 @@ fn drain_wake_pipe(fd: RawFd) -> io::Result<u64> {
     }
 
     Ok(wakes.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffered_readable_data_precedes_reset_error() {
+        let event = libc::kevent {
+            ident: 7,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_EOF,
+            fflags: libc::ECONNRESET as u32,
+            data: 4,
+            udata: std::ptr::null_mut(),
+        };
+
+        assert!(
+            fd_event_result(&event, FdInterest::Readable).is_ok(),
+            "readable EOF must let recv drain the four buffered bytes first"
+        );
+
+        let writable_event = libc::kevent {
+            filter: libc::EVFILT_WRITE,
+            data: 0,
+            ..event
+        };
+        let error = fd_event_result(&writable_event, FdInterest::Writable)
+            .expect_err("writable EOF must preserve the socket error");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(error.raw_os_error(), Some(libc::ECONNRESET));
+    }
 }

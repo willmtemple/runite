@@ -12,11 +12,12 @@ use std::cell::Cell;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_IO_COMPLETION, WAIT_TIMEOUT,
+    ERROR_ACCESS_DENIED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_IO_COMPLETION,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatusEx, OVERLAPPED, OVERLAPPED_ENTRY,
@@ -38,6 +39,54 @@ pub use crate::platform::runtime_shared::ReadyEvents;
 #[link(name = "ntdll")]
 unsafe extern "system" {
     fn RtlNtStatusToDosError(status: i32) -> u32;
+    fn NtQueryInformationFile(
+        file_handle: HANDLE,
+        io_status_block: *mut IoStatusBlock,
+        file_information: *mut core::ffi::c_void,
+        length: u32,
+        file_information_class: i32,
+    ) -> i32;
+}
+
+#[repr(C)]
+struct IoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct FileModeInformation {
+    mode: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct FileIoCompletionNotificationInformation {
+    flags: u32,
+}
+
+const FILE_MODE_INFORMATION_CLASS: i32 = 16;
+const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION_CLASS: i32 = 41;
+const FILE_SYNCHRONOUS_IO_ALERT: u32 = 0x10;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS: u32 = 0x1;
+
+static NEXT_DRIVER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-unique identity of one runtime thread's completion port.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct DriverId(u64);
+
+impl DriverId {
+    fn allocate() -> Self {
+        loop {
+            let id = NEXT_DRIVER_ID.fetch_add(1, Ordering::Relaxed);
+            if id != 0 {
+                return Self(id);
+            }
+        }
+    }
 }
 
 /// Completion key for cross-thread wake packets.
@@ -141,6 +190,7 @@ impl Notifier for ThreadNotifier {
 
 /// Low-level Windows runtime driver backed by an I/O completion port.
 pub struct Driver {
+    id: DriverId,
     port: Arc<OwnedHandle>,
     timer: OwnedHandle,
     closed: Arc<AtomicBool>,
@@ -173,6 +223,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
     };
 
     let driver = Driver {
+        id: DriverId::allocate(),
         port,
         timer,
         closed,
@@ -305,13 +356,31 @@ impl Driver {
         if timers == 0 { None } else { Some(timers) }
     }
 
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> DriverId {
+        self.id
+    }
+
+    pub(crate) fn ensure_affinity(&self, id: DriverId) -> io::Result<()> {
+        if self.id == id {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "I/O resource belongs to a different runite runtime thread",
+            ))
+        }
+    }
+
     /// Associates `handle` with this driver's completion port.
     ///
     /// A handle can be associated with exactly one port for its lifetime; the
     /// backends call this once when a file, socket, or pipe handle is created
     /// or adopted on this runtime thread. After association, every overlapped
     /// operation on the handle posts its completion packet to this port.
-    pub(crate) fn associate_handle(&self, handle: RawHandle) -> io::Result<()> {
+    pub(crate) fn associate_handle(&self, handle: RawHandle) -> io::Result<DriverId> {
+        ensure_overlapped(handle)?;
+
         // SAFETY: `handle` is an open overlapped-capable handle supplied by the
         // backend; associating it with the owned port does not transfer
         // ownership of either handle.
@@ -321,7 +390,7 @@ impl Driver {
         if result.is_null() {
             return Err(io::Error::last_os_error());
         }
-        Ok(())
+        Ok(self.id)
     }
 
     fn process(&self, timeout: Option<Duration>) -> io::Result<Option<ReadyEvents>> {
@@ -385,6 +454,95 @@ impl Driver {
         }
 
         if saw_any { Ok(Some(ready)) } else { Ok(None) }
+    }
+}
+
+/// Rejects handles that cannot honor the driver's one-packet-per-operation
+/// lifecycle before they are attached to the runtime's completion port.
+fn ensure_overlapped(handle: RawHandle) -> io::Result<()> {
+    // SAFETY: `FileModeInformation` is the repr(C) payload for this class and
+    // consists only of one native `u32`.
+    let mode = unsafe {
+        query_file_information::<FileModeInformation>(handle, FILE_MODE_INFORMATION_CLASS)
+    }?;
+    if mode.mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle was not opened for overlapped I/O",
+        ));
+    }
+
+    // SAFETY: `FileIoCompletionNotificationInformation` is the repr(C)
+    // payload for this class and consists only of one native `u32`.
+    let notification = match unsafe {
+        query_file_information::<FileIoCompletionNotificationInformation>(
+            handle,
+            FILE_IO_COMPLETION_NOTIFICATION_INFORMATION_CLASS,
+        )
+    } {
+        Ok(notification) => notification,
+        // This class requires `FILE_READ_ATTRIBUTES`, which some handles the
+        // runtime legitimately adopts do not carry: std opens the parent's end
+        // of a child's stdin pipe write-only, so the kernel answers
+        // `ACCESS_DENIED`. Treat that as "cannot determine" rather than a
+        // rejection. Nothing runite or std creates sets
+        // `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`, so the packet-per-operation
+        // invariant still holds for every handle produced here; only a foreign
+        // handle that both sets the flag and withholds `FILE_READ_ATTRIBUTES`
+        // could slip past, and issue #17 tracks supporting inline success
+        // properly.
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if notification.flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0 {
+        // Issue #17 tracks an inline-success path. Until then the terminal
+        // packet is the unique owner-reclamation event.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows handle suppresses completion packets for synchronous success",
+        ));
+    }
+    Ok(())
+}
+
+/// Queries one fixed-size native file-information structure.
+///
+/// # Safety
+///
+/// `T` must be the complete `repr(C)` output payload for
+/// `information_class`, and every initialized bit pattern the kernel may
+/// return for that class must be valid for `T`.
+unsafe fn query_file_information<T>(handle: RawHandle, information_class: i32) -> io::Result<T> {
+    let mut status = IoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut information = std::mem::MaybeUninit::<T>::zeroed();
+    let length = u32::try_from(std::mem::size_of::<T>()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native file information payload is too large",
+        )
+    })?;
+    // SAFETY: the caller guarantees that `T` matches `information_class`; the
+    // pointer and exact buffer size are valid for this call.
+    let result = unsafe {
+        NtQueryInformationFile(
+            handle as HANDLE,
+            &mut status,
+            information.as_mut_ptr().cast(),
+            length,
+            information_class,
+        )
+    };
+    if result == 0 {
+        // SAFETY: a successful fixed-size information query initialized the
+        // complete output payload promised by the caller.
+        Ok(unsafe { information.assume_init() })
+    } else {
+        // SAFETY: the status came directly from an NT API call.
+        let error = unsafe { RtlNtStatusToDosError(result) };
+        Err(io::Error::from_raw_os_error(error as i32))
     }
 }
 

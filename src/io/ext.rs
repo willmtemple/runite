@@ -1,8 +1,9 @@
 //! Future-returning extension traits for runite I/O.
 //!
-//! This module adapts the low-level poll methods from [`AsyncRead`] and
-//! [`AsyncWrite`] into futures such as [`AsyncReadExt::read_exact`] and
-//! [`AsyncWriteExt::write_all`]. It also provides [`copy`],
+//! This module adapts the low-level poll methods from [`AsyncRead`],
+//! [`AsyncWrite`], and [`AsyncSeek`] into futures such as
+//! [`AsyncReadExt::read_exact`], [`AsyncWriteExt::write_all`], and
+//! [`AsyncSeekExt::seek`]. It also provides [`copy`],
 //! [`copy_bidirectional`], and [`Lines`], a stream adapter for UTF-8
 //! line-oriented readers. The returned futures are intended to stay on the
 //! runite runtime thread that owns their readers and writers; unlike Tokio's
@@ -48,9 +49,9 @@
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut, SeekFrom};
 
-use super::{AsyncRead, AsyncWrite, Stream};
+use super::{AsyncRead, AsyncSeek, AsyncWrite, Stream};
 
 const READ_TO_END_CHUNK: usize = 8192;
 const COPY_BUF_SIZE: usize = 8192;
@@ -131,6 +132,43 @@ pub trait AsyncReadExt: AsyncRead {
         Self: Unpin,
     {
         Read { reader: self, buf }
+    }
+
+    /// Reads into a sequence of byte slices.
+    ///
+    /// May fill only part of the supplied buffers; empty input completes with
+    /// `Ok(0)` without polling the reader.
+    ///
+    /// **This is not a scatter/gather optimization today.** No runite backend
+    /// issues `readv` or a multi-buffer io_uring operation: the portable
+    /// default reads into the first non-empty slice only, so filling several
+    /// buffers still costs one operation each. Treat the method as
+    /// forward-compatible API surface, and expect only the first slice to be
+    /// touched per call.
+    ///
+    /// ```no_run
+    /// use std::io::IoSliceMut;
+    /// use runite::io::AsyncReadExt;
+    ///
+    /// runite::spawn(async {
+    ///     let mut file = runite::fs::File::open("input.bin").await.unwrap();
+    ///     let (mut header, mut body) = ([0; 4], [0; 32]);
+    ///     let mut bufs = [
+    ///         IoSliceMut::new(&mut header),
+    ///         IoSliceMut::new(&mut body),
+    ///     ];
+    ///     let _read = file.read_vectored(&mut bufs).await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
+    fn read_vectored<'a, 'buf>(
+        &'a mut self,
+        bufs: &'a mut [IoSliceMut<'buf>],
+    ) -> ReadVectored<'a, 'buf, Self>
+    where
+        Self: Unpin,
+    {
+        ReadVectored { reader: self, bufs }
     }
 
     /// Reads exactly enough bytes to fill `buf`.
@@ -337,7 +375,46 @@ pub trait AsyncWriteExt: AsyncWrite {
     where
         Self: Unpin,
     {
-        Write { writer: self, buf }
+        Write {
+            writer: self,
+            buf,
+            generation: super::WriteOperation::new(),
+        }
+    }
+
+    /// Writes from a sequence of byte slices.
+    ///
+    /// May accept only part of the supplied bytes; empty input completes with
+    /// `Ok(0)` without polling the writer.
+    ///
+    /// **This is not a scatter/gather optimization today.** No runite backend
+    /// issues `writev` or a multi-buffer io_uring operation: the portable
+    /// default writes the first non-empty slice only. Treat the method as
+    /// forward-compatible API surface.
+    ///
+    /// ```no_run
+    /// use std::io::IoSlice;
+    /// use runite::io::AsyncWriteExt;
+    ///
+    /// runite::spawn(async {
+    ///     let mut file = runite::fs::File::create("output.bin").await.unwrap();
+    ///     let bufs = [IoSlice::new(b"head"), IoSlice::new(b"body")];
+    ///     let _written = file.write_vectored(&bufs).await.unwrap();
+    /// });
+    /// runite::run();
+    /// ```
+    fn write_vectored<'a, 'buf>(
+        &'a mut self,
+        bufs: &'a [IoSlice<'buf>],
+    ) -> WriteVectored<'a, 'buf, Self>
+    where
+        Self: Unpin,
+    {
+        WriteVectored {
+            writer: self,
+            bufs,
+            generation: super::WriteOperation::new(),
+        }
     }
 
     /// Writes the entire contents of `buf`.
@@ -376,6 +453,7 @@ pub trait AsyncWriteExt: AsyncWrite {
             writer: self,
             buf,
             written: 0,
+            generation: super::WriteOperation::new(),
         }
     }
 
@@ -403,6 +481,38 @@ pub trait AsyncWriteExt: AsyncWrite {
 }
 
 impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
+
+/// Convenience futures for values that implement [`AsyncSeek`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use runite::fs::File;
+/// use runite::io::{AsyncSeekExt, SeekFrom};
+///
+/// runite::spawn(async {
+///     let mut file = File::open("records.bin").await.unwrap();
+///     let position = AsyncSeekExt::seek(&mut file, SeekFrom::Start(128))
+///         .await
+///         .unwrap();
+///     assert_eq!(position, 128);
+/// });
+/// runite::run();
+/// ```
+pub trait AsyncSeekExt: AsyncSeek {
+    /// Repositions the stream cursor and returns its new offset from the start.
+    fn seek(&mut self, position: SeekFrom) -> Seek<'_, Self>
+    where
+        Self: Unpin,
+    {
+        Seek {
+            seeker: self,
+            position,
+        }
+    }
+}
+
+impl<S: AsyncSeek + ?Sized> AsyncSeekExt for S {}
 
 /// Copies all bytes from `reader` into `writer`.
 ///
@@ -464,6 +574,7 @@ where
         filled: 0,
         copied: 0,
         state: CopyState::Copying,
+        generation: super::WriteOperation::new(),
     }
 }
 
@@ -541,6 +652,22 @@ where
 pub struct Read<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
+}
+
+/// Future returned by [`AsyncReadExt::read_vectored`].
+#[must_use = "futures do nothing unless awaited or polled"]
+pub struct ReadVectored<'a, 'buf, R: ?Sized> {
+    reader: &'a mut R,
+    bufs: &'a mut [IoSliceMut<'buf>],
+}
+
+impl<R: AsyncRead + Unpin + ?Sized> Future for ReadVectored<'_, '_, R> {
+    type Output = io::Result<usize>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        Pin::new(&mut *this.reader).poll_read_vectored(cx, this.bufs)
+    }
 }
 
 impl<R: AsyncRead + Unpin + ?Sized> Future for Read<'_, R> {
@@ -621,6 +748,28 @@ impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToEnd<'_, R> {
 pub struct Write<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
+    generation: super::WriteOperation,
+}
+
+/// Future returned by [`AsyncWriteExt::write_vectored`].
+#[must_use = "futures do nothing unless awaited or polled"]
+pub struct WriteVectored<'a, 'buf, W: ?Sized> {
+    writer: &'a mut W,
+    bufs: &'a [IoSlice<'buf>],
+    generation: super::WriteOperation,
+}
+
+impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteVectored<'_, '_, W> {
+    type Output = io::Result<usize>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        Pin::new(&mut *this.writer).poll_write_vectored_operation(
+            cx,
+            this.bufs,
+            this.generation.generation(),
+        )
+    }
 }
 
 impl<W: AsyncWrite + Unpin + ?Sized> Future for Write<'_, W> {
@@ -628,7 +777,7 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Write<'_, W> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        Pin::new(&mut *this.writer).poll_write(cx, this.buf)
+        Pin::new(&mut *this.writer).poll_write_operation(cx, this.buf, this.generation.generation())
     }
 }
 
@@ -638,6 +787,7 @@ pub struct WriteAll<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
     written: usize,
+    generation: super::WriteOperation,
 }
 
 impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteAll<'_, W> {
@@ -646,20 +796,40 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteAll<'_, W> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         while this.written < this.buf.len() {
-            let written =
-                match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.written..]) {
-                    Poll::Ready(result) => result?,
-                    Poll::Pending => return Poll::Pending,
-                };
+            let written = match Pin::new(&mut *this.writer).poll_write_operation(
+                cx,
+                &this.buf[this.written..],
+                this.generation.generation(),
+            ) {
+                Poll::Ready(result) => result?,
+                Poll::Pending => return Poll::Pending,
+            };
             if written == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "failed to write whole buffer",
                 )));
             }
+
             this.written += written;
         }
         Poll::Ready(Ok(()))
+    }
+}
+
+/// Future returned by [`AsyncSeekExt::seek`].
+#[must_use = "futures do nothing unless awaited or polled"]
+pub struct Seek<'a, S: ?Sized> {
+    seeker: &'a mut S,
+    position: SeekFrom,
+}
+
+impl<S: AsyncSeek + Unpin + ?Sized> Future for Seek<'_, S> {
+    type Output = io::Result<u64>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        Pin::new(&mut *this.seeker).poll_seek(cx, this.position)
     }
 }
 
@@ -718,6 +888,7 @@ pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     filled: usize,
     copied: u64,
     state: CopyState,
+    generation: super::WriteOperation,
 }
 
 impl<R, W> Future for Copy<'_, R, W>
@@ -732,9 +903,11 @@ where
         loop {
             match this.state {
                 CopyState::Copying if this.pos < this.filled => {
-                    let written = match Pin::new(&mut *this.writer)
-                        .poll_write(cx, &this.buf[this.pos..this.filled])
-                    {
+                    let written = match Pin::new(&mut *this.writer).poll_write_operation(
+                        cx,
+                        &this.buf[this.pos..this.filled],
+                        this.generation.generation(),
+                    ) {
                         Poll::Ready(result) => result?,
                         Poll::Pending => return Poll::Pending,
                     };
@@ -783,6 +956,7 @@ struct CopyHalf {
     filled: usize,
     copied: u64,
     state: CopyHalfState,
+    generation: super::WriteOperation,
 }
 
 impl CopyHalf {
@@ -793,6 +967,7 @@ impl CopyHalf {
             filled: 0,
             copied: 0,
             state: CopyHalfState::Copying,
+            generation: super::WriteOperation::new(),
         }
     }
 
@@ -814,11 +989,14 @@ where
     loop {
         match half.state {
             CopyHalfState::Copying if half.pos < half.filled => {
-                let written =
-                    match Pin::new(&mut *writer).poll_write(cx, &half.buf[half.pos..half.filled]) {
-                        Poll::Ready(result) => result?,
-                        Poll::Pending => return Poll::Pending,
-                    };
+                let written = match Pin::new(&mut *writer).poll_write_operation(
+                    cx,
+                    &half.buf[half.pos..half.filled],
+                    half.generation.generation(),
+                ) {
+                    Poll::Ready(result) => result?,
+                    Poll::Pending => return Poll::Pending,
+                };
                 if written == 0 {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,

@@ -12,16 +12,10 @@
 //! object's shared pointer (`SetFilePointerEx`). Duplicated handles share the
 //! file object and therefore the cursor, matching Unix `dup`.
 
-use std::collections::VecDeque;
-use std::future::poll_fn;
 use std::io;
 use std::mem::ManuallyDrop;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
 use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -30,11 +24,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+pub(crate) use crate::fs::ReadDirStream;
 use crate::op::completion::completion_for_current_thread;
-use crate::op::fs::{FileType, FsOp, MetadataTarget, RawDirEntry, RawMetadata};
-use crate::platform::current::runtime::{ThreadHandle, current_thread_handle};
+use crate::op::fs::{FileType, FsOp, MetadataTarget, RawMetadata};
 use crate::sys::blocking::spawn_blocking;
-use crate::sys::handle::{OwnedFile, PlatformMetadata, RawFile, raw_file};
+use crate::sys::handle::{OwnedFile, PlatformMetadata, RawFile};
 use crate::sys::windows::overlapped;
 
 pub async fn open(op: FsOp) -> io::Result<OwnedFile> {
@@ -42,7 +36,7 @@ pub async fn open(op: FsOp) -> io::Result<OwnedFile> {
         unreachable!("open backend called with non-open op");
     };
 
-    let file = offload(move || {
+    let handle = offload(move || {
         let mut open = std::fs::OpenOptions::new();
         open.read(options.read)
             .write(options.write)
@@ -71,8 +65,7 @@ pub async fn open(op: FsOp) -> io::Result<OwnedFile> {
     // Bind the fresh handle to this runtime thread's completion port so
     // overlapped reads and writes post their packets here. Runs after the
     // offload so it executes on the runtime thread that owns the driver.
-    overlapped::associate_file(raw_file(&file))?;
-    Ok(file)
+    adopt_handle(handle)
 }
 
 pub async fn read(op: FsOp) -> io::Result<Vec<u8>> {
@@ -83,9 +76,10 @@ pub async fn read(op: FsOp) -> io::Result<Vec<u8>> {
     match offset {
         Some(offset) => overlapped::read_at(fd, len, offset).await,
         None => {
-            let position = seek(fd, std::io::SeekFrom::Current(0))?;
-            let data = overlapped::read_at(fd, len, position).await?;
-            advance_cursor(fd, position, data.len() as u64);
+            fd.ensure_current()?;
+            let position = seek(fd.clone(), std::io::SeekFrom::Current(0))?;
+            let data = overlapped::read_at(fd.clone(), len, position).await?;
+            advance_cursor(fd, position, data.len() as u64)?;
             Ok(data)
         }
     }
@@ -99,9 +93,10 @@ pub async fn write(op: FsOp) -> io::Result<usize> {
     match offset {
         Some(offset) => overlapped::write_at(fd, data, offset).await,
         None => {
-            let position = seek(fd, std::io::SeekFrom::Current(0))?;
-            let written = overlapped::write_at(fd, data, position).await?;
-            advance_cursor(fd, position, written as u64);
+            fd.ensure_current()?;
+            let position = seek(fd.clone(), std::io::SeekFrom::Current(0))?;
+            let written = overlapped::write_at(fd.clone(), data, position).await?;
+            advance_cursor(fd, position, written as u64)?;
             Ok(written)
         }
     }
@@ -109,14 +104,12 @@ pub async fn write(op: FsOp) -> io::Result<usize> {
 
 /// Moves the shared file cursor past a completed cursor-based operation.
 ///
-/// Best-effort: append-mode handles ignore write offsets entirely (the kernel
-/// appends atomically), and a failed pointer update only affects subsequent
-/// cursor-based operations on the same handle.
-fn advance_cursor(fd: RawFile, position: u64, transferred: u64) {
-    let _ = seek(
+fn advance_cursor(fd: RawFile, position: u64, transferred: u64) -> io::Result<()> {
+    seek(
         fd,
         std::io::SeekFrom::Start(position.saturating_add(transferred)),
-    );
+    )
+    .map(|_| ())
 }
 
 pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
@@ -128,6 +121,10 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
         unreachable!("metadata backend called with non-metadata op");
     };
 
+    if let MetadataTarget::File(fd) = &target {
+        fd.ensure_current()?;
+    }
+
     offload(move || {
         let metadata = match target {
             MetadataTarget::Path(path) => {
@@ -138,7 +135,7 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
                 }
             }
             MetadataTarget::File(fd) => {
-                let file = borrow_file(fd);
+                let file = borrow_file(&fd);
                 file.metadata()
             }
         }?;
@@ -152,7 +149,8 @@ pub async fn sync_all(op: FsOp) -> io::Result<()> {
         unreachable!("sync_all backend called with non-sync_all op");
     };
 
-    offload(move || borrow_file(fd).sync_all()).await
+    fd.ensure_current()?;
+    offload(move || borrow_file(&fd).sync_all()).await
 }
 
 pub async fn sync_data(op: FsOp) -> io::Result<()> {
@@ -160,7 +158,8 @@ pub async fn sync_data(op: FsOp) -> io::Result<()> {
         unreachable!("sync_data backend called with non-sync_data op");
     };
 
-    offload(move || borrow_file(fd).sync_data()).await
+    fd.ensure_current()?;
+    offload(move || borrow_file(&fd).sync_data()).await
 }
 
 pub async fn set_len(op: FsOp) -> io::Result<()> {
@@ -168,13 +167,15 @@ pub async fn set_len(op: FsOp) -> io::Result<()> {
         unreachable!("set_len backend called with non-set_len op");
     };
 
-    offload(move || borrow_file(fd).set_len(len)).await
+    fd.ensure_current()?;
+    offload(move || borrow_file(&fd).set_len(len)).await
 }
 
 /// Repositions the file's kernel cursor. `SetFilePointerEx` is a fast
 /// metadata operation that does not block, so it runs inline on the event
 /// loop.
 pub fn seek(fd: RawFile, pos: std::io::SeekFrom) -> io::Result<u64> {
+    fd.ensure_current()?;
     let (method, offset) = match pos {
         std::io::SeekFrom::Start(n) => (
             FILE_BEGIN,
@@ -202,6 +203,8 @@ pub async fn try_clone(op: FsOp) -> io::Result<OwnedFile> {
         unreachable!("try_clone backend called with non-duplicate op");
     };
 
+    let affinity = fd.affinity()?;
+
     // `DuplicateHandle` within one process never blocks; run it inline like
     // the Linux backend's `F_DUPFD_CLOEXEC`.
     let mut duplicated = std::ptr::null_mut();
@@ -223,12 +226,12 @@ pub async fn try_clone(op: FsOp) -> io::Result<OwnedFile> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `duplicated` is a fresh handle exclusively owned here.
-    let file = unsafe { OwnedHandle::from_raw_handle(duplicated) };
+    let handle = unsafe { OwnedHandle::from_raw_handle(duplicated) };
 
-    // The duplicate shares the original's file object, which is already bound
-    // to a completion port; tolerate the re-association failure.
-    overlapped::associate_file_reused(raw_file(&file))?;
-    Ok(file)
+    // A duplicate shares the already-associated file object. Propagate the
+    // proven affinity instead of treating every ERROR_INVALID_PARAMETER as a
+    // successful association (which would also accept a foreign IOCP).
+    Ok(OwnedFile::bound(handle, affinity))
 }
 
 pub async fn create_dir(op: FsOp) -> io::Result<()> {
@@ -263,160 +266,12 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
     offload(move || std::fs::rename(from, to)).await
 }
 
-pub fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
+pub(crate) fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
     let FsOp::ReadDir { path } = op else {
         unreachable!("read_dir backend called with non-read_dir op");
     };
 
     ReadDirStream::new(path)
-}
-
-pub struct ReadDirStream {
-    state: Arc<ReadDirState>,
-}
-
-impl ReadDirStream {
-    fn new(path: PathBuf) -> io::Result<Self> {
-        let state = Arc::new(ReadDirState::new(current_thread_handle()));
-        let producer = Arc::clone(&state);
-
-        if let Err(error) = spawn_blocking(move || produce_dir_entries(path, producer)) {
-            state.release_pending();
-            return Err(error);
-        }
-
-        Ok(Self { state })
-    }
-
-    pub async fn next_entry(&mut self) -> io::Result<Option<RawDirEntry>> {
-        poll_fn(|cx| self.state.poll_next(cx)).await
-    }
-}
-
-struct ReadDirState {
-    owner: ThreadHandle,
-    queue: Mutex<VecDeque<io::Result<RawDirEntry>>>,
-    done: AtomicBool,
-    pending: AtomicBool,
-    wake_queued: AtomicBool,
-    waker: Mutex<Option<Waker>>,
-}
-
-impl ReadDirState {
-    fn new(owner: ThreadHandle) -> Self {
-        owner.begin_async_operation();
-        Self {
-            owner,
-            queue: Mutex::new(VecDeque::new()),
-            done: AtomicBool::new(false),
-            pending: AtomicBool::new(true),
-            wake_queued: AtomicBool::new(false),
-            waker: Mutex::new(None),
-        }
-    }
-
-    fn push(self: &Arc<Self>, entry: io::Result<RawDirEntry>) {
-        self.queue.lock().unwrap().push_back(entry);
-        self.notify();
-    }
-
-    fn finish(self: &Arc<Self>) {
-        self.done.store(true, Ordering::Release);
-        // Enqueue the consumer's wake BEFORE releasing the pending op. In the
-        // reverse order there is a window where pending_ops is 0 and the
-        // remote queue is empty; run()'s exit protocol can commit `closed` in
-        // that window, after which the wake enqueue fails and the consumer is
-        // stranded (its task never resumes, and callers observe the stream's
-        // work as silently lost). With the wake enqueued first, the exit
-        // commit's remote-queue check sees it and keeps the loop alive.
-        // (Mirrors the ordering contract in op/completion.rs `finish`.)
-        self.notify();
-        self.release_pending();
-    }
-
-    fn release_pending(&self) {
-        if self.pending.swap(false, Ordering::AcqRel) {
-            self.owner.finish_async_operation();
-        }
-    }
-
-    fn notify(self: &Arc<Self>) {
-        if self.wake_queued.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        // Internal wake: routed through the capacity-bypassing path (like
-        // completion and task wakes) so a full user queue can never drop it —
-        // a dropped stream wake strands the consumer. The only failure is a
-        // closed owner thread, where nothing can be scheduled anyway.
-        let state = Arc::clone(self);
-        if self
-            .owner
-            .queue_internal_wake(move || {
-                state.wake_queued.store(false, Ordering::Release);
-                if let Some(waker) = state.waker.lock().unwrap().take() {
-                    waker.wake();
-                }
-            })
-            .is_err()
-        {
-            self.wake_queued.store(false, Ordering::Release);
-        }
-    }
-
-    fn poll_next(&self, cx: &mut Context<'_>) -> Poll<io::Result<Option<RawDirEntry>>> {
-        if let Some(entry) = self.queue.lock().unwrap().pop_front() {
-            return Poll::Ready(entry.map(Some));
-        }
-
-        if self.done.load(Ordering::Acquire) {
-            return Poll::Ready(Ok(None));
-        }
-
-        *self.waker.lock().unwrap() = Some(cx.waker().clone());
-
-        if let Some(entry) = self.queue.lock().unwrap().pop_front() {
-            let _ = self.waker.lock().unwrap().take();
-            return Poll::Ready(entry.map(Some));
-        }
-
-        if self.done.load(Ordering::Acquire) {
-            let _ = self.waker.lock().unwrap().take();
-            return Poll::Ready(Ok(None));
-        }
-
-        Poll::Pending
-    }
-}
-
-impl Drop for ReadDirStream {
-    fn drop(&mut self) {
-        self.state.release_pending();
-    }
-}
-
-fn produce_dir_entries(path: PathBuf, state: Arc<ReadDirState>) {
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(entry) => {
-                        let file_name = entry.file_name();
-                        state.push(Ok(RawDirEntry {
-                            path: entry.path(),
-                            file_name,
-                        }));
-                    }
-                    Err(error) => state.push(Err(error)),
-                }
-            }
-            state.finish();
-        }
-        Err(error) => {
-            state.push(Err(error));
-            state.finish();
-        }
-    }
 }
 
 async fn offload<T: Send + 'static>(
@@ -433,11 +288,16 @@ async fn offload<T: Send + 'static>(
 /// Borrows a raw handle as a [`std::fs::File`] without taking ownership, so
 /// std's handle-based metadata/flush/truncate wrappers can be reused. The
 /// `ManuallyDrop` prevents the borrowed handle from being closed.
-fn borrow_file(fd: RawFile) -> ManuallyDrop<std::fs::File> {
+fn borrow_file(fd: &RawFile) -> ManuallyDrop<std::fs::File> {
     // SAFETY: `fd` names a handle the caller keeps open for the duration of
     // the blocking operation; `ManuallyDrop` ensures ownership never
     // transfers.
     ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(fd.as_handle()) })
+}
+
+pub(crate) fn adopt_handle(handle: OwnedHandle) -> io::Result<OwnedFile> {
+    let affinity = overlapped::associate_raw_handle(handle.as_raw_handle())?;
+    Ok(OwnedFile::bound(handle, affinity))
 }
 
 fn raw_metadata_from_std(metadata: &std::fs::Metadata) -> RawMetadata {
@@ -490,4 +350,62 @@ fn synthesize_mode(attributes: u32, kind: FileType) -> u32 {
     };
 
     type_bits | permissions
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::windows::io::OwnedHandle;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::borrow_file;
+    use crate::platform::runtime_shared::test_support::ExecutionGate;
+    use crate::sys::blocking::{install_task_hook, spawn_blocking};
+    use crate::sys::handle::{OwnedFile, raw_file};
+
+    #[test]
+    fn accepted_blocking_job_owns_its_handle() {
+        let path = std::env::current_dir()
+            .expect("current directory")
+            .join("target")
+            .join(format!("windows-owned-blocking-{}", std::process::id()));
+        std::fs::write(&path, b"owned").expect("write fixture");
+
+        let file = std::fs::File::open(&path).expect("open fixture");
+        let owner = OwnedFile::unbound(OwnedHandle::from(file));
+        let operation = raw_file(&owner);
+        let gate = Arc::new(ExecutionGate::default());
+        let release = gate.release_on_drop();
+        let hook = install_task_hook(Arc::clone(&gate) as Arc<_>);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+
+        spawn_blocking(move || {
+            let result = borrow_file(&operation)
+                .metadata()
+                .map(|metadata| metadata.len());
+            sender.send(result).expect("send blocking result");
+        })
+        .expect("submit blocking job");
+        assert!(
+            gate.wait_until_arrived(Duration::from_secs(5)),
+            "blocking job did not reach execution gate"
+        );
+
+        drop(owner);
+        drop(hook);
+        release.release();
+
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("receive blocking result")
+                .expect("metadata through retained handle"),
+            5
+        );
+        assert!(
+            gate.wait_until_completed(Duration::from_secs(5)),
+            "blocking job did not complete"
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
 }

@@ -52,22 +52,25 @@
 //! runite::run();
 //! ```
 
+use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use core::time::Duration;
 
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 
-use crate::io::{AsyncRead, AsyncWrite, Stream};
+use crate::io::{AsyncRead, AsyncWrite, ReadState, Stream, WriteState};
 use crate::op::net::NetOp;
 use crate::sys::handle::{OwnedSock, RawSock, owned_sock_from_raw, raw_sock};
 
 #[cfg(feature = "hyper")]
 mod hyper_impl;
 mod interop;
+#[cfg(test)]
+mod pending_tests;
 #[cfg(unix)]
 pub mod unix;
 
@@ -97,12 +100,6 @@ struct SocketTimeouts {
     write: Option<Duration>,
 }
 
-type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
-type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
-type PendingShutdown = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
-
-use crate::io::ReadOverflow;
-
 /// Async TCP stream connected to a peer.
 ///
 /// `TcpStream` owns a connected stream socket and provides async byte-oriented
@@ -111,30 +108,19 @@ use crate::io::ReadOverflow;
 /// [`write_all`](Self::write_all) when a protocol needs a full buffer.
 ///
 /// Pending operations are stored in the stream and are tied to the current
-/// runite event loop. Dropping a pending read, write, timeout, or shutdown
-/// future cancels interest in that operation but cannot roll back bytes already
-/// transferred by the operating system. The type is effectively `!Send`, and
-/// should be driven on its owning runtime thread.
+/// runite event loop. Cancelling a public read or write future leaves its
+/// submitted operation on the stream: later reads preserve completed bytes,
+/// while a later write with a different buffer first consumes the abandoned
+/// completion before submitting its own bytes. The type is effectively `!Send`
+/// and should be driven on its owning runtime thread.
 ///
 /// With the `hyper` feature enabled, it also implements Hyper's runtime I/O
 /// traits so it can be used directly as an HTTP transport.
 pub struct TcpStream {
+    // Pending operations must be dropped before the socket owner.
+    read_state: RefCell<ReadState>,
+    write_state: RefCell<WriteState>,
     inner: Arc<TcpStreamInner>,
-    pending_read: Option<PendingRead>,
-    /// Bytes a completed read produced that did not fit the caller's buffer
-    /// (e.g. when a read future is dropped after being submitted with a large
-    /// buffer and a later `poll_read` presents a smaller one). Served before any
-    /// new read is submitted so no received bytes are ever lost. Boxed so the
-    /// common no-overflow case is just a null pointer.
-    read_overflow: Option<Box<ReadOverflow>>,
-    pending_write: Option<PendingWrite>,
-    /// Identity `(ptr, len)` of the buffer that `pending_write` was submitted
-    /// for. A re-poll presenting a different buffer means the original write
-    /// future was dropped mid-flight and an unrelated write started; reporting
-    /// the in-flight op's byte count against the new buffer would corrupt the
-    /// stream, so that is rejected instead.
-    pending_write_ident: Option<(*const u8, usize)>,
-    pending_shutdown: Option<PendingShutdown>,
 }
 
 impl std::fmt::Debug for TcpStream {
@@ -515,14 +501,14 @@ impl TcpStream {
     ///
     /// This method is **not** cancel-safe. Because the write is completion-based,
     /// a future dropped mid-flight may have already committed bytes to the
-    /// kernel without reporting the count, and re-polling with a *different*
-    /// buffer afterward is rejected. Drive a write to completion (or use the same
-    /// buffer) rather than cancelling it in a `select!`.
+    /// kernel without reporting the count. A later write with a different
+    /// buffer waits for and consumes that abandoned completion before submitting
+    /// its own operation, so a stale count is never reported for the new bytes.
+    /// Drive writes to completion rather than cancelling them in a `select!`.
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Delegate to the AsyncWrite path so the in-flight send is stashed on the
-        // stream and the buffer-identity guard applies uniformly across the
-        // inherent and trait-based write APIs.
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write(cx, buf)).await
+        let generation = crate::io::next_operation_id();
+        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write_operation(cx, buf, generation))
+            .await
     }
 
     /// Writes the entire buffer to the stream.
@@ -542,9 +528,14 @@ impl TcpStream {
 
     /// Shuts down the read, write, or both halves of the connection.
     pub async fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        crate::sys::current::net::shutdown(NetOp::Shutdown {
-            fd: self.raw_fd(),
-            how,
+        core::future::poll_fn(|cx| {
+            poll_tcp_stream_shutdown(
+                &mut self.read_state.borrow_mut(),
+                &mut self.write_state.borrow_mut(),
+                &self.inner,
+                cx,
+                how,
+            )
         })
         .await
     }
@@ -577,25 +568,17 @@ impl TcpStream {
     /// # }
     /// ```
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        let read = Self {
-            inner: Arc::clone(&self.inner),
-            pending_read: None,
-            read_overflow: None,
-            pending_write: None,
-            pending_write_ident: None,
-            pending_shutdown: None,
-        };
-        let write = Self {
-            inner: self.inner,
-            pending_read: None,
-            read_overflow: None,
-            pending_write: None,
-            pending_write_ident: None,
-            pending_shutdown: None,
-        };
+        let Self {
+            read_state,
+            write_state,
+            inner,
+        } = self;
         (
-            OwnedReadHalf { stream: read },
-            OwnedWriteHalf { stream: write },
+            OwnedReadHalf {
+                read_state,
+                inner: Arc::clone(&inner),
+            },
+            OwnedWriteHalf { write_state, inner },
         )
     }
 
@@ -608,9 +591,18 @@ impl TcpStream {
     // by design and only materializes on the rare mismatch path.
     #[allow(clippy::result_large_err)]
     pub fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<Self, ReuniteError> {
-        if Arc::ptr_eq(&read.stream.inner, &write.stream.inner) {
-            drop(read);
-            Ok(write.stream)
+        if Arc::ptr_eq(&read.inner, &write.inner) {
+            let OwnedReadHalf {
+                read_state,
+                inner: read_inner,
+            } = read;
+            let OwnedWriteHalf { write_state, inner } = write;
+            drop(read_inner);
+            Ok(Self {
+                read_state,
+                write_state,
+                inner,
+            })
         } else {
             Err(ReuniteError(read, write))
         }
@@ -699,15 +691,12 @@ impl TcpStream {
 
     fn from_owned_fd(fd: OwnedSock) -> Self {
         Self {
+            read_state: RefCell::new(ReadState::default()),
+            write_state: RefCell::new(WriteState::default()),
             inner: Arc::new(TcpStreamInner {
                 fd,
                 timeouts: Mutex::new(SocketTimeouts::default()),
             }),
-            pending_read: None,
-            read_overflow: None,
-            pending_write: None,
-            pending_write_ident: None,
-            pending_shutdown: None,
         }
     }
 
@@ -724,62 +713,83 @@ impl TcpStream {
     }
 }
 
+fn poll_tcp_read(
+    read_state: &mut ReadState,
+    inner: &TcpStreamInner,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    let fd = raw_sock(&inner.fd);
+    let timeout = inner.timeouts.lock().unwrap().read;
+    read_state.poll_slice(cx, buf, move |len| match timeout {
+        Some(timeout) => Box::pin(crate::sys::current::net::recv_timeout(fd, len, 0, timeout)),
+        None => crate::sys::current::net::recv_future(fd, len),
+    })
+}
+
+fn poll_tcp_write(
+    write_state: &mut WriteState,
+    inner: &TcpStreamInner,
+    cx: &mut Context<'_>,
+    generation: u64,
+    buf: &[u8],
+) -> Poll<io::Result<usize>> {
+    let fd = raw_sock(&inner.fd);
+    let timeout = inner.timeouts.lock().unwrap().write;
+    write_state.poll_write(cx, generation, buf, move |data| match timeout {
+        Some(timeout) => Box::pin(crate::sys::current::net::send_timeout(fd, data, 0, timeout)),
+        None => crate::sys::current::net::send_future(fd, data),
+    })
+}
+
+fn poll_tcp_shutdown(
+    write_state: &mut WriteState,
+    inner: &TcpStreamInner,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    let fd = raw_sock(&inner.fd);
+    write_state.poll_shutdown(cx, move || {
+        crate::sys::current::net::shutdown_future(fd, Shutdown::Write)
+    })
+}
+
+fn poll_tcp_stream_shutdown(
+    read_state: &mut ReadState,
+    write_state: &mut WriteState,
+    inner: &TcpStreamInner,
+    cx: &mut Context<'_>,
+    how: Shutdown,
+) -> Poll<io::Result<()>> {
+    let fd = raw_sock(&inner.fd);
+    match how {
+        Shutdown::Read => read_state.poll_shutdown(cx, move || {
+            crate::sys::current::net::shutdown_future(fd, Shutdown::Read)
+        }),
+        Shutdown::Write => poll_tcp_shutdown(write_state, inner, cx),
+        Shutdown::Both => {
+            let read = read_state.poll_shutdown(cx, move || {
+                crate::sys::current::net::shutdown_future(fd, Shutdown::Read)
+            });
+            let write = poll_tcp_shutdown(write_state, inner, cx);
+            match (read, write) {
+                (Poll::Ready(read), Poll::Ready(write)) => match (read, write) {
+                    (Err(error), _) | (_, Err(error)) => Poll::Ready(Err(error)),
+                    (Ok(()), Ok(())) => Poll::Ready(Ok(())),
+                },
+                _ => Poll::Pending,
+            }
+        }
+    }
+}
+
 impl AsyncRead for TcpStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
         let this = self.get_mut();
-
-        // Serve any bytes a previous read produced that overflowed a smaller
-        // caller buffer before submitting (or polling) a new read.
-        if let Some(overflow) = this.read_overflow.as_mut() {
-            let n = overflow.drain_into(buf);
-            if overflow.is_drained() {
-                this.read_overflow = None;
-            }
-            return Poll::Ready(Ok(n));
-        }
-
-        if this.pending_read.is_none() {
-            this.pending_read = Some(match this.read_timeout_value() {
-                Some(timeout) => Box::pin(crate::sys::current::net::recv_timeout(
-                    this.raw_fd(),
-                    buf.len(),
-                    0,
-                    timeout,
-                )),
-                None => crate::sys::current::net::recv_future(this.raw_fd(), buf.len()),
-            });
-        }
-
-        match this
-            .pending_read
-            .as_mut()
-            .expect("pending read must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_read = None;
-                let data = result?;
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                // If the completed read is larger than the current buffer (the
-                // submitted buffer shrank across polls), keep the surplus for the
-                // next read rather than discarding it.
-                if data.len() > n {
-                    this.read_overflow = Some(Box::new(ReadOverflow::new(&data[n..])));
-                }
-                Poll::Ready(Ok(n))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        poll_tcp_read(this.read_state.get_mut(), &this.inner, cx, buf)
     }
 }
 
@@ -789,77 +799,41 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
+        self.poll_write_operation(cx, buf, 0)
+    }
 
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        let ident = (buf.as_ptr(), buf.len());
-        if this.pending_write.is_none() {
-            this.pending_write = Some(match this.write_timeout_value() {
-                Some(timeout) => Box::pin(crate::sys::current::net::send_timeout(
-                    this.raw_fd(),
-                    buf.to_vec(),
-                    0,
-                    timeout,
-                )),
-                None => crate::sys::current::net::send_future(this.raw_fd(), buf.to_vec()),
-            });
-            this.pending_write_ident = Some(ident);
-        } else if this.pending_write_ident != Some(ident) {
-            // A write is in flight for a *different* buffer: the future that
-            // submitted it was dropped mid-flight and an unrelated write began.
-            // Those bytes are already committed to the kernel, so reporting this
-            // op's count against the new buffer would corrupt the stream. Reject
-            // instead. (The in-flight op keeps running; drive writes to
-            // completion, or reuse the same buffer, to resume cleanly.)
-            return Poll::Ready(Err(io::Error::other(
-                "write buffer changed while a previous write was still in flight",
-            )));
-        }
+        poll_tcp_write(this.write_state.get_mut(), &this.inner, cx, generation, buf)
+    }
 
-        match this
-            .pending_write
-            .as_mut()
-            .expect("pending write must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_write = None;
-                this.pending_write_ident = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // An abandoned write stays owned by the socket, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.get_mut().poll_flush(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.pending_shutdown.is_none() {
-            this.pending_shutdown = Some(crate::sys::current::net::shutdown_future(
-                this.raw_fd(),
-                Shutdown::Write,
-            ));
-        }
-
-        match this
-            .pending_shutdown
-            .as_mut()
-            .expect("pending shutdown must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_shutdown = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        poll_tcp_shutdown(this.write_state.get_mut(), &this.inner, cx)
     }
 }
 
@@ -872,7 +846,9 @@ impl AsyncWrite for TcpStream {
 /// [`TcpStream::reunite`] when exclusive stream ownership is needed again.
 #[derive(Debug)]
 pub struct OwnedReadHalf {
-    stream: TcpStream,
+    // Pending reads must be dropped before the socket owner.
+    read_state: RefCell<ReadState>,
+    inner: Arc<TcpStreamInner>,
 }
 
 /// Owned write half of a [`TcpStream`].
@@ -884,18 +860,20 @@ pub struct OwnedReadHalf {
 /// without dropping the matching [`OwnedReadHalf`].
 #[derive(Debug)]
 pub struct OwnedWriteHalf {
-    stream: TcpStream,
+    // Pending writes and shutdown must be dropped before the socket owner.
+    write_state: RefCell<WriteState>,
+    inner: Arc<TcpStreamInner>,
 }
 
 impl OwnedReadHalf {
     /// Returns the local socket address of the underlying stream.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.local_addr()
+        crate::sys::current::net::local_addr(raw_sock(&self.inner.fd))
     }
 
     /// Returns the remote peer address of the underlying stream.
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.peer_addr()
+        crate::sys::current::net::peer_addr(raw_sock(&self.inner.fd))
     }
 
     /// Reassembles the original [`TcpStream`] with the matching write half.
@@ -911,18 +889,21 @@ impl OwnedReadHalf {
 impl OwnedWriteHalf {
     /// Returns the local socket address of the underlying stream.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.local_addr()
+        crate::sys::current::net::local_addr(raw_sock(&self.inner.fd))
     }
 
     /// Returns the remote peer address of the underlying stream.
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.peer_addr()
+        crate::sys::current::net::peer_addr(raw_sock(&self.inner.fd))
     }
 
     /// Shuts down the write half of the connection, signalling EOF to the peer
     /// while the read half remains usable.
     pub async fn shutdown(&self) -> io::Result<()> {
-        self.stream.shutdown(Shutdown::Write).await
+        core::future::poll_fn(|cx| {
+            poll_tcp_shutdown(&mut self.write_state.borrow_mut(), &self.inner, cx)
+        })
+        .await
     }
 
     /// Reassembles the original [`TcpStream`] with the matching read half.
@@ -941,7 +922,8 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+        let this = self.get_mut();
+        poll_tcp_read(this.read_state.get_mut(), &this.inner, cx, buf)
     }
 }
 
@@ -951,15 +933,41 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        poll_tcp_write(this.write_state.get_mut(), &this.inner, cx, generation, buf)
+    }
+
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+        // An abandoned write stays owned by the socket, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.get_mut().poll_flush(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().stream).poll_close(cx)
+        let this = self.get_mut();
+        poll_tcp_shutdown(this.write_state.get_mut(), &this.inner, cx)
     }
 }
 

@@ -1,0 +1,7 @@
+error: runite::select! requires at least one branch or an `else =>` handler
+ --> tests/ui/fail/select_no_branches.rs:2:5
+  |
+2 |     runite::select! {};
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::macros::__select` which comes from the expansion of the macro `runite::select` (in Nightly builds, run with -Z macro-backtrace for more info)

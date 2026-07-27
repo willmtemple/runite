@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -129,6 +131,11 @@ pub(crate) struct CompletionFuture<T> {
     state: Arc<CompletionState<T>>,
 }
 
+pub(crate) struct LocalCompletionFuture<T> {
+    inner: CompletionFuture<T>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
 pub(crate) struct CompletionHandle<T> {
     state: Arc<CompletionState<T>>,
 }
@@ -172,6 +179,18 @@ pub(crate) fn completion<T: Send + 'static>(
 pub(crate) fn completion_for_current_thread<T: Send + 'static>()
 -> (CompletionFuture<T>, CompletionHandle<T>) {
     completion(current_thread_handle(), WakeClass::Macrotask)
+}
+
+pub(crate) fn local_completion_for_current_thread<T: Send + 'static>()
+-> (LocalCompletionFuture<T>, CompletionHandle<T>) {
+    let (inner, handle) = completion_for_current_thread();
+    (
+        LocalCompletionFuture {
+            inner,
+            _not_send: PhantomData,
+        },
+        handle,
+    )
 }
 
 impl<T: Send + 'static> CompletionHandle<T> {
@@ -219,6 +238,14 @@ impl<T> Future for CompletionFuture<T> {
         }
 
         Poll::Pending
+    }
+}
+
+impl<T> Future for LocalCompletionFuture<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().inner).poll(cx)
     }
 }
 

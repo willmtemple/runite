@@ -10,6 +10,7 @@ use std::net::{
 };
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,17 +21,34 @@ thread_local! {
     static SEND_URING_SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-use crate::op::completion::completion_for_current_thread;
+use crate::op::completion::local_completion_for_current_thread;
 use crate::op::net::{AcceptedSocket, NetOp, ReceivedDatagram};
-use crate::platform::linux::runtime::with_current_driver;
+use crate::platform::linux::runtime::{
+    cancel_operation_on_owner, current_thread_handle, with_current_driver,
+};
 use crate::platform::linux::uring::{
     IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN, IORING_OP_RECV,
     IORING_OP_RECVMSG, IORING_OP_SEND, IORING_OP_SENDMSG, IORING_OP_SHUTDOWN, IORING_OP_SOCKET,
-    IoUringCqe, IoUringSqe,
+    IoUringCqe, IoUringSqe, is_unsupported_operation,
 };
 use crate::sys::current::fd::{wait_readable, wait_writable};
 
 const DEFAULT_LISTENER_BACKLOG: i32 = 1024;
+
+#[derive(Debug)]
+struct OwnedAcceptedSocket {
+    fd: OwnedFd,
+    peer_addr: SocketAddr,
+}
+
+impl OwnedAcceptedSocket {
+    fn into_raw(self) -> AcceptedSocket {
+        AcceptedSocket {
+            fd: self.fd.into_raw_fd(),
+            peer_addr: self.peer_addr,
+        }
+    }
+}
 
 /// Peek flag for `recv`-family operations, re-exported for the public layer.
 pub const MSG_PEEK: i32 = libc::MSG_PEEK;
@@ -63,6 +81,7 @@ pub async fn socket(op: NetOp) -> io::Result<OwnedFd> {
     else {
         unreachable!("socket backend called with non-socket op");
     };
+    let flags = flags | (libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32;
 
     match submit_uring::<OwnedFd, _>(
         move |sqe| {
@@ -99,8 +118,8 @@ pub async fn connect(op: NetOp) -> io::Result<()> {
         unreachable!("connect backend called with non-connect op");
     };
 
-    let raw_addr = RawSocketAddr::from_socket_addr(addr);
-    let fallback_addr = raw_addr;
+    let raw_addr = Box::new(RawSocketAddr::from_socket_addr(addr));
+    let fallback_addr = *raw_addr;
     let addr_ptr = raw_addr.as_ptr();
     let addr_len = raw_addr.len();
     match submit_uring::<(), _>(
@@ -127,8 +146,8 @@ pub async fn bind(op: NetOp) -> io::Result<()> {
         unreachable!("bind backend called with non-bind op");
     };
 
-    let raw_addr = RawSocketAddr::from_socket_addr(addr);
-    let fallback_addr = raw_addr;
+    let raw_addr = Box::new(RawSocketAddr::from_socket_addr(addr));
+    let fallback_addr = *raw_addr;
     let addr_ptr = raw_addr.as_ptr();
     let addr_len = raw_addr.len();
     match submit_uring::<(), _>(
@@ -182,16 +201,15 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
     let storage_ptr = storage.as_mut_ptr();
     let addr_len_ptr = addr_len.as_mut() as *mut libc::socklen_t;
 
-    match submit_uring::<AcceptedSocket, _>(
+    match submit_uring::<OwnedAcceptedSocket, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_ACCEPT;
             sqe.fd = fd;
             sqe.addr = storage_ptr as u64;
             sqe.off = addr_len_ptr as u64;
-            // For IORING_OP_ACCEPT, op_flags carries the accept4(2) flags. Set
-            // SOCK_CLOEXEC so accepted connections are not leaked into child
-            // processes (matching the accept_sync fallback and std/tokio).
-            sqe.op_flags = libc::SOCK_CLOEXEC as u32;
+            // For IORING_OP_ACCEPT, op_flags carries the accept4(2) flags.
+            // Set both flags atomically, matching the accept_sync fallback.
+            sqe.op_flags = (libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32;
         },
         move |cqe| {
             let accepted_fd = cqe_to_result(cqe)? as RawFd;
@@ -204,17 +222,14 @@ pub async fn accept(op: NetOp) -> io::Result<AcceptedSocket> {
             // SAFETY: a successful accept CQE means the kernel initialized
             // `*addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
-            let peer_addr = socket_addr_from_storage(&storage, *addr_len)?;
-            Ok(AcceptedSocket {
-                fd: accepted.into_raw_fd(),
-                peer_addr,
-            })
+            finish_accept(accepted, &storage, *addr_len)
         },
     )
     .await
     {
+        Ok(accepted) => Ok(accepted.into_raw()),
         Err(error) if should_fallback_to_offload(&error) => accept_ready(fd).await,
-        result => result,
+        Err(error) => Err(error),
     }
 }
 
@@ -231,10 +246,9 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
 
     // Capability known: io_uring SEND works — submit without a fallback clone.
     if SEND_URING_SUPPORTED.with(|c| c.get()) == Some(true) {
-        let data = Arc::new(data.into_boxed_slice());
         let data_ptr = data.as_ptr();
         let data_len = data.len();
-        return submit_uring_guarded::<usize, _>(
+        return submit_uring::<usize, _>(
             move |sqe| {
                 sqe.opcode = IORING_OP_SEND;
                 sqe.fd = fd;
@@ -242,7 +256,6 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
                 sqe.len = data_len as u32;
                 sqe.op_flags = flags as u32;
             },
-            Box::new(Arc::clone(&data)),
             move |cqe| {
                 let _data = data;
                 cqe_to_result(cqe).map(|written| written as usize)
@@ -253,10 +266,9 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
 
     // Capability unknown: probe with a one-time clone. Cache the result.
     let fallback_data = data.clone();
-    let data = Arc::new(data.into_boxed_slice());
     let data_ptr = data.as_ptr();
     let data_len = data.len();
-    match submit_uring_guarded::<usize, _>(
+    match submit_uring::<usize, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_SEND;
             sqe.fd = fd;
@@ -264,7 +276,6 @@ pub async fn send(op: NetOp) -> io::Result<usize> {
             sqe.len = data_len as u32;
             sqe.op_flags = flags as u32;
         },
-        Box::new(Arc::clone(&data)),
         move |cqe| {
             let _data = data;
             cqe_to_result(cqe).map(|written| written as usize)
@@ -335,10 +346,10 @@ pub async fn recv(op: NetOp) -> io::Result<Vec<u8>> {
         unreachable!("recv backend called with non-recv op");
     };
 
-    let buffer = Arc::new(Mutex::new(vec![0; len].into_boxed_slice()));
-    let buffer_ptr = buffer.lock().unwrap().as_mut_ptr();
-    let buffer_len = len;
-    match submit_uring_guarded::<Vec<u8>, _>(
+    let mut buffer = Vec::with_capacity(len);
+    let buffer_ptr = buffer.as_mut_ptr();
+    let buffer_len = buffer.capacity();
+    match submit_uring::<Vec<u8>, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_RECV;
             sqe.fd = fd;
@@ -346,11 +357,9 @@ pub async fn recv(op: NetOp) -> io::Result<Vec<u8>> {
             sqe.len = buffer_len as u32;
             sqe.op_flags = flags as u32;
         },
-        Box::new(Arc::clone(&buffer)),
         move |cqe| {
             let read = cqe_to_result(cqe)? as usize;
-            let buffer = buffer.lock().unwrap();
-            Ok(buffer[..read].to_vec())
+            finish_read_buffer(buffer, read)
         },
     )
     .await
@@ -365,11 +374,11 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
         unreachable!("recv_from backend called with non-recv_from op");
     };
 
-    let mut data = vec![0u8; len];
+    let mut data = Vec::with_capacity(len);
     let mut storage = Box::new(MaybeUninit::<libc::sockaddr_storage>::zeroed());
     let mut iov = Box::new(libc::iovec {
         iov_base: data.as_mut_ptr() as *mut c_void,
-        iov_len: data.len(),
+        iov_len: data.capacity(),
     });
     // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
     // state; the fields used by recvmsg are filled before submission.
@@ -394,7 +403,7 @@ pub async fn recv_from(op: NetOp) -> io::Result<ReceivedDatagram> {
             let addr_len = msg.0.msg_namelen;
             drop(msg);
             let read = cqe_to_result(cqe)? as usize;
-            data.truncate(read);
+            set_read_buffer_len(&mut data, read)?;
             // SAFETY: a successful recvmsg CQE means the kernel initialized
             // `addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
@@ -536,10 +545,10 @@ pub async fn recv_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<Vec<u8>> {
-    let buffer = Arc::new(Mutex::new(vec![0; len].into_boxed_slice()));
-    let buffer_ptr = buffer.lock().unwrap().as_mut_ptr();
-    let buffer_len = len;
-    submit_uring_with_linked_timeout_guarded::<Vec<u8>, _>(
+    let mut buffer = Vec::with_capacity(len);
+    let buffer_ptr = buffer.as_mut_ptr();
+    let buffer_len = buffer.capacity();
+    submit_uring_with_linked_timeout::<Vec<u8>, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_RECV;
             sqe.fd = fd;
@@ -548,11 +557,9 @@ pub async fn recv_timeout(
             sqe.op_flags = flags as u32;
         },
         timeout,
-        Box::new(Arc::clone(&buffer)),
         move |cqe| {
             let read = cqe_to_timed_result(cqe)? as usize;
-            let buffer = buffer.lock().unwrap();
-            Ok(buffer[..read].to_vec())
+            finish_read_buffer(buffer, read)
         },
     )
     .await
@@ -564,10 +571,9 @@ pub async fn send_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<usize> {
-    let data = Arc::new(data.into_boxed_slice());
     let data_ptr = data.as_ptr();
     let data_len = data.len();
-    submit_uring_with_linked_timeout_guarded::<usize, _>(
+    submit_uring_with_linked_timeout::<usize, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_SEND;
             sqe.fd = fd;
@@ -576,7 +582,6 @@ pub async fn send_timeout(
             sqe.op_flags = flags as u32;
         },
         timeout,
-        Box::new(Arc::clone(&data)),
         move |cqe| {
             let _data = data;
             cqe_to_timed_result(cqe).map(|written| written as usize)
@@ -591,11 +596,11 @@ pub async fn recv_from_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<ReceivedDatagram> {
-    let mut data = vec![0u8; len];
+    let mut data = Vec::with_capacity(len);
     let mut storage = Box::new(MaybeUninit::<libc::sockaddr_storage>::zeroed());
     let mut iov = Box::new(libc::iovec {
         iov_base: data.as_mut_ptr() as *mut c_void,
-        iov_len: data.len(),
+        iov_len: data.capacity(),
     });
     // SAFETY: `msghdr` is a plain C struct where all-zero is a valid empty
     // state; the fields used by recvmsg are filled before submission.
@@ -621,7 +626,7 @@ pub async fn recv_from_timeout(
             let addr_len = msg.0.msg_namelen;
             drop(msg);
             let read = cqe_to_timed_result(cqe)? as usize;
-            data.truncate(read);
+            set_read_buffer_len(&mut data, read)?;
             // SAFETY: a successful recvmsg CQE means the kernel initialized
             // `addr_len` bytes of the zeroed sockaddr_storage buffer.
             let storage = unsafe { storage.assume_init() };
@@ -684,7 +689,7 @@ pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::
     .await?;
 
     let fd = socket.as_raw_fd();
-    let raw_addr = RawSocketAddr::from_socket_addr(addr);
+    let raw_addr = Box::new(RawSocketAddr::from_socket_addr(addr));
     let addr_ptr = raw_addr.as_ptr();
     let addr_len = raw_addr.len();
 
@@ -821,18 +826,8 @@ async fn submit_uring<T: Send + 'static, M>(
 where
     M: FnOnce(IoUringCqe) -> io::Result<T> + Send + 'static,
 {
-    submit_uring_guarded(fill, Box::new(()), map).await
-}
-
-async fn submit_uring_guarded<T: Send + 'static, M>(
-    fill: impl FnOnce(&mut IoUringSqe),
-    guard: Box<dyn std::any::Any + Send + 'static>,
-    map: M,
-) -> io::Result<T>
-where
-    M: FnOnce(IoUringCqe) -> io::Result<T> + Send + 'static,
-{
-    let (future, handle) = completion_for_current_thread::<io::Result<T>>();
+    let owner = current_thread_handle();
+    let (future, handle) = local_completion_for_current_thread::<io::Result<T>>();
     let callback_handle = handle.clone();
     let token = with_current_driver(|driver| {
         driver.submit_operation(fill, move |cqe| {
@@ -841,8 +836,7 @@ where
     })?;
 
     handle.set_cancel(move || {
-        let _ =
-            with_current_driver(|driver| driver.cancel_operation_with_guard(token, Some(guard)));
+        cancel_operation_on_owner(owner, token, None);
     });
 
     future.await
@@ -861,19 +855,8 @@ async fn submit_uring_with_linked_timeout<T: Send + 'static, M>(
 where
     M: FnOnce(IoUringCqe) -> io::Result<T> + Send + 'static,
 {
-    submit_uring_with_linked_timeout_guarded(fill, timeout, Box::new(()), map).await
-}
-
-async fn submit_uring_with_linked_timeout_guarded<T: Send + 'static, M>(
-    fill: impl FnOnce(&mut IoUringSqe),
-    timeout: Duration,
-    guard: Box<dyn std::any::Any + Send + 'static>,
-    map: M,
-) -> io::Result<T>
-where
-    M: FnOnce(IoUringCqe) -> io::Result<T> + Send + 'static,
-{
-    let (future, handle) = completion_for_current_thread::<io::Result<T>>();
+    let owner = current_thread_handle();
+    let (future, handle) = local_completion_for_current_thread::<io::Result<T>>();
     let callback_handle = handle.clone();
     let token = with_current_driver(|driver| {
         driver.submit_operation_with_linked_timeout(fill, timeout, move |cqe| {
@@ -882,8 +865,7 @@ where
     })?;
 
     handle.set_cancel(move || {
-        let _ =
-            with_current_driver(|driver| driver.cancel_operation_with_guard(token, Some(guard)));
+        cancel_operation_on_owner(owner, token, None);
     });
 
     future.await
@@ -892,7 +874,7 @@ where
 async fn offload<T: Send + 'static>(
     task: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    let (future, handle) = completion_for_current_thread::<io::Result<T>>();
+    let (future, handle) = local_completion_for_current_thread::<io::Result<T>>();
     let handle_for_task = handle.clone();
     if let Err(error) =
         crate::sys::blocking::spawn_blocking(move || handle_for_task.complete(task()))
@@ -1104,6 +1086,27 @@ fn cqe_to_result(cqe: IoUringCqe) -> io::Result<i32> {
     }
 }
 
+fn finish_read_buffer(mut buffer: Vec<u8>, initialized: usize) -> io::Result<Vec<u8>> {
+    set_read_buffer_len(&mut buffer, initialized)?;
+    Ok(buffer)
+}
+
+fn set_read_buffer_len(buffer: &mut Vec<u8>, initialized: usize) -> io::Result<()> {
+    if initialized > buffer.capacity() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "io_uring read exceeded the submitted buffer length",
+        ));
+    }
+    // SAFETY: a successful receive CQE initialized exactly `initialized`
+    // bytes in the vector's spare capacity, and the bound above keeps them
+    // within the allocation.
+    unsafe {
+        buffer.set_len(initialized);
+    }
+    Ok(())
+}
+
 /// Like [`cqe_to_result`] but maps `-ECANCELED` (timeout fired) to `TimedOut`.
 fn cqe_to_timed_result(cqe: IoUringCqe) -> io::Result<i32> {
     if cqe.res == -libc::ECANCELED {
@@ -1124,13 +1127,11 @@ fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
 }
 
 fn should_fallback_to_offload(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
-    )
+    is_unsupported_operation(error)
 }
 
 fn socket_sync(domain: i32, socket_type: i32, protocol: i32, flags: u32) -> io::Result<OwnedFd> {
+    let flags = flags | (libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32;
     // SAFETY: socket takes only integer arguments; no user pointers are passed.
     let fd = cvt(unsafe { libc::socket(domain, socket_type | flags as i32, protocol) })?;
     // SAFETY: `fd` is a fresh descriptor returned by successful socket and
@@ -1160,15 +1161,25 @@ fn accept_sync(fd: RawFd) -> io::Result<AcceptedSocket> {
             fd,
             storage.as_mut_ptr().cast::<libc::sockaddr>(),
             &mut len,
-            libc::SOCK_CLOEXEC,
+            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
         )
     })?;
+    // SAFETY: `accepted_fd` is fresh and exclusively owned after accept4.
+    let accepted = unsafe { OwnedFd::from_raw_fd(accepted_fd) };
     // SAFETY: successful accept4 initialized `len` bytes of the zeroed
     // sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
-    let peer_addr = socket_addr_from_storage(&storage, len)?;
-    Ok(AcceptedSocket {
-        fd: accepted_fd,
+    finish_accept(accepted, &storage, len).map(OwnedAcceptedSocket::into_raw)
+}
+
+fn finish_accept(
+    accepted: OwnedFd,
+    storage: &libc::sockaddr_storage,
+    len: libc::socklen_t,
+) -> io::Result<OwnedAcceptedSocket> {
+    let peer_addr = socket_addr_from_storage(storage, len)?;
+    Ok(OwnedAcceptedSocket {
+        fd: accepted,
         peer_addr,
     })
 }
@@ -1181,24 +1192,23 @@ fn send_slice_sync(fd: RawFd, data: &[u8], flags: i32) -> io::Result<usize> {
 }
 
 fn recv_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0; len];
+    let mut buffer = Vec::<u8>::with_capacity(len);
     // SAFETY: `fd` is valid for the duration of the call, and `buffer` is
     // exclusively owned and writable for `buffer.len()` bytes.
     let read = unsafe {
         libc::recv(
             fd,
             buffer.as_mut_ptr().cast::<c_void>(),
-            buffer.len(),
+            buffer.capacity(),
             flags,
         )
     };
     let read = cvt_long(read)? as usize;
-    buffer.truncate(read);
-    Ok(buffer)
+    finish_read_buffer(buffer, read)
 }
 
 fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatagram> {
-    let mut buffer = vec![0; len];
+    let mut buffer = Vec::<u8>::with_capacity(len);
     let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     // SAFETY: `fd` is valid for the duration of the call; `buffer` is writable
@@ -1208,14 +1218,14 @@ fn recv_from_sync(fd: RawFd, len: usize, flags: i32) -> io::Result<ReceivedDatag
         libc::recvfrom(
             fd,
             buffer.as_mut_ptr().cast::<c_void>(),
-            buffer.len(),
+            buffer.capacity(),
             flags,
             storage.as_mut_ptr().cast::<libc::sockaddr>(),
             &mut addr_len,
         )
     };
     let read = cvt_long(read)? as usize;
-    buffer.truncate(read);
+    set_read_buffer_len(&mut buffer, read)?;
     // SAFETY: successful recvfrom initialized `addr_len` bytes of the zeroed
     // sockaddr_storage buffer.
     let storage = unsafe { storage.assume_init() };
@@ -1386,63 +1396,160 @@ fn cvt_long(value: libc::ssize_t) -> io::Result<libc::ssize_t> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::io::Read;
+    use std::net::{IpAddr, Ipv4Addr, Shutdown};
+    use std::os::unix::net::UnixStream;
 
+    use crate::op::completion::local_completion_for_current_thread;
+    use crate::platform::linux::driver::override_deferred_submissions;
+    use crate::platform::linux::uring::{
+        IORING_OP_ACCEPT, IORING_OP_BIND, IORING_OP_CONNECT, IORING_OP_LISTEN, IORING_OP_MSG_RING,
+        IORING_OP_RECV, IORING_OP_SEND, IORING_OP_SHUTDOWN, IORING_OP_SOCKET, SupportedOps,
+        override_supported_ops,
+    };
     use crate::{run, spawn};
 
-    /// Exercises the readiness-based fallback helpers (`connect_ready`,
-    /// `accept_ready`, `send_ready`, `recv_ready`) directly, bypassing io_uring.
-    /// On a modern kernel the production code always takes the io_uring path, so
-    /// this test drives the fallback explicitly to prove it performs a correct,
-    /// non-offloaded TCP echo using only `IORING_OP_POLL_ADD` readiness waits.
+    fn accepted_test_pair() -> (OwnedFd, UnixStream) {
+        let (accepted, peer) = UnixStream::pair().expect("socket pair should open");
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("peer should have a bounded close wait");
+        (accepted.into(), peer)
+    }
+
+    fn peer_observes_close(mut peer: UnixStream) -> bool {
+        let mut byte = [0u8; 1];
+        matches!(peer.read(&mut byte), Ok(0))
+    }
+
+    fn churn_address_storage(depth: usize) -> usize {
+        let storage = [0xa5u8; std::mem::size_of::<libc::sockaddr_storage>()];
+        let value = std::hint::black_box(storage)[depth % storage.len()] as usize;
+        if depth == 0 {
+            value
+        } else {
+            value + churn_address_storage(depth - 1)
+        }
+    }
+
+    struct SendCapabilityReset(Option<bool>);
+
+    impl SendCapabilityReset {
+        fn install() -> Self {
+            Self(SEND_URING_SUPPORTED.with(|supported| supported.replace(None)))
+        }
+    }
+
+    impl Drop for SendCapabilityReset {
+        fn drop(&mut self) {
+            SEND_URING_SUPPORTED.with(|supported| supported.set(self.0));
+        }
+    }
+
+    /// Injects a Linux 5.6-style capability set through the production probe
+    /// seam. Every newer socket operation must dispatch to its synchronous or
+    /// readiness fallback while `POLL_ADD` continues to drive the event loop.
     #[test]
-    fn readiness_fallback_round_trips_tcp_without_offload() {
+    fn capability_matrix_missing_socket_opcodes_use_production_fallbacks() {
+        let _send_capability = SendCapabilityReset::install();
+        let _override = override_supported_ops(SupportedOps::all_except([
+            IORING_OP_MSG_RING,
+            IORING_OP_SOCKET,
+            IORING_OP_BIND,
+            IORING_OP_LISTEN,
+            IORING_OP_CONNECT,
+            IORING_OP_ACCEPT,
+            IORING_OP_SEND,
+            IORING_OP_RECV,
+            IORING_OP_SHUTDOWN,
+        ]));
         let done = Arc::new(Mutex::new(None));
         let done_for_task = Arc::clone(&done);
 
         spawn(async move {
-            let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
-                .expect("listener socket should be created");
+            let listener = socket(NetOp::Socket {
+                domain: libc::AF_INET,
+                socket_type: libc::SOCK_STREAM,
+                protocol: 0,
+                flags: 0,
+            })
+            .await
+            .expect("socket syscall fallback should create the listener");
             let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-            bind_sync(
-                listener.as_raw_fd(),
-                RawSocketAddr::from_socket_addr(loopback),
-            )
-            .expect("bind should succeed");
-            listen_sync(listener.as_raw_fd(), DEFAULT_LISTENER_BACKLOG)
-                .expect("listen should succeed");
+            bind(NetOp::Bind {
+                fd: listener.as_raw_fd(),
+                addr: loopback,
+            })
+            .await
+            .expect("bind syscall fallback should succeed");
+            listen(NetOp::Listen {
+                fd: listener.as_raw_fd(),
+                backlog: DEFAULT_LISTENER_BACKLOG,
+            })
+            .await
+            .expect("listen syscall fallback should succeed");
             let bound = local_addr(listener.as_raw_fd()).expect("local_addr should resolve");
 
-            let client = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
-                .expect("client socket should be created");
+            let client = socket(NetOp::Socket {
+                domain: libc::AF_INET,
+                socket_type: libc::SOCK_STREAM,
+                protocol: 0,
+                flags: 0,
+            })
+            .await
+            .expect("socket syscall fallback should create the client");
+            connect(NetOp::Connect {
+                fd: client.as_raw_fd(),
+                addr: bound,
+            })
+            .await
+            .expect("connect readiness fallback should succeed");
+            let server = accept(NetOp::Accept {
+                fd: listener.as_raw_fd(),
+            })
+            .await
+            .expect("accept readiness fallback should succeed");
 
-            // Connect + accept entirely through the readiness fallback.
-            connect_ready(client.as_raw_fd(), RawSocketAddr::from_socket_addr(bound))
-                .await
-                .expect("readiness connect should succeed");
-            let server = accept_ready(listener.as_raw_fd())
-                .await
-                .expect("readiness accept should succeed");
-
-            let sent = send_ready(client.as_raw_fd(), b"ping".to_vec(), 0)
-                .await
-                .expect("readiness send should succeed");
+            let sent = send(NetOp::Send {
+                fd: client.as_raw_fd(),
+                data: b"ping".to_vec(),
+                flags: 0,
+            })
+            .await
+            .expect("send readiness fallback should succeed");
             assert_eq!(sent, 4);
 
-            let received = recv_ready(server.fd, 16, 0)
-                .await
-                .expect("readiness recv should succeed");
+            let received = recv(NetOp::Recv {
+                fd: server.fd,
+                len: 16,
+                flags: 0,
+            })
+            .await
+            .expect("recv readiness fallback should succeed");
             assert_eq!(&received, b"ping");
 
-            send_ready(server.fd, b"pong".to_vec(), 0)
-                .await
-                .expect("readiness send back should succeed");
-            let echoed = recv_ready(client.as_raw_fd(), 16, 0)
-                .await
-                .expect("readiness recv back should succeed");
+            send(NetOp::Send {
+                fd: server.fd,
+                data: b"pong".to_vec(),
+                flags: 0,
+            })
+            .await
+            .expect("send readiness fallback should echo");
+            let echoed = recv(NetOp::Recv {
+                fd: client.as_raw_fd(),
+                len: 16,
+                flags: 0,
+            })
+            .await
+            .expect("recv readiness fallback should read the echo");
             assert_eq!(&echoed, b"pong");
 
-            let _ = close_sync(server.fd);
+            shutdown(NetOp::Shutdown {
+                fd: client.as_raw_fd(),
+                how: Shutdown::Both,
+            })
+            .await
+            .expect("shutdown syscall fallback should succeed");
+            close_sync(server.fd).expect("accepted socket should close");
             *done_for_task.lock().expect("result mutex poisoned") = Some(echoed);
         });
 
@@ -1450,15 +1557,63 @@ mod tests {
 
         let echoed = done.lock().expect("result mutex poisoned").take();
         assert_eq!(echoed.as_deref(), Some(&b"pong"[..]));
+        assert_eq!(SEND_URING_SUPPORTED.with(Cell::get), Some(false));
+    }
+
+    #[test]
+    fn deferred_connect_keeps_sockaddr_storage_stable() {
+        let _deferred = override_deferred_submissions(true);
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address");
+        let acceptor = std::thread::spawn(move || listener.accept().map(|_| ()));
+        let client =
+            socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0).expect("client socket should open");
+        let result = Arc::new(Mutex::new(None));
+        let result_task = Arc::clone(&result);
+
+        spawn(async move {
+            let mut connect = Box::pin(connect(NetOp::Connect {
+                fd: client.as_raw_fd(),
+                addr,
+            }));
+            let mut churned = false;
+            let outcome = std::future::poll_fn(|cx| {
+                let poll = connect.as_mut().poll(cx);
+                if poll.is_pending() && !churned {
+                    churned = true;
+                    assert_ne!(churn_address_storage(32), 0);
+                    let churn = (0..512)
+                        .map(|index| Box::new([index as u8; 256]))
+                        .collect::<Vec<_>>();
+                    std::hint::black_box(churn);
+                }
+                poll
+            })
+            .await;
+            *result_task.lock().expect("result mutex poisoned") = Some(outcome);
+        });
+        run();
+
+        result
+            .lock()
+            .expect("result mutex poisoned")
+            .take()
+            .expect("connect task should finish")
+            .expect("deferred connect should use its original sockaddr");
+        acceptor
+            .join()
+            .expect("accept thread should exit")
+            .expect("listener should accept");
     }
 
     /// A socket accepted through the production io_uring `accept` path must have
     /// `FD_CLOEXEC` set, so live connections are never leaked into child
     /// processes. Regression test for the missing `SOCK_CLOEXEC` accept flag.
     #[test]
-    fn accepted_socket_is_cloexec() {
-        let cloexec = Arc::new(Mutex::new(None));
-        let cloexec_task = Arc::clone(&cloexec);
+    fn accepted_socket_has_atomic_descriptor_flags() {
+        let descriptor_flags = Arc::new(Mutex::new(None));
+        let descriptor_flags_task = Arc::clone(&descriptor_flags);
 
         spawn(async move {
             let listener = socket_sync(libc::AF_INET, libc::SOCK_STREAM, 0, 0)
@@ -1487,18 +1642,22 @@ mod tests {
             .expect("accept should succeed");
 
             // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
-            let flags = unsafe { libc::fcntl(server.fd, libc::F_GETFD) };
-            let is_cloexec = flags >= 0 && (flags & libc::FD_CLOEXEC) != 0;
+            let fd_flags = unsafe { libc::fcntl(server.fd, libc::F_GETFD) };
+            // SAFETY: F_GETFL only reads descriptor status flags.
+            let status_flags = unsafe { libc::fcntl(server.fd, libc::F_GETFL) };
             let _ = close_sync(server.fd);
-            *cloexec_task.lock().expect("result mutex poisoned") = Some(is_cloexec);
+            *descriptor_flags_task.lock().expect("result mutex poisoned") = Some((
+                fd_flags >= 0 && (fd_flags & libc::FD_CLOEXEC) != 0,
+                status_flags >= 0 && (status_flags & libc::O_NONBLOCK) != 0,
+            ));
         });
 
         run();
 
         assert_eq!(
-            *cloexec.lock().expect("result mutex poisoned"),
-            Some(true),
-            "accepted socket must have FD_CLOEXEC set"
+            *descriptor_flags.lock().expect("result mutex poisoned"),
+            Some((true, true)),
+            "accepted sockets must atomically set CLOEXEC and NONBLOCK"
         );
     }
 
@@ -1535,9 +1694,9 @@ mod tests {
     /// and would drop `SOCK_CLOEXEC` outright on kernels that do not validate
     /// `rw_flags`. This test locks the observable property across both paths.
     #[test]
-    fn uring_socket_is_cloexec() {
-        let cloexec = Arc::new(Mutex::new(None));
-        let cloexec_task = Arc::clone(&cloexec);
+    fn uring_socket_has_atomic_descriptor_flags() {
+        let descriptor_flags = Arc::new(Mutex::new(None));
+        let descriptor_flags_task = Arc::clone(&descriptor_flags);
 
         spawn(async move {
             let sock = socket(NetOp::Socket {
@@ -1550,17 +1709,103 @@ mod tests {
             .expect("socket should be created");
 
             // SAFETY: F_GETFD only reads descriptor flags; no user pointers.
-            let flags = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFD) };
-            *cloexec_task.lock().expect("result mutex poisoned") =
-                Some(flags >= 0 && (flags & libc::FD_CLOEXEC) != 0);
+            let fd_flags = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFD) };
+            // SAFETY: F_GETFL only reads descriptor status flags.
+            let status_flags = unsafe { libc::fcntl(sock.as_raw_fd(), libc::F_GETFL) };
+            *descriptor_flags_task.lock().expect("result mutex poisoned") = Some((
+                fd_flags >= 0 && (fd_flags & libc::FD_CLOEXEC) != 0,
+                status_flags >= 0 && (status_flags & libc::O_NONBLOCK) != 0,
+            ));
         });
 
         run();
 
         assert_eq!(
-            *cloexec.lock().expect("result mutex poisoned"),
-            Some(true),
-            "uring-created socket must have FD_CLOEXEC set"
+            *descriptor_flags.lock().expect("result mutex poisoned"),
+            Some((true, true)),
+            "created sockets must atomically set CLOEXEC and NONBLOCK"
         );
+    }
+
+    #[test]
+    fn capability_matrix_bind_falls_back_without_bind_opcode() {
+        let _override = override_supported_ops(SupportedOps::all_except([IORING_OP_BIND]));
+        let completed = Arc::new(Mutex::new(false));
+        let completed_task = Arc::clone(&completed);
+
+        spawn(async move {
+            let listener =
+                bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), Some(8))
+                    .await
+                    .expect("bind syscall fallback should succeed");
+            assert!(local_addr(listener.as_raw_fd()).is_ok());
+            *completed_task.lock().expect("result mutex poisoned") = true;
+        });
+        run();
+
+        assert!(*completed.lock().expect("result mutex poisoned"));
+    }
+
+    #[test]
+    fn capability_matrix_listen_falls_back_without_listen_opcode() {
+        let _override = override_supported_ops(SupportedOps::all_except([IORING_OP_LISTEN]));
+        let completed = Arc::new(Mutex::new(false));
+        let completed_task = Arc::clone(&completed);
+
+        spawn(async move {
+            let listener =
+                bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), Some(8))
+                    .await
+                    .expect("listen syscall fallback should succeed");
+            assert!(local_addr(listener.as_raw_fd()).is_ok());
+            *completed_task.lock().expect("result mutex poisoned") = true;
+        });
+        run();
+
+        assert!(*completed.lock().expect("result mutex poisoned"));
+    }
+
+    #[test]
+    fn uninterested_accept_completion_closes_owned_descriptor() {
+        let closed = Arc::new(Mutex::new(None));
+        let closed_task = Arc::clone(&closed);
+
+        spawn(async move {
+            let mut all_closed = true;
+            for _ in 0..64 {
+                let (fd, peer) = accepted_test_pair();
+                let (future, handle) = local_completion_for_current_thread::<OwnedAcceptedSocket>();
+                drop(future);
+
+                std::thread::spawn(move || {
+                    handle.complete(OwnedAcceptedSocket {
+                        fd,
+                        peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+                    });
+                })
+                .join()
+                .expect("completion thread should finish");
+                all_closed &= peer_observes_close(peer);
+            }
+            *closed_task.lock().expect("result mutex poisoned") = Some(all_closed);
+        });
+        run();
+
+        assert_eq!(*closed.lock().expect("result mutex poisoned"), Some(true));
+    }
+
+    #[test]
+    fn accepted_descriptor_closes_when_address_parse_fails() {
+        let (fd, peer) = accepted_test_pair();
+        // SAFETY: a zeroed sockaddr_storage is valid storage; its zero family
+        // deliberately fails address parsing.
+        let storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+        finish_accept(
+            fd,
+            &storage,
+            std::mem::size_of_val(&storage) as libc::socklen_t,
+        )
+        .expect_err("an unknown address family should fail");
+        assert!(peer_observes_close(peer));
     }
 }

@@ -1,20 +1,15 @@
 //! macOS filesystem backend.
 
-use std::collections::VecDeque;
 use std::ffi::CString;
-use std::future::poll_fn;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
 
+pub(crate) use crate::fs::ReadDirStream;
 use crate::op::completion::completion_for_current_thread;
-use crate::op::fs::{FileType, FsOp, MetadataTarget, RawDirEntry, RawMetadata};
-use crate::platform::current::runtime::{ThreadHandle, current_thread_handle};
+use crate::op::fs::{FileType, FsOp, MetadataTarget, RawMetadata};
 use crate::sys::blocking::spawn_blocking;
 
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
@@ -42,44 +37,67 @@ pub async fn read(op: FsOp) -> io::Result<Vec<u8>> {
         unreachable!("read backend called with non-read op");
     };
 
-    offload(move || {
-        let mut buffer = vec![0; len];
-        let read = match offset {
-            Some(offset) => unsafe {
-                libc::pread(
-                    fd,
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    len,
-                    offset as libc::off_t,
-                )
-            },
-            None => unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), len) },
-        };
-        if read < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        buffer.truncate(read as usize);
-        Ok(buffer)
-    })
-    .await
+    offload(read_job(fd, offset, len)?).await
+}
+
+fn read_job(
+    fd: RawFd,
+    offset: Option<u64>,
+    len: usize,
+) -> io::Result<impl FnOnce() -> io::Result<Vec<u8>> + Send + 'static> {
+    let fd = duplicate_fd(fd)?;
+    Ok(move || read_owned(fd, offset, len))
+}
+
+fn read_owned(fd: OwnedFd, offset: Option<u64>, len: usize) -> io::Result<Vec<u8>> {
+    let mut buffer = vec![0; len];
+    let read = match offset {
+        Some(offset) => unsafe {
+            libc::pread(
+                fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                len,
+                offset as libc::off_t,
+            )
+        },
+        None => unsafe {
+            libc::read(
+                fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                len,
+            )
+        },
+    };
+    if read < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buffer.truncate(read as usize);
+    Ok(buffer)
 }
 
 pub async fn write(op: FsOp) -> io::Result<usize> {
     let FsOp::Write { fd, offset, data } = op else {
         unreachable!("write backend called with non-write op");
     };
+    let fd = duplicate_fd(fd)?;
 
     offload(move || {
         let written = match offset {
             Some(offset) => unsafe {
                 libc::pwrite(
-                    fd,
+                    fd.as_raw_fd(),
                     data.as_ptr().cast::<libc::c_void>(),
                     data.len(),
                     offset as libc::off_t,
                 )
             },
-            None => unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) },
+            None => unsafe {
+                libc::write(
+                    fd.as_raw_fd(),
+                    data.as_ptr().cast::<libc::c_void>(),
+                    data.len(),
+                )
+            },
         };
         if written < 0 {
             return Err(io::Error::last_os_error());
@@ -98,27 +116,31 @@ pub async fn metadata(op: FsOp) -> io::Result<RawMetadata> {
         unreachable!("metadata backend called with non-metadata op");
     };
 
-    offload(move || {
-        let metadata = match target {
-            MetadataTarget::Path(path) => {
+    match target {
+        MetadataTarget::Path(path) => {
+            offload(move || {
                 if follow_symlinks {
                     std::fs::metadata(path)
                 } else {
                     std::fs::symlink_metadata(path)
                 }
-            }
-            MetadataTarget::File(fd) => {
+                .map(|metadata| raw_metadata_from_std(&metadata))
+            })
+            .await
+        }
+        MetadataTarget::File(fd) => {
+            let fd = duplicate_fd(fd)?;
+            offload(move || {
                 let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-                let result = unsafe { libc::fstat(fd, &mut stat) };
+                let result = unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) };
                 if result < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                return Ok(raw_metadata_from_stat(&stat));
-            }
-        }?;
-        Ok(raw_metadata_from_std(&metadata))
-    })
-    .await
+                Ok(raw_metadata_from_stat(&stat))
+            })
+            .await
+        }
+    }
 }
 
 /// Durably flushes a file to disk on macOS.
@@ -147,24 +169,28 @@ pub async fn sync_all(op: FsOp) -> io::Result<()> {
     let FsOp::SyncAll { fd } = op else {
         unreachable!("sync_all backend called with non-sync_all op");
     };
+    let fd = duplicate_fd(fd)?;
 
-    offload(move || full_fsync(fd)).await
+    offload(move || full_fsync(fd.as_raw_fd())).await
 }
 
 pub async fn sync_data(op: FsOp) -> io::Result<()> {
     let FsOp::SyncData { fd } = op else {
         unreachable!("sync_data backend called with non-sync_data op");
     };
+    let fd = duplicate_fd(fd)?;
 
-    offload(move || full_fsync(fd)).await
+    offload(move || full_fsync(fd.as_raw_fd())).await
 }
 
 pub async fn set_len(op: FsOp) -> io::Result<()> {
     let FsOp::SetLen { fd, len } = op else {
         unreachable!("set_len backend called with non-set_len op");
     };
+    let fd = duplicate_fd(fd)?;
 
-    offload(move || cvt(unsafe { libc::ftruncate(fd, len as libc::off_t) }).map(|_| ())).await
+    offload(move || cvt(unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) }).map(|_| ()))
+        .await
 }
 
 /// Repositions the file's kernel cursor. `lseek(2)` on a regular file is a fast
@@ -189,11 +215,7 @@ pub async fn try_clone(op: FsOp) -> io::Result<OwnedFd> {
         unreachable!("try_clone backend called with non-duplicate op");
     };
 
-    offload(move || {
-        let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
-        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    })
-    .await
+    duplicate_fd(fd)
 }
 
 pub async fn create_dir(op: FsOp) -> io::Result<()> {
@@ -232,160 +254,12 @@ pub async fn rename(op: FsOp) -> io::Result<()> {
     offload(move || std::fs::rename(from, to)).await
 }
 
-pub fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
+pub(crate) fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
     let FsOp::ReadDir { path } = op else {
         unreachable!("read_dir backend called with non-read_dir op");
     };
 
     ReadDirStream::new(path)
-}
-
-pub struct ReadDirStream {
-    state: Arc<ReadDirState>,
-}
-
-impl ReadDirStream {
-    fn new(path: PathBuf) -> io::Result<Self> {
-        let state = Arc::new(ReadDirState::new(current_thread_handle()));
-        let producer = Arc::clone(&state);
-
-        if let Err(error) = spawn_blocking(move || produce_dir_entries(path, producer)) {
-            state.release_pending();
-            return Err(error);
-        }
-
-        Ok(Self { state })
-    }
-
-    pub async fn next_entry(&mut self) -> io::Result<Option<RawDirEntry>> {
-        poll_fn(|cx| self.state.poll_next(cx)).await
-    }
-}
-
-struct ReadDirState {
-    owner: ThreadHandle,
-    queue: Mutex<VecDeque<io::Result<RawDirEntry>>>,
-    done: AtomicBool,
-    pending: AtomicBool,
-    wake_queued: AtomicBool,
-    waker: Mutex<Option<Waker>>,
-}
-
-impl ReadDirState {
-    fn new(owner: ThreadHandle) -> Self {
-        owner.begin_async_operation();
-        Self {
-            owner,
-            queue: Mutex::new(VecDeque::new()),
-            done: AtomicBool::new(false),
-            pending: AtomicBool::new(true),
-            wake_queued: AtomicBool::new(false),
-            waker: Mutex::new(None),
-        }
-    }
-
-    fn push(self: &Arc<Self>, entry: io::Result<RawDirEntry>) {
-        self.queue.lock().unwrap().push_back(entry);
-        self.notify();
-    }
-
-    fn finish(self: &Arc<Self>) {
-        self.done.store(true, Ordering::Release);
-        // Enqueue the consumer's wake BEFORE releasing the pending op. In the
-        // reverse order there is a window where pending_ops is 0 and the
-        // remote queue is empty; run()'s exit protocol can commit `closed` in
-        // that window, after which the wake enqueue fails and the consumer is
-        // stranded (its task never resumes, and callers observe the stream's
-        // work as silently lost). With the wake enqueued first, the exit
-        // commit's remote-queue check sees it and keeps the loop alive.
-        // (Mirrors the ordering contract in op/completion.rs `finish`.)
-        self.notify();
-        self.release_pending();
-    }
-
-    fn release_pending(&self) {
-        if self.pending.swap(false, Ordering::AcqRel) {
-            self.owner.finish_async_operation();
-        }
-    }
-
-    fn notify(self: &Arc<Self>) {
-        if self.wake_queued.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        // Internal wake: routed through the capacity-bypassing path (like
-        // completion and task wakes) so a full user queue can never drop it —
-        // a dropped stream wake strands the consumer. The only failure is a
-        // closed owner thread, where nothing can be scheduled anyway.
-        let state = Arc::clone(self);
-        if self
-            .owner
-            .queue_internal_wake(move || {
-                state.wake_queued.store(false, Ordering::Release);
-                if let Some(waker) = state.waker.lock().unwrap().take() {
-                    waker.wake();
-                }
-            })
-            .is_err()
-        {
-            self.wake_queued.store(false, Ordering::Release);
-        }
-    }
-
-    fn poll_next(&self, cx: &mut Context<'_>) -> Poll<io::Result<Option<RawDirEntry>>> {
-        if let Some(entry) = self.queue.lock().unwrap().pop_front() {
-            return Poll::Ready(entry.map(Some));
-        }
-
-        if self.done.load(Ordering::Acquire) {
-            return Poll::Ready(Ok(None));
-        }
-
-        *self.waker.lock().unwrap() = Some(cx.waker().clone());
-
-        if let Some(entry) = self.queue.lock().unwrap().pop_front() {
-            let _ = self.waker.lock().unwrap().take();
-            return Poll::Ready(entry.map(Some));
-        }
-
-        if self.done.load(Ordering::Acquire) {
-            let _ = self.waker.lock().unwrap().take();
-            return Poll::Ready(Ok(None));
-        }
-
-        Poll::Pending
-    }
-}
-
-impl Drop for ReadDirStream {
-    fn drop(&mut self) {
-        self.state.release_pending();
-    }
-}
-
-fn produce_dir_entries(path: PathBuf, state: Arc<ReadDirState>) {
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(entry) => {
-                        let file_name = entry.file_name();
-                        state.push(Ok(RawDirEntry {
-                            path: entry.path(),
-                            file_name,
-                        }));
-                    }
-                    Err(error) => state.push(Err(error)),
-                }
-            }
-            state.finish();
-        }
-        Err(error) => {
-            state.push(Err(error));
-            state.finish();
-        }
-    }
 }
 
 async fn offload<T: Send + 'static>(
@@ -397,6 +271,13 @@ async fn offload<T: Send + 'static>(
         handle.complete(Err(error));
     }
     future.await
+}
+
+fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    let duplicated = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: F_DUPFD_CLOEXEC returned a fresh descriptor and ownership is
+    // transferred to this wrapper exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
 fn path_to_c_string(path: PathBuf) -> io::Result<CString> {
@@ -463,5 +344,72 @@ fn cvt(value: libc::c_int) -> io::Result<libc::c_int> {
         Err(io::Error::last_os_error())
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn blocking_read_owns_fd_across_drop_and_reuse() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let dir = std::env::current_dir()
+            .expect("repository directory")
+            .join("target")
+            .join("macos-fd-reuse-tests");
+        std::fs::create_dir_all(&dir).expect("create fixture directory");
+        let original_path = dir.join(format!("original-{}-{unique}", std::process::id()));
+        let replacement_path = dir.join(format!("replacement-{}-{unique}", std::process::id()));
+        std::fs::write(&original_path, b"original").expect("write original fixture");
+        std::fs::write(&replacement_path, b"replacement").expect("write replacement fixture");
+
+        let original = std::fs::File::open(&original_path).expect("open original");
+        let replacement = std::fs::File::open(&replacement_path).expect("open replacement");
+        let original_fd = original.as_raw_fd();
+        let job = read_job(original_fd, Some(0), 8).expect("prepare blocking read");
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::spawn(move || {
+            let (released, changed) = &*worker_gate;
+            let mut released = released.lock().expect("gate poisoned");
+            while !*released {
+                released = changed.wait(released).expect("gate poisoned");
+            }
+            job()
+        });
+
+        drop(original);
+        let reused = unsafe { libc::dup2(replacement.as_raw_fd(), original_fd) };
+        assert_eq!(
+            reused,
+            original_fd,
+            "dup2 failed to reuse descriptor: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: dup2 created a fresh descriptor at original_fd and this
+        // wrapper takes ownership of it exactly once.
+        let reused = unsafe { OwnedFd::from_raw_fd(reused) };
+        let (released, changed) = &*gate;
+        *released.lock().expect("gate poisoned") = true;
+        changed.notify_one();
+
+        let bytes = worker
+            .join()
+            .expect("blocking worker should not panic")
+            .expect("blocking read");
+        assert_eq!(bytes, b"original");
+
+        drop(reused);
+        drop(replacement);
+        std::fs::remove_file(original_path).expect("remove original fixture");
+        std::fs::remove_file(replacement_path).expect("remove replacement fixture");
     }
 }

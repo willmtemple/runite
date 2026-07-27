@@ -27,7 +27,9 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
 use super::handles::ThreadHandle;
-use super::state::{describe_panic, try_with_installed_thread, with_installed_thread};
+use super::state::{
+    describe_panic, mark_teardown_panicked, try_with_installed_thread, with_installed_thread,
+};
 use crate::task::JoinError;
 use crate::trace_targets;
 
@@ -108,6 +110,7 @@ impl FutureTask {
                 // released (the currently-executing microtask closure still
                 // holds one, so the drop happens after this returns).
                 deregister_task(self.id);
+                drop_future_safely(future, self.id, "completion");
             }
             Ok(Poll::Pending) => {
                 // If the task aborted itself during this poll (e.g. it holds
@@ -115,7 +118,7 @@ impl FutureTask {
                 // it so it is never polled again. `abort` has already removed
                 // it from the registry.
                 if self.shared.is_aborted() {
-                    drop(future);
+                    drop_future_safely(future, self.id, "abort");
                 } else {
                     *self.future.borrow_mut() = Some(future);
                 }
@@ -128,14 +131,88 @@ impl FutureTask {
                     panic = describe_panic(&*payload),
                     "spawned task panicked; isolating and reporting JoinError::Panicked to the joiner",
                 );
-                // Drop the panicked future rather than restore it, remove the
-                // registry reference, and move the joiner to a terminal
-                // panicked state.
-                drop(future);
+                // Commit the terminal state and release the registry reference
+                // before dropping user future state. A `Drop` implementation
+                // may itself panic; it must not skip terminal bookkeeping.
+                let join_waker = self.shared.mark_panicked();
                 deregister_task(self.id);
-                self.shared.mark_panicked();
+                wake_join_safely(join_waker, self.id, "panic");
+                drop_future_safely(future, self.id, "panic");
             }
         }
+    }
+}
+
+struct ShutdownCancellation {
+    task_id: u64,
+    future: Option<LocalBoxFuture>,
+    join_waker: Option<Waker>,
+}
+
+/// Transitions every supplied task to shutdown-cancelled before invoking any
+/// user code through a waker or future destructor.
+///
+/// Callers remove the tasks from the runtime registry first. The separate
+/// prepare/finish phases ensure all task states and deregistration are
+/// committed before one task's destructor can inspect or mutate another task.
+pub(crate) fn cancel_tasks_for_shutdown(mut tasks: Vec<Rc<FutureTask>>) {
+    tasks.sort_unstable_by_key(|task| task.id);
+    let mut cancellations = tasks
+        .into_iter()
+        .filter_map(|task| {
+            let join_waker = task.shared.mark_cancelled()?;
+            task.queued.set(false);
+            let future = task.future.borrow_mut().take();
+            Some(ShutdownCancellation {
+                task_id: task.id,
+                future,
+                join_waker,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for cancellation in &mut cancellations {
+        wake_join_safely(
+            cancellation.join_waker.take(),
+            cancellation.task_id,
+            "shutdown cancellation",
+        );
+    }
+    for cancellation in cancellations {
+        if let Some(future) = cancellation.future {
+            drop_future_safely(future, cancellation.task_id, "shutdown cancellation");
+        }
+    }
+}
+
+fn wake_join_safely(waker: Option<Waker>, task_id: u64, terminal: &'static str) {
+    let Some(waker) = waker else {
+        return;
+    };
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake())) {
+        mark_teardown_panicked();
+        tracing::error!(
+            target: trace_targets::ASYNC,
+            event = "join_waker_panicked",
+            task_id,
+            terminal,
+            panic = describe_panic(&*payload),
+            "join waker panicked during terminal task cleanup; isolating panic",
+        );
+    }
+}
+
+fn drop_future_safely(future: LocalBoxFuture, task_id: u64, terminal: &'static str) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future))) {
+        mark_teardown_panicked();
+        tracing::error!(
+            target: trace_targets::ASYNC,
+            event = "task_future_drop_panicked",
+            task_id,
+            terminal,
+            panic = describe_panic(&*payload),
+            "spawned task future panicked from Drop; isolating destructor panic",
+        );
     }
 }
 
@@ -277,6 +354,9 @@ enum TaskState {
     Finished,
     /// The task was aborted before completion.
     Aborted,
+    /// The runtime reached quiescence or its owning thread shut down before
+    /// the task could make further progress.
+    Cancelled,
     /// The task panicked while being polled.
     Panicked,
 }
@@ -313,7 +393,7 @@ impl TaskShared {
         self.id.set(task.id);
     }
 
-    /// Returns `true` once the task has completed or been aborted.
+    /// Returns `true` once the task has reached any terminal state.
     pub(crate) fn is_finished(&self) -> bool {
         !matches!(self.state.get(), TaskState::Running)
     }
@@ -326,26 +406,27 @@ impl TaskShared {
     /// the joiner with [`JoinError::Aborted`]. A no-op if the task already
     /// finished or was aborted.
     pub(crate) fn abort(&self) {
-        if !matches!(self.state.get(), TaskState::Running) {
+        let Some(join_waker) = self.mark_terminal(TaskState::Aborted) else {
             return;
-        }
-        self.state.set(TaskState::Aborted);
+        };
 
         // Dropping the future cancels any in-flight driver operations it is
         // parked on via their `Drop` impls. If the task is mid-poll (self
         // abort) the future is on the stack and this take is a no-op;
         // `FutureTask::poll` then drops it instead of restoring it.
-        if let Some(task) = self.task.borrow().upgrade() {
-            let _ = task.future.borrow_mut().take();
-        }
+        let task = self.task.borrow().upgrade();
+        let future = task
+            .as_ref()
+            .and_then(|task| task.future.borrow_mut().take());
 
         // Release the runtime's registry reference so an aborted task is not
         // retained (mid-poll self-abort still keeps it alive via the executing
         // microtask closure until that poll returns).
         deregister_task(self.id.get());
+        wake_join_safely(join_waker, self.id.get(), "abort");
 
-        if let Some(waker) = self.join_waker.borrow_mut().take() {
-            waker.wake();
+        if let Some(future) = future {
+            drop_future_safely(future, self.id.get(), "abort");
         }
     }
 
@@ -353,15 +434,20 @@ impl TaskShared {
     /// [`JoinError::Panicked`]. Called from [`FutureTask::poll`] when the
     /// future unwinds. A no-op if the task already finished or was aborted
     /// (an abort observed during the panicking poll wins).
-    fn mark_panicked(&self) {
-        if !matches!(self.state.get(), TaskState::Running) {
-            return;
-        }
-        self.state.set(TaskState::Panicked);
+    fn mark_panicked(&self) -> Option<Waker> {
+        self.mark_terminal(TaskState::Panicked).flatten()
+    }
 
-        if let Some(waker) = self.join_waker.borrow_mut().take() {
-            waker.wake();
+    fn mark_cancelled(&self) -> Option<Option<Waker>> {
+        self.mark_terminal(TaskState::Cancelled)
+    }
+
+    fn mark_terminal(&self, terminal: TaskState) -> Option<Option<Waker>> {
+        if !matches!(self.state.get(), TaskState::Running) {
+            return None;
         }
+        self.state.set(terminal);
+        Some(self.join_waker.borrow_mut().take())
     }
 }
 
@@ -387,9 +473,8 @@ impl<T> JoinState<T> {
         *self.result.borrow_mut() = Some(value);
         self.shared.state.set(TaskState::Finished);
 
-        if let Some(waker) = self.shared.join_waker.borrow_mut().take() {
-            waker.wake();
-        }
+        let waker = self.shared.join_waker.borrow_mut().take();
+        wake_join_safely(waker, self.shared.id.get(), "completion");
     }
 
     pub(crate) fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<T, JoinError>> {
@@ -400,6 +485,7 @@ impl<T> JoinState<T> {
                 .take()
                 .expect("join handle polled after completion"))),
             TaskState::Aborted => Poll::Ready(Err(JoinError::Aborted)),
+            TaskState::Cancelled => Poll::Ready(Err(JoinError::Cancelled)),
             TaskState::Panicked => Poll::Ready(Err(JoinError::Panicked)),
             TaskState::Running => {
                 *self.shared.join_waker.borrow_mut() = Some(cx.waker().clone());

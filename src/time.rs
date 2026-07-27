@@ -198,8 +198,10 @@ pub fn interval(period: Duration) -> Interval {
 /// Schedules `callback` to run once after at least `delay` has elapsed.
 ///
 /// Returns a [`crate::TimeoutHandle`]; call [`crate::TimeoutHandle::cancel`]
-/// before it fires to cancel it. Dropping the handle does not cancel the
-/// timeout. For async code, prefer [`sleep`].
+/// before the callback starts to cancel it. Cancellation also suppresses an
+/// expired callback that is waiting in the macrotask queue. Dropping the handle
+/// does not cancel the timeout. A zero delay still queues a macrotask rather
+/// than invoking the callback inline. For async code, prefer [`sleep`].
 ///
 /// # Examples
 ///
@@ -232,7 +234,8 @@ where
 /// a macrotask, and at most one callback for a given interval is queued per
 /// event-loop turn. Missed deadlines, including zero-duration intervals, are not
 /// burst-run in a tight loop; the next callback is re-queued as a later
-/// macrotask.
+/// macrotask. If a callback panics, the panic is isolated and that interval is
+/// cancelled before later work runs.
 ///
 /// # Examples
 ///

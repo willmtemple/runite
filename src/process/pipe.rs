@@ -39,16 +39,12 @@
 //! # }
 //! ```
 //!
-use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use std::io;
+use std::io::{self, IoSlice};
 
-use crate::io::{AsyncRead, AsyncWrite};
+use crate::io::{AsyncRead, AsyncWrite, ReadState, WriteState};
 use crate::sys::handle::{OwnedFile, RawFile, raw_file};
-
-type PendingRead = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
-type PendingWrite = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 
 #[derive(Debug)]
 pub(crate) struct Pipe {
@@ -78,14 +74,14 @@ impl Pipe {
 /// [`Stdio::piped`](super::Stdio::piped). Closing or dropping this handle closes
 /// the child's stdin pipe and can signal EOF to the child.
 ///
-/// `poll_close` drops any pending write state and closes the fd immediately; it
-/// does not flush bytes beyond writes that have already completed. Await
+/// `poll_close` waits for an abandoned in-flight write to complete before
+/// closing the descriptor, preserving operation ordering. Await
 /// [`write_all`](crate::io::AsyncWriteExt::write_all) before `close` when the
-/// child must receive the whole buffer. EOF is visible to the child only after
-/// completed writes and the close.
+/// child must receive the whole buffer.
 pub struct ChildStdin {
+    // Pending writes must be dropped before the pipe descriptor.
+    write_state: WriteState,
     pipe: Pipe,
-    pending_write: Option<PendingWrite>,
 }
 
 /// Async reader connected to a child process's standard output.
@@ -94,9 +90,9 @@ pub struct ChildStdin {
 /// [`Stdio::piped`](super::Stdio::piped). It implements [`AsyncRead`] for
 /// consuming bytes produced by the child using nonblocking fd readiness.
 pub struct ChildStdout {
+    // Pending reads must be dropped before the pipe descriptor.
+    read_state: ReadState,
     pipe: Pipe,
-    pending_read: Option<PendingRead>,
-    read_overflow: Option<Box<crate::io::ReadOverflow>>,
 }
 
 /// Async reader connected to a child process's standard error.
@@ -106,16 +102,16 @@ pub struct ChildStdout {
 /// consuming diagnostic bytes produced by the child using nonblocking fd
 /// readiness.
 pub struct ChildStderr {
+    // Pending reads must be dropped before the pipe descriptor.
+    read_state: ReadState,
     pipe: Pipe,
-    pending_read: Option<PendingRead>,
-    read_overflow: Option<Box<crate::io::ReadOverflow>>,
 }
 
 impl ChildStdin {
     pub(crate) fn from_pipe(pipe: Pipe) -> Self {
         Self {
+            write_state: WriteState::default(),
             pipe,
-            pending_write: None,
         }
     }
 }
@@ -123,9 +119,8 @@ impl ChildStdin {
 impl ChildStdout {
     pub(crate) fn from_pipe(pipe: Pipe) -> Self {
         Self {
+            read_state: ReadState::default(),
             pipe,
-            pending_read: None,
-            read_overflow: None,
         }
     }
 }
@@ -133,9 +128,8 @@ impl ChildStdout {
 impl ChildStderr {
     pub(crate) fn from_pipe(pipe: Pipe) -> Self {
         Self {
+            read_state: ReadState::default(),
             pipe,
-            pending_read: None,
-            read_overflow: None,
         }
     }
 }
@@ -146,45 +140,54 @@ impl AsyncWrite for ChildStdin {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        self.poll_write_operation(cx, buf, 0)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
         let this = self.get_mut();
-        if this.pending_write.is_none() {
-            match this.pipe.raw_fd() {
-                Ok(fd) => {
-                    this.pending_write = Some(crate::sys::current::process::write_pipe_future(
-                        fd,
-                        buf.to_vec(),
-                    ));
-                }
-                Err(error) => return Poll::Ready(Err(error)),
-            }
-        }
+        let fd = match this.pipe.raw_fd() {
+            Ok(fd) => fd,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        this.write_state
+            .poll_write(cx, generation, buf, move |data| {
+                crate::sys::current::process::write_pipe_future(fd, data)
+            })
+    }
 
-        match this
-            .pending_write
-            .as_mut()
-            .expect("pending child stdin write must exist")
-            .as_mut()
-            .poll(cx)
-        {
-            Poll::Ready(result) => {
-                this.pending_write = None;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
+    fn poll_write_vectored_operation(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.as_mut().poll_write_operation(cx, buf, generation),
+            None => Poll::Ready(Ok(0)),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // An abandoned write stays owned by the pipe, so returning `Ok`
+        // unconditionally would report bytes as visible while they are still in
+        // flight and would swallow that operation's error.
+        self.get_mut().write_state.poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.pending_write = None;
+        if this.write_state.poll_drain(cx).is_pending() {
+            return Poll::Pending;
+        }
         this.pipe.close();
         Poll::Ready(Ok(()))
     }
@@ -204,46 +207,13 @@ macro_rules! impl_async_read {
 
                 let this = self.get_mut();
 
-                if let Some(overflow) = this.read_overflow.as_mut() {
-                    let n = overflow.drain_into(buf);
-                    if overflow.is_drained() {
-                        this.read_overflow = None;
-                    }
-                    return Poll::Ready(Ok(n));
-                }
-
-                if this.pending_read.is_none() {
-                    match this.pipe.raw_fd() {
-                        Ok(fd) => {
-                            this.pending_read = Some(
-                                crate::sys::current::process::read_pipe_future(fd, buf.len()),
-                            );
-                        }
-                        Err(error) => return Poll::Ready(Err(error)),
-                    }
-                }
-
-                match this
-                    .pending_read
-                    .as_mut()
-                    .expect("pending child pipe read must exist")
-                    .as_mut()
-                    .poll(cx)
-                {
-                    Poll::Ready(result) => {
-                        this.pending_read = None;
-                        let data = result?;
-                        let n = data.len().min(buf.len());
-                        buf[..n].copy_from_slice(&data[..n]);
-                        // Retain any bytes that did not fit rather than discarding them.
-                        if data.len() > n {
-                            this.read_overflow =
-                                Some(Box::new(crate::io::ReadOverflow::new(&data[n..])));
-                        }
-                        Poll::Ready(Ok(n))
-                    }
-                    Poll::Pending => Poll::Pending,
-                }
+                let fd = match this.pipe.raw_fd() {
+                    Ok(fd) => fd,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                this.read_state.poll_slice(cx, buf, move |len| {
+                    crate::sys::current::process::read_pipe_future(fd, len)
+                })
             }
         }
     };
@@ -251,3 +221,98 @@ macro_rules! impl_async_read {
 
 impl_async_read!(ChildStdout);
 impl_async_read!(ChildStderr);
+
+#[cfg(all(test, unix))]
+mod tests {
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use std::future::poll_fn;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::{ChildStdin, Pipe};
+    use crate::io::AsyncWrite;
+    use crate::sys::handle::OwnedFile;
+
+    struct PendingOnce<T> {
+        pending: bool,
+        result: Option<io::Result<T>>,
+    }
+
+    impl<T> PendingOnce<T> {
+        fn new(result: io::Result<T>) -> Self {
+            Self {
+                pending: true,
+                result: Some(result),
+            }
+        }
+    }
+
+    impl<T: Unpin> Future for PendingOnce<T> {
+        type Output = io::Result<T>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.pending {
+                self.pending = false;
+                Poll::Pending
+            } else {
+                Poll::Ready(self.result.take().expect("polled after completion"))
+            }
+        }
+    }
+
+    #[test]
+    fn child_stdin_does_not_reuse_an_abandoned_write_count() {
+        let path = std::env::current_dir()
+            .expect("current directory")
+            .join("target")
+            .join(format!("child-pipe-pending-write-{}", std::process::id()));
+        let observed = Arc::new(Mutex::new(None::<Vec<u8>>));
+
+        {
+            let observed = Arc::clone(&observed);
+            let path = path.clone();
+            crate::spawn(async move {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .expect("open fixture");
+                let fd: OwnedFile = file.into();
+                let mut stdin = ChildStdin::from_pipe(Pipe::new(fd));
+                let old = b"old".to_vec();
+                let old_generation = crate::io::next_operation_id();
+
+                poll_fn(|cx| {
+                    assert!(
+                        stdin
+                            .write_state
+                            .poll_write(cx, old_generation, &old, |_| {
+                                Box::pin(PendingOnce::new(Ok(old.len())))
+                            })
+                            .is_pending()
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+
+                let written = poll_fn(|cx| Pin::new(&mut stdin).poll_write(cx, b"new bytes"))
+                    .await
+                    .expect("new write");
+                assert_eq!(written, 9);
+                drop(stdin);
+                *observed.lock().unwrap() = Some(std::fs::read(&path).expect("read fixture"));
+                std::fs::remove_file(&path).expect("remove fixture");
+            });
+        }
+
+        crate::run();
+        assert_eq!(
+            observed.lock().unwrap().as_deref(),
+            Some(b"new bytes".as_slice())
+        );
+    }
+}

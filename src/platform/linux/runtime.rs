@@ -11,6 +11,7 @@
 //!     fixed, so callers continue to write `runite::queue_macrotask(..)`
 //!     without turbofish.
 
+use std::any::Any;
 use std::future::Future;
 use std::io;
 use std::time::Duration;
@@ -48,6 +49,22 @@ pub(crate) fn try_current_thread_handle() -> Option<ThreadHandle> {
 
 pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
     shared::with_current_driver_any::<LinuxRuntime, Driver, T>(f)
+}
+
+pub(crate) fn cancel_operation_on_owner(
+    owner: ThreadHandle,
+    token: u64,
+    guard: Option<Box<dyn Any + Send + 'static>>,
+) {
+    let cancel = move || {
+        let _ = with_current_driver(|driver| driver.cancel_operation_with_guard(token, guard));
+    };
+
+    if owner.is_current() {
+        cancel();
+    } else {
+        let _ = owner.queue_internal_wake(cancel);
+    }
 }
 
 pub fn queue_task<F>(task: F)
@@ -113,10 +130,13 @@ pub fn run_ready_tasks() {
     shared::run_ready_tasks::<LinuxRuntime>()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
-    use super::LinuxRuntime;
+    use super::{LinuxRuntime, current_thread_handle, run_until_stalled};
+    use crate::op::fs::FsOp;
     use crate::platform::runtime_shared::test_support;
+    use crate::{QueueError, spawn};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     #[test]
     fn runtime_executes_local_and_remote_work() {
@@ -131,5 +151,46 @@ mod tests {
     #[test]
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<LinuxRuntime>();
+    }
+
+    #[test]
+    fn pending_read_teardown_quiesces_before_retained_handle_drops() {
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 initializes both descriptor slots on success.
+        assert_eq!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) },
+            0
+        );
+        // SAFETY: pipe2 returned fresh descriptors owned by this test.
+        let reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::spawn(move || {
+            handle_tx
+                .send(current_thread_handle())
+                .expect("test should retain the thread handle");
+            spawn(async move {
+                let _ = crate::sys::linux::fs::read(FsOp::Read {
+                    fd: reader.as_raw_fd(),
+                    offset: None,
+                    len: 64,
+                })
+                .await;
+                drop(reader);
+            });
+            run_until_stalled();
+        })
+        .join()
+        .expect("runtime thread should tear down cleanly");
+
+        let handle = handle_rx.recv().expect("runtime should publish its handle");
+        assert!(handle.is_closed());
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Closed)
+        ));
+        drop(writer);
+        drop(handle);
     }
 }

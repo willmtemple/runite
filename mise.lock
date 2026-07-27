@@ -4,44 +4,44 @@
 version = "0.52.0"
 backend = "cargo:cargo-public-api"
 
-[[tools."github:KrzysztofCwalina/cop"]]
-version = "2026.6.19.7"
-backend = "github:KrzysztofCwalina/cop"
+[[tools."github:rhysd/actionlint"]]
+version = "1.7.7"
+backend = "github:rhysd/actionlint"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.linux-arm64"]
-checksum = "sha256:26d793db54c4161525fb737524f95fc59522989a7dd46f573b20656ed91a9bd3"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-linux-arm64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691535"
+[tools."github:rhysd/actionlint"."platforms.linux-arm64"]
+checksum = "sha256:401942f9c24ed71e4fe71b76c7d638f66d8633575c4016efd2977ce7c28317d0"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573255"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.linux-arm64-musl"]
-checksum = "sha256:26d793db54c4161525fb737524f95fc59522989a7dd46f573b20656ed91a9bd3"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-linux-arm64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691535"
+[tools."github:rhysd/actionlint"."platforms.linux-arm64-musl"]
+checksum = "sha256:401942f9c24ed71e4fe71b76c7d638f66d8633575c4016efd2977ce7c28317d0"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573255"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.linux-x64"]
-checksum = "sha256:9e3588a76dcce1e3e87314b1bc0e109870fe5047d35a0db67d384824c121991e"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-linux-x64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691536"
+[tools."github:rhysd/actionlint"."platforms.linux-x64"]
+checksum = "sha256:023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573254"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.linux-x64-musl"]
-checksum = "sha256:9e3588a76dcce1e3e87314b1bc0e109870fe5047d35a0db67d384824c121991e"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-linux-x64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691536"
+[tools."github:rhysd/actionlint"."platforms.linux-x64-musl"]
+checksum = "sha256:023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573254"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.macos-arm64"]
-checksum = "sha256:44d23b601fe0f5ba5a2cee4bb336b15401a07879b49d54360e2bb4d29abf537f"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-osx-arm64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691532"
+[tools."github:rhysd/actionlint"."platforms.macos-arm64"]
+checksum = "sha256:2693315b9093aeacb4ebd91a993fea54fc215057bf0da2659056b4bc033873db"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573250"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.macos-x64"]
-checksum = "sha256:74ef662665230a731450786d6617409523bd98aafd2445375fbad4fb5a26962a"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-osx-x64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452691537"
+[tools."github:rhysd/actionlint"."platforms.macos-x64"]
+checksum = "sha256:28e5de5a05fc558474f638323d736d822fff183d2d492f0aecb2b73cc44584f5"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573249"
 
-[tools."github:KrzysztofCwalina/cop"."platforms.windows-x64"]
-checksum = "sha256:a7d3a300db43bc1e1611c56f984bcd40f5da850f7f1e02820f3203782e804b45"
-url = "https://github.com/KrzysztofCwalina/cop/releases/download/v2026.6.19.7/cop-win-x64.zip"
-url_api = "https://api.github.com/repos/KrzysztofCwalina/cop/releases/assets/452692084"
+[tools."github:rhysd/actionlint"."platforms.windows-x64"]
+checksum = "sha256:7f12f1801bca3d480d67aaf7774f4c2a6359a3ca8eebe382c95c10c9704aa731"
+url = "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_windows_amd64.zip"
+url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/221573260"
 
 [[tools.rust]]
 version = "1.96.0"

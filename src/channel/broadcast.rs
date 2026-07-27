@@ -153,6 +153,7 @@ pub struct SendError<T>(pub T);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Error returned when receiving from a broadcast channel fails.
+#[non_exhaustive]
 pub enum RecvError {
     /// The receiver missed this many messages because it lagged behind the
     /// bounded ring buffer.

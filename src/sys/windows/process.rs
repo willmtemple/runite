@@ -28,7 +28,7 @@ use windows_sys::Win32::System::Threading::{
 use crate::op::completion::{CompletionHandle, completion_for_current_thread};
 use crate::process::pipe::Pipe;
 use crate::process::{CommandSpec, EnvChange, StdioKind};
-use crate::sys::handle::{RawFile, raw_file};
+use crate::sys::handle::RawFile;
 use crate::sys::windows::overlapped;
 
 pub(crate) struct Child {
@@ -167,8 +167,7 @@ fn adopt_pipe<H: IntoRawHandle>(pipe: H) -> io::Result<Pipe> {
     // SAFETY: `into_raw_handle` transfers ownership; the handle is adopted
     // exactly once.
     let handle = unsafe { OwnedHandle::from_raw_handle(pipe.into_raw_handle()) };
-    overlapped::associate_file(raw_file(&handle))?;
-    Ok(Pipe::new(handle))
+    Ok(Pipe::new(crate::sys::windows::fs::adopt_handle(handle)?))
 }
 
 /// State shared between one `wait` registration and its wait-thread callback.
