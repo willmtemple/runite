@@ -123,6 +123,15 @@ changes.
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `sync::CancellationToken`: cloneable, hierarchical cooperative cancellation
+  that `!Send` tasks can await. It complements `AbortHandle` rather than
+  replacing it — an abort is done *to* a task at its next suspension point, a
+  token is something a task chooses to observe, so work that must flush a
+  buffer or release a lock before stopping can do so. `child_token` derives a
+  token cancelled when its parent is, letting a subsystem cancel its own work
+  without touching its siblings; cancellation flows down only.
+  ([#11](https://github.com/willmtemple/runite/issues/11))
+
 - `TimeoutHandle::cancel_on_drop` and `IntervalHandle::cancel_on_drop`, which
   wrap a timer token in a `CancelOnDrop` guard that stops the timer when it
   falls out of scope. The plain handles keep their token semantics — dropping

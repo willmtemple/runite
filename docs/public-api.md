@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1102 | 1122 | 1145 | 1165 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1102 | 1122 | 1145 | 1165 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1102 | 1122 | 1145 | 1165 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1006 | 1020 | 1049 | 1063 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1113 | 1133 | 1156 | 1176 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1113 | 1133 | 1156 | 1176 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1113 | 1133 | 1156 | 1176 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1017 | 1031 | 1060 | 1074 | 72 |
 
-Portable default items: **934**
+Portable default items: **945**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **934**
 
 ## Portable default surface
 
-Items: **934**
+Items: **945**
 
 ### `runite`
 
@@ -879,10 +879,13 @@ pub struct runite::stdio::Stdout
 ### `runite::sync`
 
 ```rust
+impl core::default::Default for runite::sync::CancellationToken
 impl core::default::Default for runite::sync::Notify
+impl core::fmt::Debug for runite::sync::CancellationToken
 impl core::fmt::Debug for runite::sync::Notify
 impl core::fmt::Debug for runite::sync::Semaphore
 impl core::ops::drop::Drop for runite::sync::SemaphorePermit<'_>
+impl runite::sync::CancellationToken
 impl runite::sync::Notify
 impl runite::sync::Semaphore
 impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::MutexGuard<'a, T>
@@ -912,10 +915,17 @@ impl<T> core::fmt::Debug for runite::sync::OnceCell<T>
 impl<T> runite::sync::Mutex<T>
 impl<T> runite::sync::OnceCell<T>
 impl<T> runite::sync::RwLock<T>
+pub async fn runite::sync::CancellationToken::cancelled(&self)
 pub async fn runite::sync::Mutex<T>::lock(&self) -> runite::sync::MutexGuard<'_, T>
 pub async fn runite::sync::Notify::notified(&self)
 pub async fn runite::sync::OnceCell<T>::get_or_init<F, Fut>(&self, F) -> &T where F: core::ops::function::FnOnce() -> Fut, Fut: core::future::future::Future<Output = T>
 pub async fn runite::sync::Semaphore::acquire(&self) -> runite::sync::SemaphorePermit<'_>
+pub fn runite::sync::CancellationToken::cancel(&self)
+pub fn runite::sync::CancellationToken::child_token(&self) -> Self
+pub fn runite::sync::CancellationToken::default() -> Self
+pub fn runite::sync::CancellationToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::sync::CancellationToken::is_cancelled(&self) -> bool
+pub fn runite::sync::CancellationToken::new() -> Self
 pub fn runite::sync::Mutex<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::Mutex<T>::new(T) -> Self
 pub fn runite::sync::Mutex<T>::try_lock(&self) -> core::option::Option<runite::sync::MutexGuard<'_, T>>
@@ -959,6 +969,7 @@ pub fn runite::sync::Semaphore::try_acquire(&self) -> core::option::Option<runit
 pub fn runite::sync::SemaphorePermit<'_>::drop(&mut self)
 pub fn runite::sync::SemaphorePermit<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod runite::sync
+pub struct runite::sync::CancellationToken
 pub struct runite::sync::Mutex<T: ?core::marker::Sized>
 pub struct runite::sync::MutexGuard<'a, T: ?core::marker::Sized>
 pub struct runite::sync::Notify
