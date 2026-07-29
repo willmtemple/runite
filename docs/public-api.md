@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1142 | 1162 | 1185 | 1205 | 174 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1142 | 1162 | 1185 | 1205 | 174 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1142 | 1162 | 1185 | 1205 | 174 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1040 | 1054 | 1083 | 1097 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1152 | 1172 | 1195 | 1215 | 174 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1152 | 1172 | 1195 | 1215 | 174 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1152 | 1172 | 1195 | 1215 | 174 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1050 | 1064 | 1093 | 1107 | 72 |
 
-Portable default items: **968**
+Portable default items: **978**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **968**
 
 ## Portable default surface
 
-Items: **968**
+Items: **978**
 
 ### `runite`
 
@@ -74,6 +74,7 @@ pub fn runite::JoinError::is_panicked(&self) -> bool
 pub fn runite::block_on<F>(F) -> <F as core::future::future::Future>::Output where F: core::future::future::Future
 pub fn runite::current_thread_handle() -> ThreadHandle
 pub fn runite::current_turn() -> core::option::Option<TurnId>
+pub fn runite::on_shutdown<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::queue_macrotask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::queue_microtask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::run()
@@ -664,11 +665,13 @@ pub use runite::io::SeekFrom
 ```rust
 #[non_exhaustive] pub struct runite::metrics::Counters
 #[non_exhaustive] pub struct runite::metrics::Gauges
+#[non_exhaustive] pub struct runite::metrics::Peaks
 #[non_exhaustive] pub struct runite::metrics::Snapshot
 pub fn runite::metrics::snapshot() -> runite::metrics::Snapshot
 pub mod runite::metrics
 pub runite::metrics::Counters::coalesced_wakes: u64
 pub runite::metrics::Counters::macrotasks_run: u64
+pub runite::metrics::Counters::microtask_bound_turns: u64
 pub runite::metrics::Counters::microtasks_run: u64
 pub runite::metrics::Counters::operations_completed: u64
 pub runite::metrics::Counters::remote_tasks_rejected: u64
@@ -683,8 +686,15 @@ pub runite::metrics::Gauges::microtask_queue_depth: usize
 pub runite::metrics::Gauges::outstanding_operations: usize
 pub runite::metrics::Gauges::ready_tasks: usize
 pub runite::metrics::Gauges::remote_macrotask_queue_depth: usize
+pub runite::metrics::Peaks::armed_timers: usize
+pub runite::metrics::Peaks::live_tasks: usize
+pub runite::metrics::Peaks::local_macrotask_queue_depth: usize
+pub runite::metrics::Peaks::microtask_queue_depth: usize
+pub runite::metrics::Peaks::outstanding_operations: usize
+pub runite::metrics::Peaks::ready_tasks: usize
 pub runite::metrics::Snapshot::counters: runite::metrics::Counters
 pub runite::metrics::Snapshot::gauges: runite::metrics::Gauges
+pub runite::metrics::Snapshot::peaks: runite::metrics::Peaks
 ```
 
 ### `runite::net`

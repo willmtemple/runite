@@ -142,15 +142,36 @@ changes.
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
 
-- `metrics::snapshot()`, returning a `Snapshot` of `Gauges` and `Counters`.
+- `on_shutdown`, registering a closure to run when a thread's runtime is torn
+  down — before spawned tasks are cancelled and before the driver is destroyed,
+  so a hook is handed a runtime that can still do something. Deliberately keyed
+  to teardown rather than to an entry point returning: `run_until_stalled` and
+  `run_ready_tasks` return routinely, and a host driving the loop with the
+  latter returns constantly and means nothing by it. Without this, an
+  application with work to do on the way out has nowhere to put it and
+  typically reaches for `std::process::exit`, which skips every destructor in
+  the process. ([#45](https://github.com/willmtemple/runite/issues/45))
+
+- `metrics::snapshot()`, returning a `Snapshot` of `Gauges`, `Counters` and
+  `Peaks`.
   Gauges are levels read at an instant — live tasks, ready tasks, microtask and
   macrotask queue depths, remote queue depth, armed timers, outstanding driver
   operations. Counters are monotonic totals — turns, task polls, task wakes,
   coalesced wakes, microtasks and macrotasks run, operations completed, tasks
-  cancelled, remote tasks rejected — whose useful quantity is the difference
-  between two snapshots.
+  cancelled, microtask-bound turns, remote tasks rejected — whose useful
+  quantity is the difference between two snapshots. Peaks are the highest each
+  gauge has reached, which answers "how bad did this get" after an incident and
+  survives the level falling back to zero.
 
-  They are two types rather than one flat struct on purpose: a flat struct
+  `microtask_bound_turns` counts turns whose microtask drain took longer than
+  everything else in the turn combined, which is how a consumer learns the
+  loop's time went to reactive work rather than to I/O or timers — a
+  distinction wake counts cannot make. It costs two clock reads per *turn*, not
+  per microtask, well below the driver poll that opens the same turn. Peaks are
+  sampled once per turn for the same reason, so a queue that spikes and drains
+  within a single turn can be missed.
+
+  They are three types rather than one flat struct on purpose: a flat struct
   invites subtracting a gauge or reading a counter as a level, and a consumer
   that cannot tell them apart will misreport. High-water marks are a third kind
   and will be a third type.

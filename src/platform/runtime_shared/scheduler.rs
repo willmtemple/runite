@@ -775,6 +775,7 @@ impl Wake for BlockOnWaker {
 /// waiting-macrotask condition is re-checked at each threshold multiple rather
 /// than warning on count alone.
 fn drain_microtasks<R: Runtime>() {
+    let started = std::time::Instant::now();
     let mut microtasks_run: u64 = 0;
     let mut warned = false;
     while let Some(task) = pop_microtask() {
@@ -797,6 +798,7 @@ fn drain_microtasks<R: Runtime>() {
             );
         }
     }
+    MICROTASK_DRAIN.with(|drain| drain.set(drain.get() + started.elapsed()));
 }
 
 /// Returns whether a macrotask is waiting to run on this thread: a queued
@@ -860,6 +862,10 @@ static NEXT_TURN: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static CURRENT_TURN: std::cell::Cell<Option<TurnId>> = const { std::cell::Cell::new(None) };
+    /// Time spent draining microtasks in the current turn. Accumulated because
+    /// a turn may drain more than once.
+    static MICROTASK_DRAIN: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
 
 /// Identifies one turn of an event loop.
@@ -875,6 +881,13 @@ impl std::fmt::Display for TurnId {
     }
 }
 
+/// Registers a closure to run when this thread's runtime is torn down.
+pub fn on_shutdown<F: FnOnce() + 'static>(hook: F) {
+    with_installed_thread(|state| {
+        state.shutdown_hooks.borrow_mut().push(Box::new(hook));
+    });
+}
+
 /// Returns the identifier of the turn currently being driven, if any.
 pub fn current_turn() -> Option<TurnId> {
     CURRENT_TURN.with(std::cell::Cell::get)
@@ -884,7 +897,10 @@ pub fn current_turn() -> Option<TurnId> {
 ///
 /// Restores the previous value rather than clearing, so the mechanism does not
 /// depend on `EventLoopGuard`'s non-reentrancy assertion staying in place.
-struct TurnGuard(Option<TurnId>);
+struct TurnGuard {
+    previous: Option<TurnId>,
+    started: std::time::Instant,
+}
 
 impl TurnGuard {
     fn begin() -> Self {
@@ -896,13 +912,32 @@ impl TurnGuard {
         });
         let id = TurnId(NEXT_TURN.fetch_add(1, Ordering::Relaxed));
         CURRENT_TURN.with(|current| current.set(Some(id)));
-        Self(previous)
+        MICROTASK_DRAIN.with(|drain| drain.set(std::time::Duration::ZERO));
+        Self {
+            previous,
+            started: std::time::Instant::now(),
+        }
     }
 }
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        CURRENT_TURN.with(|current| current.set(self.0));
+        // Two clock reads per *turn*, not per microtask. A turn already opens
+        // with a driver poll, so this is far below the noise floor — and
+        // without it "the reactive graph is what this turn spent its time on"
+        // is unanswerable, which is the question a consumer sitting in the
+        // microtask checkpoint actually has.
+        let elapsed = self.started.elapsed();
+        let drained = MICROTASK_DRAIN.with(std::cell::Cell::get);
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                if drained * 2 > elapsed {
+                    RuntimeCounters::bump(&state.shared.counters.microtask_bound_turns);
+                }
+                state.observe_peaks();
+            }
+        });
+        CURRENT_TURN.with(|current| current.set(self.previous));
     }
 }
 

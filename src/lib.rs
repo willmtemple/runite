@@ -576,6 +576,57 @@ mod runtime_api {
         imp::run_until_stalled()
     }
 
+    /// Registers a closure to run when this thread's runtime is torn down.
+    ///
+    /// Hooks run once, in registration order, at the start of teardown — while
+    /// the runtime is still intact, before spawned tasks are cancelled and
+    /// before the platform driver is destroyed. That ordering is the point: a
+    /// hook that ran after cancellation would be handed a runtime that can no
+    /// longer do anything.
+    ///
+    /// This is keyed to *teardown*, not to an entry point returning.
+    /// [`run`], [`run_until_stalled`] and
+    /// [`run_ready_tasks`] all return routinely — a host
+    /// driving the loop with the last of those returns constantly and means
+    /// nothing by it — so a hook defined as "runs when `run()` returns" would
+    /// fire spuriously for such a host and never for the case this exists for.
+    ///
+    /// The intended use is releasing a resource the runtime cannot see: sending
+    /// a final signal to a child process, flushing a log, telling a peer the
+    /// process is going away. Without it, an application that must do such work
+    /// on the way out has no place to put it, and typically resorts to
+    /// [`std::process::exit`], which skips every destructor in the process.
+    ///
+    /// A hook that panics is reported and does not stop the remaining hooks or
+    /// abort teardown: a half-torn-down runtime is worse than a reported panic.
+    /// Hooks are `FnOnce` and `!Send`, and run on their own runtime thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from a thread with no runtime installed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let released = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&released);
+    ///
+    /// runite::queue_macrotask(move || {
+    ///     runite::on_shutdown(move || flag.set(true));
+    /// });
+    /// runite::run();
+    /// // The hook runs at thread teardown, not when `run` returns.
+    /// ```
+    pub fn on_shutdown<F>(hook: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        imp::on_shutdown(hook);
+    }
+
     /// Returns the identifier of the event-loop turn currently being driven.
     ///
     /// A **turn** is one iteration of the loop: drain driver events, drain
