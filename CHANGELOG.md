@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+See the [0.2 → 0.3 migration guide](docs/MIGRATING-0.3.md) for required source
+changes.
+
 ### Added
 
 - A child process can be started on a descriptor the caller already owns.

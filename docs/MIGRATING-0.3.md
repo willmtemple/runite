@@ -1,0 +1,128 @@
+# Migrating from runite 0.2 to 0.3
+
+runite 0.3 keeps the event-loop-per-thread model and every architectural
+property 0.2 established. What changes is the process API, which grows the
+ability to attach a child to resources the caller already owns — and gives up
+some derived traits to do it.
+
+```toml
+[dependencies]
+runite = "0.3"
+```
+
+> **This guide is written as 0.3 is developed** and grows with it. Until 0.3 is
+> released, treat it as the running record of what will need changing rather
+> than a finished document.
+
+## Required source changes
+
+This section covers changes the compiler will force you to make.
+
+### `Stdio` and `Command` are no longer `Clone`
+
+`process::Stdio` loses `Clone`, `Copy`, `PartialEq` and `Eq`; `process::Command`
+loses `Clone`. A `Stdio` can now own a file descriptor (see
+[below](#a-child-can-be-started-on-a-descriptor-you-own)), so copying one
+implicitly would hide a `dup`, and comparing two for equality is not meaningful.
+`std::process::Stdio` and `std::process::Command` are not `Clone` for the same
+reason.
+
+Passing a `Stdio` by copy no longer works:
+
+```rust
+// 0.2
+let piped = Stdio::piped();
+command.stdout(piped);
+command.stderr(piped);        // relied on `Copy`
+
+// 0.3 — construct one per stream
+command.stdout(Stdio::piped());
+command.stderr(Stdio::piped());
+```
+
+Comparisons must go, and a cloned `Command` becomes two builders:
+
+```rust
+// 0.2
+let base = Command::new("git");
+let mut status = base.clone();
+let mut diff = base.clone();
+
+// 0.3 — build each, or factor the shared setup into a function
+fn git() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command
+}
+let mut status = git();
+let mut diff = git();
+```
+
+Note that runite's public API report does not track derived trait impls, so
+this change does not appear in `docs/public-api.md`.
+
+## New capabilities
+
+Nothing here forces a source change; these exist so an application does not
+have to reach outside runite for them.
+
+### A child can be started on a descriptor you own
+
+`Stdio` gains `From<OwnedFd>` on Unix and `From<OwnedHandle>` on Windows, so a
+standard stream can be wired to something runite does not model — a
+pseudoterminal, a socket accepted elsewhere, a preopened log file:
+
+```rust
+let log: std::os::fd::OwnedFd = std::fs::File::create("child.log")?.into();
+command.stdout(Stdio::from(log));
+```
+
+The descriptor is **duplicated at each spawn** rather than consumed, so one
+`Command` can start several children and your original stays yours.
+
+### `pre_exec`, on Unix
+
+`runite::os::unix::process::CommandExt::pre_exec` runs a hook in the child
+between fork and exec, mirroring `std::os::unix::process::CommandExt`. It is
+the only place to `setsid`, acquire a controlling terminal with `TIOCSCTTY`,
+change process group, or drop privileges.
+
+It takes `Fn` rather than std's `FnMut`, because a runite `Command` may be
+spawned more than once. As with std, the hook is `unsafe` to install: it runs
+in a forked child where only async-signal-safe operations are sound, so it must
+not allocate or take locks. Returning `Err` aborts the spawn.
+
+Together with the previous item, this is enough to start a shell on a
+pseudoterminal without `std::process`.
+
+### Adopting a process runite did not spawn
+
+`Child::from_pid` takes an already-running process and lets its exit be awaited
+through the reactor rather than polled:
+
+```rust
+let started = std::process::Command::new("some-tool").spawn()?;
+let mut child = runite::process::Child::from_pid(started.id())?;
+let status = child.wait().await?;
+```
+
+Exit notification stays event-driven — a pidfd on Linux, a `kqueue` process
+filter on macOS, a registered wait on Windows — so no thread is parked for the
+process's lifetime, and an escalation ladder can be an ordinary task:
+
+```rust
+for signal in [SIGHUP, SIGTERM, SIGKILL] {
+    send(signal)?;
+    if time::timeout(settle, child.wait()).await.is_ok() {
+        break;
+    }
+}
+```
+
+Three caveats. On Unix the process must be a **direct child**, because reading
+an exit status requires being its parent. **Nothing else may reap it** — if a
+`std::process::Child` for the same pid is still alive, whichever waits first
+takes the status. And a **pid is not a stable identity**: it can be reused once
+the process is reaped, so a pid obtained long ago may name something else.
+Adopting a process that no longer exists fails at `from_pid` rather than
+producing a handle whose `wait` never completes.
