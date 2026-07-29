@@ -8,8 +8,8 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1152 | 1172 | 1195 | 1215 | 174 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1152 | 1172 | 1195 | 1215 | 174 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1179 | 1199 | 1222 | 1242 | 201 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1179 | 1199 | 1222 | 1242 | 201 |
 | macOS aarch64 (`aarch64-apple-darwin`) | 1152 | 1172 | 1195 | 1215 | 174 |
 | Windows x86_64 (`x86_64-pc-windows-msvc`) | 1050 | 1064 | 1093 | 1107 | 72 |
 
@@ -1096,7 +1096,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **174**
+Items: **201**
 
 ### `runite::fd`
 
@@ -1124,6 +1124,37 @@ pub fn runite::fs::File::from_owned(std::os::fd::owned::OwnedFd) -> core::io::er
 pub fn runite::fs::File::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 ```
 
+### `runite::fs::watch`
+
+```rust
+#[non_exhaustive] pub enum runite::fs::watch::EventKind
+impl core::fmt::Debug for runite::fs::watch::Watcher
+impl runite::fs::watch::Event
+impl runite::fs::watch::Watcher
+pub enum runite::fs::watch::Recursive
+pub fn runite::fs::watch::Event::needs_rescan(&self) -> bool
+pub fn runite::fs::watch::Watcher::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::fs::watch::Watcher::new() -> core::io::error::Result<Self>
+pub fn runite::fs::watch::Watcher::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub fn runite::fs::watch::Watcher::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::fs::watch::Watcher::unwatch(&mut self, runite::fs::watch::WatchId) -> core::io::error::Result<()>
+pub fn runite::fs::watch::Watcher::watch(&mut self, &std::path::Path, runite::fs::watch::Recursive) -> core::io::error::Result<runite::fs::watch::WatchId>
+pub mod runite::fs::watch
+pub runite::fs::watch::Event::kind: runite::fs::watch::EventKind
+pub runite::fs::watch::Event::path: std::path::PathBuf
+pub runite::fs::watch::EventKind::Created
+pub runite::fs::watch::EventKind::Modified
+pub runite::fs::watch::EventKind::Other
+pub runite::fs::watch::EventKind::Overflow
+pub runite::fs::watch::EventKind::Removed
+pub runite::fs::watch::Recursive::No
+pub runite::fs::watch::Recursive::Yes
+pub struct runite::fs::watch::Event
+pub struct runite::fs::watch::WatchId(_)
+pub struct runite::fs::watch::Watcher
+pub type runite::fs::watch::Watcher::Item = core::result::Result<runite::fs::watch::Event, core::io::error::Error>
+```
+
 ### `runite::io`
 
 ```rust
@@ -1131,6 +1162,7 @@ impl runite::io::AsyncRead for runite::net::unix::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
+impl runite::io::Stream for runite::fs::watch::Watcher
 impl runite::io::Stream for runite::net::unix::Incoming
 impl runite::io::Stream for runite::signal::unix::Signals
 ```
@@ -1319,7 +1351,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **174**
+Items: **201**
 
 ### `runite::fd`
 
@@ -1347,6 +1379,37 @@ pub fn runite::fs::File::from_owned(std::os::fd::owned::OwnedFd) -> core::io::er
 pub fn runite::fs::File::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 ```
 
+### `runite::fs::watch`
+
+```rust
+#[non_exhaustive] pub enum runite::fs::watch::EventKind
+impl core::fmt::Debug for runite::fs::watch::Watcher
+impl runite::fs::watch::Event
+impl runite::fs::watch::Watcher
+pub enum runite::fs::watch::Recursive
+pub fn runite::fs::watch::Event::needs_rescan(&self) -> bool
+pub fn runite::fs::watch::Watcher::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::fs::watch::Watcher::new() -> core::io::error::Result<Self>
+pub fn runite::fs::watch::Watcher::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub fn runite::fs::watch::Watcher::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::fs::watch::Watcher::unwatch(&mut self, runite::fs::watch::WatchId) -> core::io::error::Result<()>
+pub fn runite::fs::watch::Watcher::watch(&mut self, &std::path::Path, runite::fs::watch::Recursive) -> core::io::error::Result<runite::fs::watch::WatchId>
+pub mod runite::fs::watch
+pub runite::fs::watch::Event::kind: runite::fs::watch::EventKind
+pub runite::fs::watch::Event::path: std::path::PathBuf
+pub runite::fs::watch::EventKind::Created
+pub runite::fs::watch::EventKind::Modified
+pub runite::fs::watch::EventKind::Other
+pub runite::fs::watch::EventKind::Overflow
+pub runite::fs::watch::EventKind::Removed
+pub runite::fs::watch::Recursive::No
+pub runite::fs::watch::Recursive::Yes
+pub struct runite::fs::watch::Event
+pub struct runite::fs::watch::WatchId(_)
+pub struct runite::fs::watch::Watcher
+pub type runite::fs::watch::Watcher::Item = core::result::Result<runite::fs::watch::Event, core::io::error::Error>
+```
+
 ### `runite::io`
 
 ```rust
@@ -1354,6 +1417,7 @@ impl runite::io::AsyncRead for runite::net::unix::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
+impl runite::io::Stream for runite::fs::watch::Watcher
 impl runite::io::Stream for runite::net::unix::Incoming
 impl runite::io::Stream for runite::signal::unix::Signals
 ```

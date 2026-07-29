@@ -142,6 +142,22 @@ changes.
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
 
+- `fs::watch`, filesystem change notification, **Linux only for now** — the
+  macOS and Windows backends are in progress, and the module is absent on those
+  targets rather than present and failing. The inotify descriptor is driven by
+  the runtime's own reactor, so watching costs no additional thread; the
+  general-purpose watcher crates spawn one per watcher on every platform,
+  including the one where it is unnecessary.
+
+  Deliberately a primitive rather than a solution. Events arrive as the kernel
+  produces them: one logical change can yield several, event kinds are not
+  portable, and nothing is debounced — any window would be wrong for somebody,
+  and a debounce policy belongs to the application that knows what it is
+  debouncing. Kernel queue overflow is reported as an `Overflow` event meaning
+  "rescan", never as an error that would end the stream over a transient burst
+  and never as silence.
+  ([#47](https://github.com/willmtemple/runite/issues/47))
+
 - `on_shutdown`, registering a closure to run when a thread's runtime is torn
   down — before spawned tasks are cancelled and before the driver is destroyed,
   so a hook is handed a runtime that can still do something. Deliberately keyed
