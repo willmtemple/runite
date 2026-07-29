@@ -513,6 +513,25 @@ mod runtime_api {
     /// The value carries no information about what the turn did; it is only a
     /// key.
     ///
+    /// # Stamp at the moment the work happens
+    ///
+    /// Call this from inside the callback that observes the work, not
+    /// afterwards. A layer whose own diagnostics are delivered synchronously
+    /// gets the right answer for free — a callback fired while a value is
+    /// written stamps the writing turn, a callback fired when work is drained
+    /// stamps the draining turn — and those are legitimately different turns.
+    ///
+    /// A microtask queued by a macrotask runs in the *next* turn, because the
+    /// macrotask is the last phase of its own. The ordering guarantee is
+    /// unaffected — the microtask still precedes the next macrotask — but the
+    /// two carry different identifiers, so code that expects a piece of work
+    /// and the work that scheduled it to share a turn will misread it.
+    ///
+    /// It follows that an **aggregate covering a span of work may cover more
+    /// than one turn**, and attributing it to a single turn would be wrong in a
+    /// way that looks right. Stamp individual events for attribution; report
+    /// aggregates as volume, without a turn.
+    ///
     /// # Examples
     ///
     /// ```
