@@ -262,13 +262,24 @@ fn unix_kinds_install() {
 
 #[cfg(windows)]
 fn prepare_private_console() {
-    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole};
+    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleCtrlHandler};
 
     // SAFETY: this helper runs in an isolated subprocess. It detaches any
     // inherited console and allocates one owned only by that subprocess.
     unsafe {
         let _ = FreeConsole();
         assert_ne!(AllocConsole(), 0, "private test console should allocate");
+        // Ctrl-C *ignoring* is a per-process disposition that a child inherits
+        // and that allocating a fresh console does not clear. A parent that set
+        // it — an OpenSSH session host does — would otherwise make
+        // `CTRL_C_EVENT` land on a process that discards it, while
+        // `CTRL_BREAK_EVENT` still arrives, which is a confusing way to fail.
+        // Passing a null handler with `FALSE` removes the inherited ignore.
+        assert_ne!(
+            SetConsoleCtrlHandler(None, 0),
+            0,
+            "Ctrl-C handling should be re-enabled for the test subprocess"
+        );
     }
 }
 
