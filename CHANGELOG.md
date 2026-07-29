@@ -80,6 +80,19 @@ changes.
   runtime-backed writer in a pointer cannot silently make its writes
   cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
 
+### Changed
+
+- `io_uring` setup failing with `ENOMEM` now says what actually went wrong. The
+  rings are pinned against `RLIMIT_MEMLOCK`, so this is a locked-memory limit
+  rather than memory exhaustion — but the raw errno renders as "Cannot allocate
+  memory", which sends the reader to look at free RAM on a machine with tens of
+  gigabytes of it. The error now reports the current `RLIMIT_MEMLOCK`, names
+  profilers as the usual competitor for the same budget (`perf record` with
+  default settings is the common case; `-m 32` leaves room), and uses
+  `ErrorKind::QuotaExceeded` rather than `OutOfMemory` so a caller matching on
+  the kind is not misled either.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+
 ### Breaking
 
 - `sync::Permit` is renamed `sync::SemaphorePermit`. It was the only guard type
