@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1100 | 1120 | 1143 | 1163 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1100 | 1120 | 1143 | 1163 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1100 | 1120 | 1143 | 1163 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1004 | 1018 | 1047 | 1061 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1102 | 1122 | 1145 | 1165 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1102 | 1122 | 1145 | 1165 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1102 | 1122 | 1145 | 1165 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1006 | 1020 | 1049 | 1063 | 72 |
 
-Portable default items: **932**
+Portable default items: **934**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **932**
 
 ## Portable default surface
 
-Items: **932**
+Items: **934**
 
 ### `runite`
 
@@ -98,11 +98,13 @@ pub struct runite::Stderr
 pub struct runite::Stdin
 pub struct runite::Stdout
 pub use runite::AbortHandle
+pub use runite::CancelOnDrop
 pub use runite::IntervalHandle
 pub use runite::JoinHandle
 pub use runite::QueueError
 pub use runite::ThreadHandle
 pub use runite::TimeoutHandle
+pub use runite::TimerCancel
 pub use runite::TurnId
 pub use runite::WorkerHandle
 pub use runite::WorkerJoin

@@ -196,6 +196,14 @@ impl TimeoutHandle {
     pub fn cancel(&self) {
         super::scheduler::cancel_timeout(self);
     }
+
+    /// Wraps this token in a guard that cancels the timeout when dropped.
+    ///
+    /// For a timeout whose lifetime belongs to a scope rather than to the
+    /// program. See [`CancelOnDrop`].
+    pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
+        CancelOnDrop { handle: self }
+    }
 }
 
 #[derive(Clone)]
@@ -226,6 +234,104 @@ impl IntervalHandle {
     /// to stop the repeating callback (and to let the runtime exit).
     pub fn cancel(&self) {
         super::scheduler::cancel_interval(self);
+    }
+
+    /// Wraps this token in a guard that cancels the interval when dropped.
+    ///
+    /// Particularly relevant for intervals: an uncancelled interval keeps the
+    /// runtime alive, so a leaked one prevents `run()` from ever returning.
+    /// See [`CancelOnDrop`].
+    pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
+        CancelOnDrop { handle: self }
+    }
+}
+
+/// A timer handle that cancels when it is dropped.
+///
+/// Created by [`TimeoutHandle::cancel_on_drop`] or
+/// [`IntervalHandle::cancel_on_drop`]. The plain handles are cloneable
+/// cancellation *tokens* — dropping one leaves the timer running, matching
+/// JavaScript's `setInterval`/`clearInterval` and this crate's own
+/// [`JoinHandle`], which detaches on drop. That is the right default for a
+/// timer whose lifetime is not tied to any particular value, and the wrong one
+/// for a timer that belongs to a scope.
+///
+/// This wrapper is the second case: hold it for as long as the timer should
+/// run, and let it fall out of scope to stop. It is deliberately **not**
+/// `Clone` — two owners of a cancel-on-drop guard would mean the first drop
+/// wins, which is not a useful contract.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// runite::spawn(async {
+///     let ticker = runite::time::set_interval(Duration::from_millis(1), || {})
+///         .cancel_on_drop();
+///     // ... work that the ticker accompanies ...
+///     drop(ticker); // stops here, rather than outliving the scope
+/// });
+/// runite::run();
+/// ```
+#[derive(Debug)]
+#[must_use = "the timer is cancelled as soon as this guard is dropped"]
+pub struct CancelOnDrop<H: TimerCancel> {
+    handle: H,
+}
+
+impl<H: TimerCancel> CancelOnDrop<H> {
+    /// Returns the underlying token without cancelling.
+    ///
+    /// Use this to hand the timer back to a longer-lived owner: the guard is
+    /// consumed, so nothing cancels, and the returned token behaves as it did
+    /// before it was wrapped.
+    pub fn into_inner(self) -> H {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is not dropped, so `handle` is moved out exactly once
+        // and the `Drop` impl below never runs for it.
+        unsafe { std::ptr::read(&this.handle) }
+    }
+
+    /// Cancels the timer now rather than at the end of the scope.
+    pub fn cancel(self) {
+        drop(self);
+    }
+}
+
+impl<H: TimerCancel> std::ops::Deref for CancelOnDrop<H> {
+    type Target = H;
+
+    fn deref(&self) -> &H {
+        &self.handle
+    }
+}
+
+impl<H: TimerCancel> Drop for CancelOnDrop<H> {
+    fn drop(&mut self) {
+        self.handle.cancel_timer();
+    }
+}
+
+/// Timer tokens that a [`CancelOnDrop`] guard can stop.
+///
+/// Sealed in practice: implemented only for [`TimeoutHandle`] and
+/// [`IntervalHandle`], whose `cancel` is idempotent and thread-safe by way of
+/// the generation check.
+pub trait TimerCancel {
+    /// Cancels the timer this token identifies.
+    fn cancel_timer(&self);
+}
+
+impl TimerCancel for TimeoutHandle {
+    fn cancel_timer(&self) {
+        self.cancel();
+    }
+}
+
+impl TimerCancel for IntervalHandle {
+    fn cancel_timer(&self) {
+        self.cancel();
     }
 }
 

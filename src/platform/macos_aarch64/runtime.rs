@@ -21,8 +21,8 @@ use super::driver::{self, Driver, FdReadinessToken, ProcessExitToken};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, TurnId,
-    WorkerHandle, YieldNow, current_turn, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.

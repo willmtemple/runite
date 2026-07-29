@@ -123,6 +123,16 @@ changes.
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `TimeoutHandle::cancel_on_drop` and `IntervalHandle::cancel_on_drop`, which
+  wrap a timer token in a `CancelOnDrop` guard that stops the timer when it
+  falls out of scope. The plain handles keep their token semantics — dropping
+  one leaves the timer running, matching `setInterval`/`clearInterval` and this
+  crate's own `JoinHandle` — so this is opt-in and changes nothing by default.
+  It matters most for intervals, where an uncancelled timer keeps the runtime
+  alive and a leaked one stops `run()` from ever returning. The guard is not
+  `Clone`, and `into_inner` releases the timer to a longer-lived owner without
+  cancelling. ([#8](https://github.com/willmtemple/runite/issues/8))
+
 - `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
   worth retrying: `true` only for a momentarily full queue, `false` for a
   stopped or uncreatable pool. Deliberately takes `io::Error` rather than

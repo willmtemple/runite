@@ -255,8 +255,8 @@ mod runtime_api {
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
     pub use crate::platform::current::runtime::{
-        AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, TurnId,
-        WorkerHandle, YieldNow, yield_now,
+        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle,
+        TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, yield_now,
     };
     pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
 
