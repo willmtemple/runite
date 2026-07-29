@@ -105,14 +105,33 @@ struct BlockingPool {
 impl BlockingPool {
     fn spawn(&self, task: BlockingTask) -> io::Result<()> {
         self.sender.try_send(task).map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "runite blocking worker queue is full",
-            ),
-            mpsc::TrySendError::Disconnected(_) => io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "runite blocking worker pool has stopped",
-            ),
+            mpsc::TrySendError::Full(_) => {
+                // Logged, not just returned. A refusal is easy to discard at the
+                // call site — there is nothing to do with it in a context that
+                // cannot await — and the symptom downstream is work that
+                // silently stops happening, which is close to undiagnosable
+                // without a trace of the refusal itself.
+                tracing::warn!(
+                    target: crate::trace_targets::RUNTIME,
+                    event = "blocking_queue_full",
+                    "refusing blocking work: the pool queue is full (retryable)"
+                );
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "runite blocking worker queue is full",
+                )
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                tracing::warn!(
+                    target: crate::trace_targets::RUNTIME,
+                    event = "blocking_pool_stopped",
+                    "refusing blocking work: the pool has stopped (terminal)"
+                );
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "runite blocking worker pool has stopped",
+                )
+            }
         })
     }
 }

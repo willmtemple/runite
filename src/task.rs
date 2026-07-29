@@ -126,14 +126,35 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
 
 /// Runs `f` on the shared blocking worker pool.
 ///
-/// The returned future resolves with the closure's return value. If the pool's
-/// bounded queue is full, returns [`io::ErrorKind::WouldBlock`] synchronously.
-/// Once accepted, the job keeps the submitting runtime alive through terminal
-/// result publication, even if its [`BlockingJoinHandle`] is dropped.
+/// The returned future resolves with the closure's return value. Once accepted,
+/// the job keeps the submitting runtime alive through terminal result
+/// publication, even if its [`BlockingJoinHandle`] is dropped.
 ///
 /// `f` runs on a real OS thread; it may call blocking syscalls freely. Avoid
 /// touching any per-runtime-thread state from inside `f` — this is a pool
 /// thread, not a runtime thread.
+///
+/// # Errors
+///
+/// Submission is refused synchronously, and the [`kind`](io::Error::kind) says
+/// whether retrying can help. The distinction matters: the two failures want
+/// opposite responses, and a caller that treats them alike either gives up work
+/// it could have run or retries forever against a pool that is gone.
+///
+/// - [`WouldBlock`](io::ErrorKind::WouldBlock) — the bounded queue is full.
+///   **Retryable.** The pool is healthy and saturated; the same call may
+///   succeed once a worker drains one. Back off rather than spinning.
+/// - [`BrokenPipe`](io::ErrorKind::BrokenPipe) — the pool has stopped.
+///   **Terminal.** No later call will succeed.
+/// - Anything else — the pool could not be created, and the error is the one
+///   the operating system gave for starting its threads. **Terminal** in
+///   practice.
+///
+/// Both refusals are also reported as `tracing` warnings on the
+/// `runite::runtime` target, so a caller that discards the error still leaves
+/// evidence. Discarding it is a real temptation — there is often nothing to do
+/// with a refusal in a context that cannot await — but the downstream symptom
+/// is work that silently stops happening, which is hard to trace back here.
 ///
 /// # Examples
 ///

@@ -138,6 +138,15 @@ changes.
 
 ### Documented
 
+- `spawn_blocking`'s refusals now say which are retryable. The two failures
+  already carried distinct `io::ErrorKind`s — `WouldBlock` for a full queue,
+  `BrokenPipe` for a stopped pool — but nothing said so, so callers discarded
+  the error and lost the distinction. Both are now also reported as `tracing`
+  warnings on the `runite::runtime` target, so a caller that drops the error
+  still leaves evidence; the downstream symptom is work that silently stops
+  happening, which is otherwise hard to trace back.
+  ([#46](https://github.com/willmtemple/runite/issues/46))
+
 - `ChildStdin`'s close can deadlock against a child waiting for end of input,
   and the hazard is now on the type rather than absent. Because `poll_close`
   drains pending writes first, a write cancelled with the pipe buffer full
