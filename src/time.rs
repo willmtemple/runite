@@ -56,6 +56,12 @@ pub struct Sleep {
     completed: bool,
 }
 
+impl std::fmt::Debug for Sleep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sleep").finish_non_exhaustive()
+    }
+}
+
 /// An awaitable timer that yields ticks separated by a fixed period.
 ///
 /// The first call to [`tick`](Self::tick) completes immediately. Later ticks
@@ -97,6 +103,12 @@ pub struct Interval {
     first_tick: bool,
     sleep: Option<Sleep>,
     missed_tick_behavior: MissedTickBehavior,
+}
+
+impl std::fmt::Debug for Interval {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Interval").finish_non_exhaustive()
+    }
 }
 
 /// How an [`Interval`] schedules ticks after the consumer has fallen behind.

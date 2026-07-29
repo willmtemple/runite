@@ -350,6 +350,12 @@ macro_rules! ctrl_stream {
             _not_send: PhantomData<Rc<()>>,
         }
 
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.debug_struct(stringify!($name)).finish_non_exhaustive()
+            }
+        }
+
         #[doc = concat!("Registers interest in `", $event_name, "` on the current runtime thread.")]
         ///
         /// Repeated calls share the process-wide console handler and return

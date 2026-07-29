@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 985 | 1005 | 1024 | 1044 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 985 | 1005 | 1024 | 1044 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 985 | 1005 | 1024 | 1044 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 885 | 899 | 924 | 938 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1099 | 1119 | 1142 | 1162 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1099 | 1119 | 1142 | 1162 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1099 | 1119 | 1142 | 1162 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1003 | 1017 | 1046 | 1060 | 72 |
 
-Portable default items: **817**
+Portable default items: **931**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **817**
 
 ## Portable default surface
 
-Items: **817**
+Items: **931**
 
 ### `runite`
 
@@ -126,6 +126,8 @@ pub mod runite::channel
 impl core::error::Error for runite::channel::broadcast::RecvError
 impl core::fmt::Display for runite::channel::broadcast::RecvError
 impl<T: core::clone::Clone + core::marker::Send + 'static> core::clone::Clone for runite::channel::broadcast::Sender<T>
+impl<T: core::clone::Clone + core::marker::Send + 'static> core::fmt::Debug for runite::channel::broadcast::Receiver<T>
+impl<T: core::clone::Clone + core::marker::Send + 'static> core::fmt::Debug for runite::channel::broadcast::Sender<T>
 impl<T: core::clone::Clone + core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::broadcast::Receiver<T>
 impl<T: core::clone::Clone + core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::broadcast::Sender<T>
 impl<T: core::clone::Clone + core::marker::Send + 'static> runite::channel::broadcast::Receiver<T>
@@ -134,6 +136,7 @@ impl<T: core::fmt::Debug> core::error::Error for runite::channel::broadcast::Sen
 impl<T> core::fmt::Display for runite::channel::broadcast::SendError<T>
 pub async fn runite::channel::broadcast::Receiver<T>::recv(&mut self) -> core::result::Result<T, runite::channel::broadcast::RecvError>
 pub fn runite::channel::broadcast::Receiver<T>::drop(&mut self)
+pub fn runite::channel::broadcast::Receiver<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::broadcast::Receiver<T>::is_empty(&self) -> bool
 pub fn runite::channel::broadcast::Receiver<T>::len(&self) -> usize
 pub fn runite::channel::broadcast::Receiver<T>::resubscribe(&self) -> runite::channel::broadcast::Receiver<T>
@@ -141,6 +144,7 @@ pub fn runite::channel::broadcast::RecvError::fmt(&self, &mut core::fmt::Formatt
 pub fn runite::channel::broadcast::SendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::broadcast::Sender<T>::clone(&self) -> Self
 pub fn runite::channel::broadcast::Sender<T>::drop(&mut self)
+pub fn runite::channel::broadcast::Sender<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::broadcast::Sender<T>::receiver_count(&self) -> usize
 pub fn runite::channel::broadcast::Sender<T>::send(&self, T) -> core::result::Result<usize, runite::channel::broadcast::SendError<T>>
 pub fn runite::channel::broadcast::Sender<T>::subscribe(&self) -> runite::channel::broadcast::Receiver<T>
@@ -164,6 +168,9 @@ impl<T: core::fmt::Debug> core::error::Error for runite::channel::mpsc::SendErro
 impl<T: core::fmt::Debug> core::error::Error for runite::channel::mpsc::TrySendError<T>
 impl<T: core::marker::Send + 'static> core::clone::Clone for runite::channel::mpsc::Sender<T>
 impl<T: core::marker::Send + 'static> core::clone::Clone for runite::channel::mpsc::UnboundedSender<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::mpsc::Receiver<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::mpsc::Sender<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::mpsc::UnboundedSender<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::mpsc::Receiver<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::mpsc::Sender<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::mpsc::UnboundedSender<T>
@@ -176,6 +183,7 @@ pub async fn runite::channel::mpsc::Receiver<T>::recv(&mut self) -> core::option
 pub async fn runite::channel::mpsc::Sender<T>::send(&self, T) -> core::result::Result<(), runite::channel::mpsc::SendError<T>>
 pub fn runite::channel::mpsc::Receiver<T>::close(&mut self)
 pub fn runite::channel::mpsc::Receiver<T>::drop(&mut self)
+pub fn runite::channel::mpsc::Receiver<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::Receiver<T>::is_closed(&self) -> bool
 pub fn runite::channel::mpsc::Receiver<T>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::channel::mpsc::Receiver<T>::size_hint(&self) -> (usize, core::option::Option<usize>)
@@ -183,12 +191,14 @@ pub fn runite::channel::mpsc::Receiver<T>::try_recv(&mut self) -> core::result::
 pub fn runite::channel::mpsc::SendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::Sender<T>::clone(&self) -> Self
 pub fn runite::channel::mpsc::Sender<T>::drop(&mut self)
+pub fn runite::channel::mpsc::Sender<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::Sender<T>::is_closed(&self) -> bool
 pub fn runite::channel::mpsc::Sender<T>::try_send(&self, T) -> core::result::Result<(), runite::channel::mpsc::TrySendError<T>>
 pub fn runite::channel::mpsc::TryRecvError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::TrySendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::UnboundedSender<T>::clone(&self) -> Self
 pub fn runite::channel::mpsc::UnboundedSender<T>::drop(&mut self)
+pub fn runite::channel::mpsc::UnboundedSender<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::mpsc::UnboundedSender<T>::is_closed(&self) -> bool
 pub fn runite::channel::mpsc::UnboundedSender<T>::send(&self, T) -> core::result::Result<(), runite::channel::mpsc::SendError<T>>
 pub fn runite::channel::mpsc::channel<T: core::marker::Send + 'static>(usize) -> (runite::channel::mpsc::Sender<T>, runite::channel::mpsc::Receiver<T>)
@@ -214,6 +224,8 @@ impl core::error::Error for runite::channel::oneshot::TryRecvError
 impl core::fmt::Display for runite::channel::oneshot::RecvError
 impl core::fmt::Display for runite::channel::oneshot::TryRecvError
 impl<T: core::fmt::Debug> core::error::Error for runite::channel::oneshot::SendError<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::oneshot::Receiver<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::oneshot::Sender<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::oneshot::Receiver<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::oneshot::Sender<T>
 impl<T: core::marker::Send + 'static> runite::channel::oneshot::Receiver<T>
@@ -222,11 +234,13 @@ impl<T> core::fmt::Display for runite::channel::oneshot::SendError<T>
 pub async fn runite::channel::oneshot::Receiver<T>::recv(&mut self) -> core::result::Result<T, runite::channel::oneshot::RecvError>
 pub fn runite::channel::oneshot::Receiver<T>::close(&mut self)
 pub fn runite::channel::oneshot::Receiver<T>::drop(&mut self)
+pub fn runite::channel::oneshot::Receiver<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::oneshot::Receiver<T>::is_closed(&self) -> bool
 pub fn runite::channel::oneshot::Receiver<T>::try_recv(&mut self) -> core::result::Result<T, runite::channel::oneshot::TryRecvError>
 pub fn runite::channel::oneshot::RecvError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::oneshot::SendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::oneshot::Sender<T>::drop(&mut self)
+pub fn runite::channel::oneshot::Sender<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::oneshot::Sender<T>::is_closed(&self) -> bool
 pub fn runite::channel::oneshot::Sender<T>::send(self, T) -> core::result::Result<(), runite::channel::oneshot::SendError<T>>
 pub fn runite::channel::oneshot::TryRecvError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -245,10 +259,13 @@ pub struct runite::channel::oneshot::Sender<T: core::marker::Send + 'static>
 ```rust
 impl core::error::Error for runite::channel::watch::RecvError
 impl core::fmt::Display for runite::channel::watch::RecvError
+impl<'a, T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::watch::Ref<'a, T>
 impl<'a, T: core::marker::Send + 'static> core::ops::deref::Deref for runite::channel::watch::Ref<'a, T>
 impl<T: core::fmt::Debug> core::error::Error for runite::channel::watch::SendError<T>
 impl<T: core::marker::Send + 'static> core::clone::Clone for runite::channel::watch::Receiver<T>
 impl<T: core::marker::Send + 'static> core::clone::Clone for runite::channel::watch::Sender<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::watch::Receiver<T>
+impl<T: core::marker::Send + 'static> core::fmt::Debug for runite::channel::watch::Sender<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::watch::Receiver<T>
 impl<T: core::marker::Send + 'static> core::ops::drop::Drop for runite::channel::watch::Sender<T>
 impl<T: core::marker::Send + 'static> runite::channel::watch::Receiver<T>
@@ -259,12 +276,15 @@ pub fn runite::channel::watch::Receiver<T>::borrow(&self) -> runite::channel::wa
 pub fn runite::channel::watch::Receiver<T>::borrow_and_update(&mut self) -> runite::channel::watch::Ref<'_, T>
 pub fn runite::channel::watch::Receiver<T>::clone(&self) -> Self
 pub fn runite::channel::watch::Receiver<T>::drop(&mut self)
+pub fn runite::channel::watch::Receiver<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::watch::RecvError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::watch::Ref<'a, T>::deref(&self) -> &Self::Target
+pub fn runite::channel::watch::Ref<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::watch::SendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::watch::Sender<T>::borrow(&self) -> runite::channel::watch::Ref<'_, T>
 pub fn runite::channel::watch::Sender<T>::clone(&self) -> Self
 pub fn runite::channel::watch::Sender<T>::drop(&mut self)
+pub fn runite::channel::watch::Sender<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::channel::watch::Sender<T>::receiver_count(&self) -> usize
 pub fn runite::channel::watch::Sender<T>::send(&self, T) -> core::result::Result<(), runite::channel::watch::SendError<T>>
 pub fn runite::channel::watch::Sender<T>::send_if_modified(&self, impl core::ops::function::FnOnce(&mut T) -> bool) -> bool
@@ -284,6 +304,9 @@ pub type runite::channel::watch::Ref<'a, T>::Target = T
 
 ```rust
 impl core::default::Default for runite::fs::OpenOptions
+impl core::fmt::Debug for runite::fs::File
+impl core::fmt::Debug for runite::fs::OpenOptions
+impl core::fmt::Debug for runite::fs::ReadDir
 impl runite::fs::DirEntry
 impl runite::fs::File
 impl runite::fs::Metadata
@@ -316,6 +339,7 @@ pub async fn runite::fs::symlink_metadata(impl core::convert::AsRef<std::path::P
 pub async fn runite::fs::write(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<[u8]>) -> core::io::error::Result<()>
 pub fn runite::fs::DirEntry::file_name(&self) -> &std::ffi::os_str::OsStr
 pub fn runite::fs::DirEntry::path(&self) -> std::path::PathBuf
+pub fn runite::fs::File::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::fs::File::from_std(std::fs::File) -> core::io::error::Result<Self>
 pub fn runite::fs::File::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::fs::File::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
@@ -334,10 +358,12 @@ pub fn runite::fs::OpenOptions::append(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::create(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::create_new(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::default() -> Self
+pub fn runite::fs::OpenOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::fs::OpenOptions::new() -> Self
 pub fn runite::fs::OpenOptions::read(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::truncate(&mut self, bool) -> &mut Self
 pub fn runite::fs::OpenOptions::write(&mut self, bool) -> &mut Self
+pub fn runite::fs::ReadDir::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::fs::ReadDir::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::fs::ReadDir::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub mod runite::fs
@@ -368,6 +394,20 @@ impl runite::io::AsyncWrite for runite::stdio::Stderr
 impl runite::io::AsyncWrite for runite::stdio::Stdout
 impl runite::io::Stream for runite::fs::ReadDir
 impl runite::io::Stream for runite::net::Incoming
+impl<'a, 'buf, R: ?core::marker::Sized> core::fmt::Debug for runite::io::ReadVectored<'a, 'buf, R>
+impl<'a, 'buf, W: ?core::marker::Sized> core::fmt::Debug for runite::io::WriteVectored<'a, 'buf, W>
+impl<'a, A: ?core::marker::Sized, B: ?core::marker::Sized> core::fmt::Debug for runite::io::CopyBidirectional<'a, A, B>
+impl<'a, R: ?core::marker::Sized, W: ?core::marker::Sized> core::fmt::Debug for runite::io::Copy<'a, R, W>
+impl<'a, R: ?core::marker::Sized> core::fmt::Debug for runite::io::Read<'a, R>
+impl<'a, R: ?core::marker::Sized> core::fmt::Debug for runite::io::ReadExact<'a, R>
+impl<'a, R: ?core::marker::Sized> core::fmt::Debug for runite::io::ReadToEnd<'a, R>
+impl<'a, R: ?core::marker::Sized> core::fmt::Debug for runite::io::ReadToString<'a, R>
+impl<'a, S: ?core::marker::Sized> core::fmt::Debug for runite::io::Next<'a, S>
+impl<'a, S: ?core::marker::Sized> core::fmt::Debug for runite::io::Seek<'a, S>
+impl<'a, W: ?core::marker::Sized> core::fmt::Debug for runite::io::Close<'a, W>
+impl<'a, W: ?core::marker::Sized> core::fmt::Debug for runite::io::Flush<'a, W>
+impl<'a, W: ?core::marker::Sized> core::fmt::Debug for runite::io::Write<'a, W>
+impl<'a, W: ?core::marker::Sized> core::fmt::Debug for runite::io::WriteAll<'a, W>
 impl<A, B> core::future::future::Future for runite::io::CopyBidirectional<'_, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
 impl<P> runite::io::AsyncBufRead for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncBufRead
 impl<P> runite::io::AsyncRead for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncRead
@@ -387,12 +427,18 @@ impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::Stream for runi
 impl<R: runite::io::AsyncRead + runite::io::AsyncSeek + core::marker::Unpin> runite::io::AsyncSeek for runite::io::BufReader<R>
 impl<R: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufReader<R>
 impl<R: runite::io::AsyncRead> runite::io::BufReader<R>
+impl<R> core::fmt::Debug for runite::io::BufReader<R>
+impl<R> core::fmt::Debug for runite::io::Lines<R>
 impl<R> core::marker::Unpin for runite::io::Lines<R>
+impl<S, C> core::fmt::Debug for runite::io::Collect<S, C>
 impl<S, C> core::future::future::Future for runite::io::Collect<S, C> where S: runite::io::Stream + core::marker::Unpin, C: core::default::Default + core::iter::traits::collect::Extend<<S as runite::io::Stream>::Item>
 impl<S, C> core::marker::Unpin for runite::io::Collect<S, C>
 impl<S, F, B> runite::io::Stream for runite::io::Map<S, F> where S: runite::io::Stream + core::marker::Unpin, F: core::ops::function::FnMut(<S as runite::io::Stream>::Item) -> B
+impl<S, F, Fut> core::fmt::Debug for runite::io::ForEach<S, F, Fut>
 impl<S, F, Fut> core::future::future::Future for runite::io::ForEach<S, F, Fut> where S: runite::io::Stream + core::marker::Unpin, F: core::ops::function::FnMut(<S as runite::io::Stream>::Item) -> Fut, Fut: core::future::future::Future<Output = ()>
 impl<S, F, Fut> core::marker::Unpin for runite::io::ForEach<S, F, Fut>
+impl<S, F> core::fmt::Debug for runite::io::Filter<S, F>
+impl<S, F> core::fmt::Debug for runite::io::Map<S, F>
 impl<S, F> core::marker::Unpin for runite::io::Filter<S, F>
 impl<S, F> core::marker::Unpin for runite::io::Map<S, F>
 impl<S, F> runite::io::Stream for runite::io::Filter<S, F> where S: runite::io::Stream + core::marker::Unpin, F: core::ops::function::FnMut(&<S as runite::io::Stream>::Item) -> bool
@@ -401,6 +447,8 @@ impl<S: runite::io::AsyncSeek + core::marker::Unpin + ?core::marker::Sized> core
 impl<S: runite::io::Stream + ?core::marker::Sized> runite::io::StreamExt for S
 impl<S: runite::io::Stream + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Next<'_, S>
 impl<S: runite::io::Stream + core::marker::Unpin + ?core::marker::Sized> runite::io::Stream for &mut S
+impl<S> core::fmt::Debug for runite::io::Skip<S>
+impl<S> core::fmt::Debug for runite::io::Take<S>
 impl<S> core::marker::Unpin for runite::io::Skip<S>
 impl<S> core::marker::Unpin for runite::io::Take<S>
 impl<S> runite::io::Stream for runite::io::Skip<S> where S: runite::io::Stream + core::marker::Unpin
@@ -422,6 +470,7 @@ impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> cor
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::WriteVectored<'_, '_, W>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin> runite::io::AsyncWrite for runite::io::BufWriter<W>
 impl<W: runite::io::AsyncWrite> runite::io::BufWriter<W>
+impl<W> core::fmt::Debug for runite::io::BufWriter<W>
 pub async fn runite::io::BufReader<R>::fill_buf(&mut self) -> core::io::error::Result<&[u8]>
 pub async fn runite::io::BufReader<R>::read_line(&mut self, &mut alloc::string::String) -> core::io::error::Result<usize>
 pub fn R::lines(self) -> runite::io::Lines<Self> where Self: core::marker::Sized
@@ -467,6 +516,7 @@ pub fn runite::io::AsyncWriteExt::write_vectored<'a, 'buf>(&'a mut self, &'a [co
 pub fn runite::io::BufReader<R>::buffer(&self) -> &[u8]
 pub fn runite::io::BufReader<R>::consume(&mut self, usize)
 pub fn runite::io::BufReader<R>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::BufReader<R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::BufReader<R>::get_mut(&mut self) -> &mut R
 pub fn runite::io::BufReader<R>::get_ref(&self) -> &R
 pub fn runite::io::BufReader<R>::into_inner(self) -> R
@@ -480,6 +530,7 @@ pub fn runite::io::BufReader<R>::poll_seek(core::pin::Pin<&mut Self>, &mut core:
 pub fn runite::io::BufReader<R>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::BufReader<R>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::BufReader<R>::with_capacity(usize, R) -> Self
+pub fn runite::io::BufWriter<W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::BufWriter<W>::get_mut(&mut self) -> &mut W
 pub fn runite::io::BufWriter<W>::get_ref(&self) -> &W
 pub fn runite::io::BufWriter<W>::into_inner(self) -> W
@@ -490,24 +541,41 @@ pub fn runite::io::BufWriter<W>::poll_write(core::pin::Pin<&mut Self>, &mut core
 pub fn runite::io::BufWriter<W>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::BufWriter<W>::with_capacity(usize, W) -> Self
 pub fn runite::io::Close<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Close<'a, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::io::Collect<S, C>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Collect<S, C>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::Copy<'_, R, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Copy<'a, R, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::CopyBidirectional<'_, A, B>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::CopyBidirectional<'a, A, B>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::io::Filter<S, F>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Filter<S, F>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Filter<S, F>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::io::Flush<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Flush<'a, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::io::ForEach<S, F, Fut>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::ForEach<S, F, Fut>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Lines<R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Lines<R>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Lines<R>::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::io::Map<S, F>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Map<S, F>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Map<S, F>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::io::Next<'_, S>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Next<'a, S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Read<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Read<'a, R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::ReadExact<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::ReadExact<'a, R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::ReadToEnd<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::ReadToEnd<'a, R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::ReadToString<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::ReadToString<'a, R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::ReadVectored<'_, '_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::ReadVectored<'a, 'buf, R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Seek<'_, S>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Seek<'a, S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::io::Skip<S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Skip<S>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Skip<S>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::io::Stream::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
@@ -519,11 +587,15 @@ pub fn runite::io::StreamExt::map<F, B>(self, F) -> runite::io::Map<Self, F> whe
 pub fn runite::io::StreamExt::next(&mut self) -> runite::io::Next<'_, Self> where Self: core::marker::Unpin
 pub fn runite::io::StreamExt::skip(self, usize) -> runite::io::Skip<Self> where Self: core::marker::Sized
 pub fn runite::io::StreamExt::take(self, usize) -> runite::io::Take<Self> where Self: core::marker::Sized
+pub fn runite::io::Take<S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::Take<S>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::io::Take<S>::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::io::Write<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::Write<'a, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::WriteAll<'_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::WriteAll<'a, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::WriteVectored<'_, '_, W>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::WriteVectored<'a, 'buf, W>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::copy<'a, R, W>(&'a mut R, &'a mut W) -> runite::io::Copy<'a, R, W> where R: runite::io::AsyncRead + ?core::marker::Sized, W: runite::io::AsyncWrite + ?core::marker::Sized
 pub fn runite::io::copy_bidirectional<'a, A, B>(&'a mut A, &'a mut B) -> runite::io::CopyBidirectional<'a, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
 pub mod runite::io
@@ -703,6 +775,9 @@ pub mod runite::os
 
 ```rust
 impl core::fmt::Debug for runite::process::Child
+impl core::fmt::Debug for runite::process::ChildStderr
+impl core::fmt::Debug for runite::process::ChildStdin
+impl core::fmt::Debug for runite::process::ChildStdout
 impl runite::process::Child
 impl runite::process::Command
 impl runite::process::ExitStatus
@@ -715,12 +790,15 @@ pub fn runite::process::Child::from_pid(u32) -> core::io::error::Result<Self>
 pub fn runite::process::Child::id(&self) -> core::option::Option<u32>
 pub fn runite::process::Child::kill(&mut self) -> core::io::error::Result<()>
 pub fn runite::process::Child::try_wait(&mut self) -> core::io::error::Result<core::option::Option<runite::process::ExitStatus>>
+pub fn runite::process::ChildStderr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::process::ChildStderr::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::process::ChildStderr::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::process::ChildStdin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::process::ChildStdin::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::process::ChildStdin::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::process::ChildStdin::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::process::ChildStdin::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::process::ChildStdout::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::process::ChildStdout::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::process::ChildStdout::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::process::Command::arg(&mut self, impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> &mut Self
@@ -767,16 +845,22 @@ pub mod runite::signal
 ### `runite::stdio`
 
 ```rust
+impl core::fmt::Debug for runite::stdio::Stderr
+impl core::fmt::Debug for runite::stdio::Stdin
+impl core::fmt::Debug for runite::stdio::Stdout
 impl core::ops::drop::Drop for runite::stdio::Stdin
 impl runite::stdio::Stdin
 pub async fn runite::stdio::Stdin::next_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
+pub fn runite::stdio::Stderr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::stdio::Stderr::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::stdio::Stdin::drop(&mut self)
+pub fn runite::stdio::Stdin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::stdio::Stdin::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::stdio::Stdin::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::stdio::Stdout::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::stdio::Stdout::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stdout::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stdout::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
@@ -794,11 +878,21 @@ pub struct runite::stdio::Stdout
 
 ```rust
 impl core::default::Default for runite::sync::Notify
+impl core::fmt::Debug for runite::sync::Notify
+impl core::fmt::Debug for runite::sync::Semaphore
 impl core::ops::drop::Drop for runite::sync::SemaphorePermit<'_>
 impl runite::sync::Notify
 impl runite::sync::Semaphore
+impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::MutexGuard<'a, T>
+impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::RwLockReadFuture<'a, T>
+impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::RwLockReadGuard<'a, T>
+impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::RwLockWriteFuture<'a, T>
+impl<'a, T: ?core::marker::Sized> core::fmt::Debug for runite::sync::RwLockWriteGuard<'a, T>
 impl<'a, T: ?core::marker::Sized> core::future::future::Future for runite::sync::RwLockReadFuture<'a, T>
 impl<'a, T: ?core::marker::Sized> core::future::future::Future for runite::sync::RwLockWriteFuture<'a, T>
+impl<'a> core::fmt::Debug for runite::sync::SemaphorePermit<'a>
+impl<T: ?core::marker::Sized> core::fmt::Debug for runite::sync::Mutex<T>
+impl<T: ?core::marker::Sized> core::fmt::Debug for runite::sync::RwLock<T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::MutexGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::RwLockReadGuard<'_, T>
 impl<T: ?core::marker::Sized> core::ops::deref::Deref for runite::sync::RwLockWriteGuard<'_, T>
@@ -812,6 +906,7 @@ impl<T: ?core::marker::Sized> core::ops::drop::Drop for runite::sync::RwLockWrit
 impl<T: ?core::marker::Sized> runite::sync::Mutex<T>
 impl<T: ?core::marker::Sized> runite::sync::RwLock<T>
 impl<T> core::default::Default for runite::sync::OnceCell<T>
+impl<T> core::fmt::Debug for runite::sync::OnceCell<T>
 impl<T> runite::sync::Mutex<T>
 impl<T> runite::sync::OnceCell<T>
 impl<T> runite::sync::RwLock<T>
@@ -819,18 +914,23 @@ pub async fn runite::sync::Mutex<T>::lock(&self) -> runite::sync::MutexGuard<'_,
 pub async fn runite::sync::Notify::notified(&self)
 pub async fn runite::sync::OnceCell<T>::get_or_init<F, Fut>(&self, F) -> &T where F: core::ops::function::FnOnce() -> Fut, Fut: core::future::future::Future<Output = T>
 pub async fn runite::sync::Semaphore::acquire(&self) -> runite::sync::SemaphorePermit<'_>
+pub fn runite::sync::Mutex<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::Mutex<T>::new(T) -> Self
 pub fn runite::sync::Mutex<T>::try_lock(&self) -> core::option::Option<runite::sync::MutexGuard<'_, T>>
 pub fn runite::sync::MutexGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::MutexGuard<'_, T>::deref_mut(&mut self) -> &mut Self::Target
 pub fn runite::sync::MutexGuard<'_, T>::drop(&mut self)
+pub fn runite::sync::MutexGuard<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::Notify::default() -> Self
+pub fn runite::sync::Notify::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::Notify::new() -> Self
 pub fn runite::sync::Notify::notify_one(&self)
 pub fn runite::sync::Notify::notify_waiters(&self)
 pub fn runite::sync::OnceCell<T>::default() -> Self
+pub fn runite::sync::OnceCell<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::OnceCell<T>::get(&self) -> core::option::Option<&T>
 pub fn runite::sync::OnceCell<T>::new() -> Self
+pub fn runite::sync::RwLock<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::RwLock<T>::get_mut(&mut self) -> &mut T
 pub fn runite::sync::RwLock<T>::into_inner(self) -> T
 pub fn runite::sync::RwLock<T>::new(T) -> Self
@@ -839,17 +939,23 @@ pub fn runite::sync::RwLock<T>::try_read(&self) -> core::option::Option<runite::
 pub fn runite::sync::RwLock<T>::try_write(&self) -> core::option::Option<runite::sync::RwLockWriteGuard<'_, T>>
 pub fn runite::sync::RwLock<T>::write(&self) -> runite::sync::RwLockWriteFuture<'_, T>
 pub fn runite::sync::RwLockReadFuture<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockReadFuture<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::RwLockReadFuture<'a, T>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::sync::RwLockReadGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::RwLockReadGuard<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockReadGuard<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::RwLockWriteFuture<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockWriteFuture<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::RwLockWriteFuture<'a, T>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::sync::RwLockWriteGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::deref_mut(&mut self) -> &mut Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::drop(&mut self)
+pub fn runite::sync::RwLockWriteGuard<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::sync::Semaphore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::sync::Semaphore::new(usize) -> Self
 pub fn runite::sync::Semaphore::try_acquire(&self) -> core::option::Option<runite::sync::SemaphorePermit<'_>>
 pub fn runite::sync::SemaphorePermit<'_>::drop(&mut self)
+pub fn runite::sync::SemaphorePermit<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod runite::sync
 pub struct runite::sync::Mutex<T: ?core::marker::Sized>
 pub struct runite::sync::MutexGuard<'a, T: ?core::marker::Sized>
@@ -873,15 +979,19 @@ pub type runite::sync::RwLockWriteGuard<'_, T>::Target = T
 
 ```rust
 #[non_exhaustive] pub enum runite::task::JoinError
+impl<R: core::marker::Send + 'static> core::fmt::Debug for runite::task::BlockingJoinHandle<R>
 impl<R: core::marker::Send + 'static> core::future::future::Future for runite::task::BlockingJoinHandle<R>
 impl<T> core::default::Default for runite::task::JoinSet<T>
+impl<T> core::fmt::Debug for runite::task::JoinSet<T>
 impl<T> core::ops::drop::Drop for runite::task::JoinSet<T>
 impl<T> runite::task::JoinSet<T>
+pub fn runite::task::BlockingJoinHandle<R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::task::BlockingJoinHandle<R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::task::JoinSet<T>::abort_all(&mut self)
 pub fn runite::task::JoinSet<T>::default() -> Self
 pub fn runite::task::JoinSet<T>::detach_all(&mut self)
 pub fn runite::task::JoinSet<T>::drop(&mut self)
+pub fn runite::task::JoinSet<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::task::JoinSet<T>::is_empty(&self) -> bool
 pub fn runite::task::JoinSet<T>::join_next(&mut self) -> impl core::future::future::Future<Output = core::option::Option<core::result::Result<T, runite::JoinError>>> + '_
 pub fn runite::task::JoinSet<T>::len(&self) -> usize
@@ -902,17 +1012,21 @@ pub type runite::task::BlockingJoinHandle<R>::Output = core::result::Result<R, r
 ```rust
 #[non_exhaustive] pub enum runite::time::MissedTickBehavior
 impl core::error::Error for runite::time::Elapsed
+impl core::fmt::Debug for runite::time::Interval
+impl core::fmt::Debug for runite::time::Sleep
 impl core::fmt::Display for runite::time::Elapsed
 impl core::future::future::Future for runite::time::Sleep
 impl core::ops::drop::Drop for runite::time::Sleep
 impl runite::time::Interval
 pub async fn runite::time::timeout<F>(core::time::Duration, F) -> core::result::Result<<F as core::future::future::Future>::Output, runite::time::Elapsed> where F: core::future::future::Future
 pub fn runite::time::Elapsed::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::time::Interval::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::time::Interval::missed_tick_behavior(&self) -> runite::time::MissedTickBehavior
 pub fn runite::time::Interval::period(&self) -> core::time::Duration
 pub fn runite::time::Interval::set_missed_tick_behavior(&mut self, runite::time::MissedTickBehavior)
 pub fn runite::time::Interval::tick(&mut self) -> impl core::future::future::Future<Output = std::time::Instant> + '_
 pub fn runite::time::Sleep::drop(&mut self)
+pub fn runite::time::Sleep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::time::Sleep::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::time::interval(core::time::Duration) -> runite::time::Interval
 pub fn runite::time::set_interval<F>(core::time::Duration, F) -> crate::IntervalHandle where F: core::ops::function::FnMut() + 'static
@@ -1581,7 +1695,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Windows x86_64 default target delta (`x86_64-pc-windows-msvc`)
 
-Items: **68**
+Items: **72**
 
 ### `runite::fs`
 
@@ -1666,6 +1780,8 @@ pub fn runite::process::Stdio::from(std::os::windows::io::handle::OwnedHandle) -
 ### `runite::signal::windows`
 
 ```rust
+impl core::fmt::Debug for runite::signal::windows::CtrlBreak
+impl core::fmt::Debug for runite::signal::windows::CtrlC
 impl core::ops::drop::Drop for runite::signal::windows::CtrlBreak
 impl core::ops::drop::Drop for runite::signal::windows::CtrlC
 impl runite::signal::windows::CtrlBreak
@@ -1673,7 +1789,9 @@ impl runite::signal::windows::CtrlC
 pub async fn runite::signal::windows::CtrlBreak::recv(&mut self) -> core::option::Option<()>
 pub async fn runite::signal::windows::CtrlC::recv(&mut self) -> core::option::Option<()>
 pub fn runite::signal::windows::CtrlBreak::drop(&mut self)
+pub fn runite::signal::windows::CtrlBreak::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::signal::windows::CtrlC::drop(&mut self)
+pub fn runite::signal::windows::CtrlC::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::signal::windows::ctrl_break() -> core::io::error::Result<runite::signal::windows::CtrlBreak>
 pub fn runite::signal::windows::ctrl_c() -> core::io::error::Result<runite::signal::windows::CtrlC>
 pub mod runite::signal::windows
@@ -1828,7 +1946,7 @@ pub fn runite::net::TcpStream::poll_write(core::pin::Pin<&mut Self>, &mut core::
 
 ## Linux x86_64 `futures-compat` additions (`x86_64-unknown-linux-gnu`)
 
-Items: **39**
+Items: **43**
 
 ### `runite::io`
 
@@ -1846,9 +1964,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -1862,6 +1983,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -1881,7 +2003,7 @@ pub struct runite::io::compat::FuturesCompat<T>
 
 ## Linux aarch64 `futures-compat` additions (`aarch64-unknown-linux-gnu`)
 
-Items: **39**
+Items: **43**
 
 ### `runite::io`
 
@@ -1899,9 +2021,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -1915,6 +2040,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -1934,7 +2060,7 @@ pub struct runite::io::compat::FuturesCompat<T>
 
 ## macOS aarch64 `futures-compat` additions (`aarch64-apple-darwin`)
 
-Items: **39**
+Items: **43**
 
 ### `runite::io`
 
@@ -1952,9 +2078,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -1968,6 +2097,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -1987,7 +2117,7 @@ pub struct runite::io::compat::FuturesCompat<T>
 
 ## Windows x86_64 `futures-compat` additions (`x86_64-pc-windows-msvc`)
 
-Items: **39**
+Items: **43**
 
 ### `runite::io`
 
@@ -2005,9 +2135,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -2021,6 +2154,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -2040,7 +2174,7 @@ pub struct runite::io::compat::FuturesCompat<T>
 
 ## Linux x86_64 `all-features` additions (`x86_64-unknown-linux-gnu`)
 
-Items: **59**
+Items: **63**
 
 ### `runite::hyper_rt`
 
@@ -2071,9 +2205,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -2087,6 +2224,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -2128,7 +2266,7 @@ pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut
 
 ## Linux aarch64 `all-features` additions (`aarch64-unknown-linux-gnu`)
 
-Items: **59**
+Items: **63**
 
 ### `runite::hyper_rt`
 
@@ -2159,9 +2297,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -2175,6 +2316,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -2216,7 +2358,7 @@ pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut
 
 ## macOS aarch64 `all-features` additions (`aarch64-apple-darwin`)
 
-Items: **59**
+Items: **63**
 
 ### `runite::hyper_rt`
 
@@ -2247,9 +2389,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -2263,6 +2408,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T
@@ -2304,7 +2450,7 @@ pub fn runite::net::unix::UnixStream::poll_write(core::pin::Pin<&mut Self>, &mut
 
 ## Windows x86_64 `all-features` additions (`x86_64-pc-windows-msvc`)
 
-Items: **53**
+Items: **57**
 
 ### `runite::hyper_rt`
 
@@ -2335,9 +2481,12 @@ impl<T: runite::io::AsyncWrite + core::marker::Unpin> futures_io::if_std::AsyncW
 ### `runite::io::compat`
 
 ```rust
+impl<T> core::fmt::Debug for runite::io::compat::Compat<T>
+impl<T> core::fmt::Debug for runite::io::compat::FuturesCompat<T>
 impl<T> runite::io::compat::Compat<T>
 impl<T> runite::io::compat::FuturesCompat<T>
 pub fn runite::io::compat::Compat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::Compat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::Compat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::Compat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::Compat<T>::into_inner(self) -> T
@@ -2351,6 +2500,7 @@ pub fn runite::io::compat::Compat<T>::poll_seek(core::pin::Pin<&mut Self>, &mut 
 pub fn runite::io::compat::Compat<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::Compat<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::io::compat::FuturesCompat<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn runite::io::compat::FuturesCompat<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::io::compat::FuturesCompat<T>::get_mut(&mut self) -> &mut T
 pub fn runite::io::compat::FuturesCompat<T>::get_ref(&self) -> &T
 pub fn runite::io::compat::FuturesCompat<T>::into_inner(self) -> T

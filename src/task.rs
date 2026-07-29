@@ -98,6 +98,14 @@ pub struct BlockingJoinHandle<R: Send + 'static> {
     inner: BlockingResultFuture<R>,
 }
 
+impl<R: Send + 'static> std::fmt::Debug for BlockingJoinHandle<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockingJoinHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
     type Output = Result<R, JoinError>;
 

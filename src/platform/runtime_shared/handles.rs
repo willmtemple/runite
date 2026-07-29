@@ -54,6 +54,14 @@ pub struct ThreadHandle {
     pub(crate) shared: Arc<ThreadShared>,
 }
 
+impl std::fmt::Debug for ThreadHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThreadHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 /// A handle to a worker runtime thread spawned with
 /// [`spawn_worker`](crate::spawn_worker).
 ///
@@ -68,6 +76,14 @@ pub struct WorkerHandle {
     pub(crate) completion: Arc<WorkerCompletion>,
 }
 
+impl std::fmt::Debug for WorkerHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Future returned by [`WorkerHandle::join`].
 ///
 /// Dropping this future before the worker exits unregisters its waker. It does
@@ -80,6 +96,12 @@ pub struct WorkerJoin {
     waiter_id: Option<u64>,
     waiter_active: Option<Arc<AtomicBool>>,
     liveness: Vec<WorkerJoinLiveness>,
+}
+
+impl std::fmt::Debug for WorkerJoin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WorkerJoin").finish_non_exhaustive()
+    }
 }
 
 struct WorkerJoinLiveness {
@@ -153,6 +175,14 @@ pub struct TimeoutHandle {
     pub(crate) generation: u64,
 }
 
+impl std::fmt::Debug for TimeoutHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TimeoutHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl TimeoutHandle {
     /// Cancels the pending timeout.
     ///
@@ -177,6 +207,14 @@ impl TimeoutHandle {
 pub struct IntervalHandle {
     pub(crate) id: usize,
     pub(crate) generation: u64,
+}
+
+impl std::fmt::Debug for IntervalHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IntervalHandle")
+            .finish_non_exhaustive()
+    }
 }
 
 impl IntervalHandle {
@@ -206,6 +244,12 @@ impl IntervalHandle {
 /// cancel explicitly.
 pub struct JoinHandle<T> {
     pub(crate) state: Rc<JoinState<T>>,
+}
+
+impl<T> std::fmt::Debug for JoinHandle<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("JoinHandle").finish_non_exhaustive()
+    }
 }
 
 impl<T> JoinHandle<T> {
@@ -258,6 +302,14 @@ pub struct AbortHandle {
     shared: Rc<TaskShared>,
 }
 
+impl std::fmt::Debug for AbortHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AbortHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl AbortHandle {
     /// Aborts the associated task. See [`JoinHandle::abort`].
     pub fn abort(&self) {
@@ -283,6 +335,12 @@ impl AbortHandle {
 #[must_use = "futures do nothing unless awaited or polled"]
 pub struct YieldNow {
     pub(crate) yielded: bool,
+}
+
+impl std::fmt::Debug for YieldNow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("YieldNow").finish_non_exhaustive()
+    }
 }
 
 impl Future for YieldNow {

@@ -116,6 +116,12 @@ pub struct ChildStdin {
     pipe: Pipe,
 }
 
+impl std::fmt::Debug for ChildStdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ChildStdin").finish_non_exhaustive()
+    }
+}
+
 /// Async reader connected to a child process's standard output.
 ///
 /// Created when [`Command::stdout`](super::Command::stdout) is configured with
@@ -125,6 +131,14 @@ pub struct ChildStdout {
     // Pending reads must be dropped before the pipe descriptor.
     read_state: ReadState,
     pipe: Pipe,
+}
+
+impl std::fmt::Debug for ChildStdout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildStdout")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Async reader connected to a child process's standard error.
@@ -137,6 +151,14 @@ pub struct ChildStderr {
     // Pending reads must be dropped before the pipe descriptor.
     read_state: ReadState,
     pipe: Pipe,
+}
+
+impl std::fmt::Debug for ChildStderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildStderr")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChildStdin {

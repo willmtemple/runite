@@ -70,6 +70,12 @@ pub struct Semaphore {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl std::fmt::Debug for Semaphore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Semaphore").finish_non_exhaustive()
+    }
+}
+
 /// A permit returned by [`Semaphore::acquire`] and [`Semaphore::try_acquire`].
 ///
 /// Dropping a permit releases it back to the semaphore or hands it directly to
@@ -78,6 +84,14 @@ pub struct Semaphore {
 pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl<'a> std::fmt::Debug for SemaphorePermit<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemaphorePermit")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Semaphore {

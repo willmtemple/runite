@@ -65,6 +65,12 @@ pub struct Sender<T: Send + 'static> {
     shared: Option<Arc<Mutex<State<T>>>>,
 }
 
+impl<T: Send + 'static> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
 /// Receiving half of a oneshot channel.
 ///
 /// A receiver can wait asynchronously with [`recv`](Self::recv) or poll
@@ -77,6 +83,12 @@ pub struct Receiver<T: Send + 'static> {
     /// cancel-safe. The completion is only a readiness signal; the value stays
     /// in `State` until a receive operation consumes it.
     wait: Option<CompletionFuture<()>>,
+}
+
+impl<T: Send + 'static> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 struct State<T: Send + 'static> {

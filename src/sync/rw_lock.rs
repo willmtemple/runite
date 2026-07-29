@@ -73,6 +73,12 @@ pub struct RwLock<T: ?Sized> {
     value: UnsafeCell<T>,
 }
 
+impl<T: ?Sized> std::fmt::Debug for RwLock<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("RwLock").finish_non_exhaustive()
+    }
+}
+
 /// Read guard returned by [`RwLock::read`] and [`RwLock::try_read`].
 ///
 /// The guard dereferences to the protected value and releases its reader slot
@@ -83,6 +89,14 @@ pub struct RwLockReadGuard<'a, T: ?Sized> {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl<'a, T: ?Sized> std::fmt::Debug for RwLockReadGuard<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RwLockReadGuard")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Write guard returned by [`RwLock::write`] and [`RwLock::try_write`].
 ///
 /// The guard dereferences mutably to the protected value and releases exclusive
@@ -91,6 +105,14 @@ pub struct RwLockReadGuard<'a, T: ?Sized> {
 pub struct RwLockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl<'a, T: ?Sized> std::fmt::Debug for RwLockWriteGuard<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RwLockWriteGuard")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Future returned by [`RwLock::read`].
@@ -105,6 +127,14 @@ pub struct RwLockReadFuture<'a, T: ?Sized> {
     acquired: bool,
 }
 
+impl<'a, T: ?Sized> std::fmt::Debug for RwLockReadFuture<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RwLockReadFuture")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Future returned by [`RwLock::write`].
 ///
 /// Resolves to an [`RwLockWriteGuard`]. Dropping it while queued cancels the
@@ -115,6 +145,14 @@ pub struct RwLockWriteFuture<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     waiter: Option<(usize, Rc<Cell<bool>>)>,
     acquired: bool,
+}
+
+impl<'a, T: ?Sized> std::fmt::Debug for RwLockWriteFuture<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RwLockWriteFuture")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> RwLock<T> {

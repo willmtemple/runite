@@ -157,6 +157,12 @@ pub struct Stdin {
     waiter_id: u64,
 }
 
+impl std::fmt::Debug for Stdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stdin").finish_non_exhaustive()
+    }
+}
+
 /// Async writer for standard output.
 ///
 /// Created by [`stdout`], this handle duplicates the process stdout descriptor
@@ -172,6 +178,12 @@ pub struct Stdout {
     writer: StandardWriter,
 }
 
+impl std::fmt::Debug for Stdout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stdout").finish_non_exhaustive()
+    }
+}
+
 /// Async writer for standard error.
 ///
 /// Created by [`stderr`], this handle duplicates the process stderr descriptor
@@ -185,6 +197,12 @@ pub struct Stdout {
 /// Dropping it does not close the process-wide stderr stream.
 pub struct Stderr {
     writer: StandardWriter,
+}
+
+impl std::fmt::Debug for Stderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stderr").finish_non_exhaustive()
+    }
 }
 
 struct StandardWriter {

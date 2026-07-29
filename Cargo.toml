@@ -36,6 +36,9 @@ exclude = [
   "deny.toml",
 ]
 
+[lints.rust]
+missing_debug_implementations = "deny"
+
 [package.metadata.docs.rs]
 all-features = true
 targets = [

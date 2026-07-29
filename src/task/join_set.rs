@@ -192,6 +192,12 @@ pub struct JoinSet<T> {
     handles: Vec<JoinHandle<T>>,
 }
 
+impl<T> std::fmt::Debug for JoinSet<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("JoinSet").finish_non_exhaustive()
+    }
+}
+
 impl<T> JoinSet<T> {
     /// Creates an empty `JoinSet`.
     ///

@@ -126,6 +126,12 @@ pub struct BufReader<R> {
     line_pos: usize,
 }
 
+impl<R> std::fmt::Debug for BufReader<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("BufReader").finish_non_exhaustive()
+    }
+}
+
 impl<R: AsyncRead> BufReader<R> {
     /// Creates a buffered reader with the default capacity.
     ///
@@ -507,6 +513,12 @@ pub struct BufWriter<W> {
     buf: Vec<u8>,
     written: usize,
     generation: Option<super::WriteOperation>,
+}
+
+impl<W> std::fmt::Debug for BufWriter<W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("BufWriter").finish_non_exhaustive()
+    }
 }
 
 impl<W: AsyncWrite> BufWriter<W> {

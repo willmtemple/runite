@@ -102,6 +102,12 @@ pub struct File {
     inner: Arc<FileInner>,
 }
 
+impl std::fmt::Debug for File {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("File").finish_non_exhaustive()
+    }
+}
+
 /// Builder used to configure how a [`File`] is opened.
 ///
 /// Options mirror [`std::fs::OpenOptions`]: callers opt in to read, write,
@@ -109,6 +115,14 @@ pub struct File {
 /// [`open`](Self::open).
 pub struct OpenOptions {
     inner: OpOpenOptions,
+}
+
+impl std::fmt::Debug for OpenOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenOptions")
+            .finish_non_exhaustive()
+    }
 }
 
 /// File metadata returned by [`metadata`] or [`File::metadata`].
@@ -137,6 +151,12 @@ pub struct Metadata {
 /// the OS may finish before the blocking job observes the drop.
 pub struct ReadDir {
     inner: sys_fs::ReadDirStream,
+}
+
+impl std::fmt::Debug for ReadDir {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ReadDir").finish_non_exhaustive()
+    }
 }
 
 /// Directory entry yielded by [`ReadDir::next_entry`].

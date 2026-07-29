@@ -698,11 +698,25 @@ pub struct Read<'a, R: ?Sized> {
     buf: &'a mut [u8],
 }
 
+impl<'a, R: ?Sized> std::fmt::Debug for Read<'a, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Read").finish_non_exhaustive()
+    }
+}
+
 /// Future returned by [`AsyncReadExt::read_vectored`].
 #[must_use = "futures do nothing unless awaited or polled"]
 pub struct ReadVectored<'a, 'buf, R: ?Sized> {
     reader: &'a mut R,
     bufs: &'a mut [IoSliceMut<'buf>],
+}
+
+impl<'a, 'buf, R: ?Sized> std::fmt::Debug for ReadVectored<'a, 'buf, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReadVectored")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<R: AsyncRead + Unpin + ?Sized> Future for ReadVectored<'_, '_, R> {
@@ -729,6 +743,12 @@ pub struct ReadExact<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
     filled: usize,
+}
+
+impl<'a, R: ?Sized> std::fmt::Debug for ReadExact<'a, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ReadExact").finish_non_exhaustive()
+    }
 }
 
 impl<R: AsyncRead + Unpin + ?Sized> Future for ReadExact<'_, R> {
@@ -762,6 +782,12 @@ pub struct ReadToEnd<'a, R: ?Sized> {
     chunk: Vec<u8>,
     start_len: usize,
     initialized: bool,
+}
+
+impl<'a, R: ?Sized> std::fmt::Debug for ReadToEnd<'a, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ReadToEnd").finish_non_exhaustive()
+    }
 }
 
 impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToEnd<'_, R> {
@@ -801,6 +827,14 @@ pub struct ReadToString<'a, R: ?Sized> {
     initialized: bool,
 }
 
+impl<'a, R: ?Sized> std::fmt::Debug for ReadToString<'a, R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReadToString")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToString<'_, R> {
     type Output = io::Result<usize>;
 
@@ -837,12 +871,26 @@ pub struct Write<'a, W: ?Sized> {
     generation: super::WriteOperation,
 }
 
+impl<'a, W: ?Sized> std::fmt::Debug for Write<'a, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Write").finish_non_exhaustive()
+    }
+}
+
 /// Future returned by [`AsyncWriteExt::write_vectored`].
 #[must_use = "futures do nothing unless awaited or polled"]
 pub struct WriteVectored<'a, 'buf, W: ?Sized> {
     writer: &'a mut W,
     bufs: &'a [IoSlice<'buf>],
     generation: super::WriteOperation,
+}
+
+impl<'a, 'buf, W: ?Sized> std::fmt::Debug for WriteVectored<'a, 'buf, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WriteVectored")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteVectored<'_, '_, W> {
@@ -874,6 +922,12 @@ pub struct WriteAll<'a, W: ?Sized> {
     buf: &'a [u8],
     written: usize,
     generation: super::WriteOperation,
+}
+
+impl<'a, W: ?Sized> std::fmt::Debug for WriteAll<'a, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WriteAll").finish_non_exhaustive()
+    }
 }
 
 impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteAll<'_, W> {
@@ -908,6 +962,12 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for WriteAll<'_, W> {
 pub struct Seek<'a, S: ?Sized> {
     seeker: &'a mut S,
     position: SeekFrom,
+}
+
+impl<'a, S: ?Sized> std::fmt::Debug for Seek<'a, S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Seek").finish_non_exhaustive()
+    }
 }
 
 impl<S: AsyncSeek + Unpin + ?Sized> Future for Seek<'_, S> {
@@ -975,6 +1035,12 @@ pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     copied: u64,
     state: CopyState,
     generation: super::WriteOperation,
+}
+
+impl<'a, R: ?Sized, W: ?Sized> std::fmt::Debug for Copy<'a, R, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Copy").finish_non_exhaustive()
+    }
 }
 
 impl<R, W> Future for Copy<'_, R, W>
@@ -1170,6 +1236,14 @@ pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     b_to_a: CopyHalf,
 }
 
+impl<'a, A: ?Sized, B: ?Sized> std::fmt::Debug for CopyBidirectional<'a, A, B> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CopyBidirectional")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<A, B> Future for CopyBidirectional<'_, A, B>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -1210,6 +1284,12 @@ pub struct Flush<'a, W: ?Sized> {
     writer: &'a mut W,
 }
 
+impl<'a, W: ?Sized> std::fmt::Debug for Flush<'a, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Flush").finish_non_exhaustive()
+    }
+}
+
 impl<W: AsyncWrite + Unpin + ?Sized> Future for Flush<'_, W> {
     type Output = io::Result<()>;
 
@@ -1222,6 +1302,12 @@ impl<W: AsyncWrite + Unpin + ?Sized> Future for Flush<'_, W> {
 #[must_use = "futures do nothing unless awaited or polled"]
 pub struct Close<'a, W: ?Sized> {
     writer: &'a mut W,
+}
+
+impl<'a, W: ?Sized> std::fmt::Debug for Close<'a, W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Close").finish_non_exhaustive()
+    }
 }
 
 impl<W: AsyncWrite + Unpin + ?Sized> Future for Close<'_, W> {
@@ -1243,6 +1329,12 @@ pub struct Lines<R> {
     buf: Vec<u8>,
     chunk: Vec<u8>,
     eof: bool,
+}
+
+impl<R> std::fmt::Debug for Lines<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Lines").finish_non_exhaustive()
+    }
 }
 
 impl<R> Unpin for Lines<R> {}

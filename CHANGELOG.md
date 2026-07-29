@@ -111,6 +111,18 @@ changes.
   the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
   ([#26](https://github.com/willmtemple/runite/issues/26))
 
+- `Debug` on the 67 public types that lacked it, and
+  `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
+  cannot reopen. Coverage was inconsistent within single modules —
+  `fs::Metadata` and `DirEntry` derived it while `File`, `OpenOptions` and
+  `ReadDir` did not; every channel error derived it while no channel `Sender`
+  or `Receiver` did — which poisoned `#[derive(Debug)]` on any downstream type
+  holding one. The impls are deliberately opaque
+  (`debug_struct(..).finish_non_exhaustive()`): most of these are futures and
+  guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
+  on type parameters that frequently cannot have it.
+  ([#31](https://github.com/willmtemple/runite/issues/31))
+
 - `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
   `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
   `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.

@@ -84,6 +84,12 @@ pub struct Sender<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
 
+impl<T: Send + 'static> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
 /// Receiving half of a watch channel.
 ///
 /// A receiver tracks the last version it observed. Use [`changed`](Self::changed)
@@ -93,6 +99,12 @@ pub struct Receiver<T: Send + 'static> {
     shared: Arc<Shared<T>>,
     version: u64,
     wait: Option<CompletionFuture<Result<u64, RecvError>>>,
+}
+
+impl<T: Send + 'static> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 /// Borrowed watch value.
@@ -106,6 +118,12 @@ pub struct Receiver<T: Send + 'static> {
 #[must_use = "the borrow holds a read lock on the value until dropped"]
 pub struct Ref<'a, T: Send + 'static> {
     guard: RwLockReadGuard<'a, T>,
+}
+
+impl<'a, T: Send + 'static> std::fmt::Debug for Ref<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Ref").finish_non_exhaustive()
+    }
 }
 
 /// Shared channel storage.

@@ -80,6 +80,12 @@ pub struct Notify {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl std::fmt::Debug for Notify {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Notify").finish_non_exhaustive()
+    }
+}
+
 impl Notify {
     /// Creates a notification primitive with no stored permit.
     pub fn new() -> Self {

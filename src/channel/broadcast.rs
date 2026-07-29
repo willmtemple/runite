@@ -106,6 +106,12 @@ pub struct Sender<T: Clone + Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
+impl<T: Clone + Send + 'static> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
 /// Receiving half of a broadcast channel.
 ///
 /// Each receiver tracks its own position in the shared ring buffer. If more
@@ -116,6 +122,12 @@ pub struct Receiver<T: Clone + Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     next_seq: u64,
     wait: Option<CompletionFuture<RecvOutcome<T>>>,
+}
+
+impl<T: Clone + Send + 'static> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 struct State<T: Clone + Send + 'static> {
