@@ -95,6 +95,33 @@ not allocate or take locks. Returning `Err` aborts the spawn.
 Together with the previous item, this is enough to start a shell on a
 pseudoterminal without `std::process`.
 
+### Watching several signal kinds on one stream
+
+`signal::unix::signals` replaces the one-task-per-kind shape:
+
+```rust
+// 0.2 — one spawned task per kind, each repeating the teardown call
+for kind in [SignalKind::Interrupt, SignalKind::Terminate, SignalKind::Hangup] {
+    let mut stream = signal(kind)?;
+    runite::spawn(async move { stream.recv().await; shut_down(); });
+}
+
+// 0.3 — one task, and it knows which signal arrived
+let mut shutdown = signals(&[
+    SignalKind::Interrupt,
+    SignalKind::Terminate,
+    SignalKind::Hangup,
+])?;
+runite::spawn(async move {
+    if let Some(kind) = shutdown.recv().await {
+        shut_down(kind);
+    }
+});
+```
+
+`Signals` also implements `io::Stream`. Duplicate kinds register once; an empty
+slice is an error rather than a stream that never fires.
+
 ### Adopting a process runite did not spawn
 
 `Child::from_pid` takes an already-running process and lets its exit be awaited

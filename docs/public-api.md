@@ -8,9 +8,9 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 944 | 964 | 983 | 1003 | 158 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 944 | 964 | 983 | 1003 | 158 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 944 | 964 | 983 | 1003 | 158 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 957 | 977 | 996 | 1016 | 171 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 957 | 977 | 996 | 1016 | 171 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 957 | 977 | 996 | 1016 | 171 |
 | Windows x86_64 (`x86_64-pc-windows-msvc`) | 854 | 868 | 893 | 907 | 68 |
 
 Portable default items: **786**
@@ -899,7 +899,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **158**
+Items: **171**
 
 ### `runite::fd`
 
@@ -929,6 +929,7 @@ impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
 impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
 ### `runite::net`
@@ -1088,11 +1089,21 @@ pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::func
 
 ```rust
 #[non_exhaustive] pub enum runite::signal::unix::SignalKind
+impl core::fmt::Debug for runite::signal::unix::Signal
+impl core::fmt::Debug for runite::signal::unix::Signals
 impl core::ops::drop::Drop for runite::signal::unix::Signal
 impl runite::signal::unix::Signal
+impl runite::signal::unix::Signals
 pub async fn runite::signal::unix::Signal::recv(&mut self) -> core::option::Option<()>
+pub async fn runite::signal::unix::Signals::recv(&mut self) -> core::option::Option<runite::signal::unix::SignalKind>
 pub fn runite::signal::unix::Signal::drop(&mut self)
+pub fn runite::signal::unix::Signal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::kinds(&self) -> alloc::vec::Vec<runite::signal::unix::SignalKind>
+pub fn runite::signal::unix::Signals::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<runite::signal::unix::SignalKind>>
+pub fn runite::signal::unix::Signals::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::signal::unix::signal(runite::signal::unix::SignalKind) -> core::io::error::Result<runite::signal::unix::Signal>
+pub fn runite::signal::unix::signals(&[runite::signal::unix::SignalKind]) -> core::io::error::Result<runite::signal::unix::Signals>
 pub mod runite::signal::unix
 pub runite::signal::unix::SignalKind::Hangup
 pub runite::signal::unix::SignalKind::Interrupt
@@ -1102,11 +1113,13 @@ pub runite::signal::unix::SignalKind::User1
 pub runite::signal::unix::SignalKind::User2
 pub runite::signal::unix::SignalKind::WindowChange
 pub struct runite::signal::unix::Signal
+pub struct runite::signal::unix::Signals
+pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 ```
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **158**
+Items: **171**
 
 ### `runite::fd`
 
@@ -1136,6 +1149,7 @@ impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
 impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
 ### `runite::net`
@@ -1295,11 +1309,21 @@ pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::func
 
 ```rust
 #[non_exhaustive] pub enum runite::signal::unix::SignalKind
+impl core::fmt::Debug for runite::signal::unix::Signal
+impl core::fmt::Debug for runite::signal::unix::Signals
 impl core::ops::drop::Drop for runite::signal::unix::Signal
 impl runite::signal::unix::Signal
+impl runite::signal::unix::Signals
 pub async fn runite::signal::unix::Signal::recv(&mut self) -> core::option::Option<()>
+pub async fn runite::signal::unix::Signals::recv(&mut self) -> core::option::Option<runite::signal::unix::SignalKind>
 pub fn runite::signal::unix::Signal::drop(&mut self)
+pub fn runite::signal::unix::Signal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::kinds(&self) -> alloc::vec::Vec<runite::signal::unix::SignalKind>
+pub fn runite::signal::unix::Signals::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<runite::signal::unix::SignalKind>>
+pub fn runite::signal::unix::Signals::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::signal::unix::signal(runite::signal::unix::SignalKind) -> core::io::error::Result<runite::signal::unix::Signal>
+pub fn runite::signal::unix::signals(&[runite::signal::unix::SignalKind]) -> core::io::error::Result<runite::signal::unix::Signals>
 pub mod runite::signal::unix
 pub runite::signal::unix::SignalKind::Hangup
 pub runite::signal::unix::SignalKind::Interrupt
@@ -1309,11 +1333,13 @@ pub runite::signal::unix::SignalKind::User1
 pub runite::signal::unix::SignalKind::User2
 pub runite::signal::unix::SignalKind::WindowChange
 pub struct runite::signal::unix::Signal
+pub struct runite::signal::unix::Signals
+pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 ```
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **158**
+Items: **171**
 
 ### `runite::fd`
 
@@ -1343,6 +1369,7 @@ impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
 impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
 ### `runite::net`
@@ -1502,11 +1529,21 @@ pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::func
 
 ```rust
 #[non_exhaustive] pub enum runite::signal::unix::SignalKind
+impl core::fmt::Debug for runite::signal::unix::Signal
+impl core::fmt::Debug for runite::signal::unix::Signals
 impl core::ops::drop::Drop for runite::signal::unix::Signal
 impl runite::signal::unix::Signal
+impl runite::signal::unix::Signals
 pub async fn runite::signal::unix::Signal::recv(&mut self) -> core::option::Option<()>
+pub async fn runite::signal::unix::Signals::recv(&mut self) -> core::option::Option<runite::signal::unix::SignalKind>
 pub fn runite::signal::unix::Signal::drop(&mut self)
+pub fn runite::signal::unix::Signal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::signal::unix::Signals::kinds(&self) -> alloc::vec::Vec<runite::signal::unix::SignalKind>
+pub fn runite::signal::unix::Signals::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<runite::signal::unix::SignalKind>>
+pub fn runite::signal::unix::Signals::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::signal::unix::signal(runite::signal::unix::SignalKind) -> core::io::error::Result<runite::signal::unix::Signal>
+pub fn runite::signal::unix::signals(&[runite::signal::unix::SignalKind]) -> core::io::error::Result<runite::signal::unix::Signals>
 pub mod runite::signal::unix
 pub runite::signal::unix::SignalKind::Hangup
 pub runite::signal::unix::SignalKind::Interrupt
@@ -1516,6 +1553,8 @@ pub runite::signal::unix::SignalKind::User1
 pub runite::signal::unix::SignalKind::User2
 pub runite::signal::unix::SignalKind::WindowChange
 pub struct runite::signal::unix::Signal
+pub struct runite::signal::unix::Signals
+pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 ```
 
 ## Windows x86_64 default target delta (`x86_64-pc-windows-msvc`)

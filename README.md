@@ -125,7 +125,8 @@ fn main() {
   `sync::{Mutex, RwLock, Semaphore, Notify, OnceCell}`.
 - **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
 - **Signals:** portable `signal::ctrl_c`, async Unix signal handling (including SIGWINCH
-  via `SignalKind::WindowChange`), and Windows console control events (`signal::windows`).
+  via `SignalKind::WindowChange`) with `signal::unix::signals` for watching several
+  kinds on one stream, and Windows console control events (`signal::windows`).
 
 Accepted reads are resource-owned and cancel-safe: bytes remain available to a
 later caller. Cancelling an accepted write does not promise that the OS write

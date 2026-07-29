@@ -47,6 +47,15 @@ changes.
 - `Child` implements `Debug`, reporting the process id and which standard
   streams are piped. ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `signal::unix::signals` watches several signal kinds on one stream, yielding
+  the `SignalKind` that produced each event. An application whose SIGINT,
+  SIGTERM and SIGHUP all mean "shut down" needed one spawned task per kind,
+  each duplicating the teardown call. `Signals` implements `io::Stream`,
+  deduplicates repeated kinds, rejects an empty set rather than returning a
+  stream that is never ready, and rotates which kind it polls first so a
+  frequent signal cannot starve the others.
+  ([#45](https://github.com/willmtemple/runite/issues/45))
+
 ### Breaking
 
 - `Stdio` is no longer `Clone`, `Copy`, `PartialEq`, or `Eq`, and `Command` is
