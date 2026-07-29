@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 933 | 953 | 972 | 992 | 150 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 933 | 953 | 972 | 992 | 150 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 933 | 953 | 972 | 992 | 150 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 849 | 863 | 888 | 902 | 66 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 944 | 964 | 983 | 1003 | 158 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 944 | 964 | 983 | 1003 | 158 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 944 | 964 | 983 | 1003 | 158 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 854 | 868 | 893 | 907 | 68 |
 
-Portable default items: **783**
+Portable default items: **786**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **783**
 
 ## Portable default surface
 
-Items: **783**
+Items: **786**
 
 ### `runite`
 
@@ -666,6 +666,7 @@ pub mod runite::os
 ### `runite::process`
 
 ```rust
+impl core::fmt::Debug for runite::process::Child
 impl runite::process::Child
 impl runite::process::Command
 impl runite::process::ExitStatus
@@ -673,6 +674,8 @@ impl runite::process::Stdio
 pub async fn runite::process::Child::wait(&mut self) -> core::io::error::Result<runite::process::ExitStatus>
 pub async fn runite::process::Command::output(&mut self) -> core::io::error::Result<runite::process::Output>
 pub async fn runite::process::Command::status(&mut self) -> core::io::error::Result<runite::process::ExitStatus>
+pub fn runite::process::Child::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::process::Child::from_pid(u32) -> core::io::error::Result<Self>
 pub fn runite::process::Child::id(&self) -> core::option::Option<u32>
 pub fn runite::process::Child::kill(&mut self) -> core::io::error::Result<()>
 pub fn runite::process::Child::try_wait(&mut self) -> core::io::error::Result<core::option::Option<runite::process::ExitStatus>>
@@ -896,7 +899,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **150**
+Items: **158**
 
 ### `runite::fd`
 
@@ -1057,10 +1060,28 @@ pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
+### `runite::os::unix`
+
+```rust
+pub mod runite::os::unix
+```
+
+### `runite::os::unix::process`
+
+```rust
+impl runite::os::unix::process::CommandExt for runite::process::Command
+pub mod runite::os::unix::process
+pub trait runite::os::unix::process::CommandExt
+pub unsafe fn runite::os::unix::process::CommandExt::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
+```
+
 ### `runite::process`
 
 ```rust
+impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::process::Stdio
 pub fn runite::process::ExitStatus::signal(&self) -> core::option::Option<i32>
+pub fn runite::process::Stdio::from(std::os::fd::owned::OwnedFd) -> Self
+pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
 ```
 
 ### `runite::signal::unix`
@@ -1085,7 +1106,7 @@ pub struct runite::signal::unix::Signal
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **150**
+Items: **158**
 
 ### `runite::fd`
 
@@ -1246,10 +1267,28 @@ pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
+### `runite::os::unix`
+
+```rust
+pub mod runite::os::unix
+```
+
+### `runite::os::unix::process`
+
+```rust
+impl runite::os::unix::process::CommandExt for runite::process::Command
+pub mod runite::os::unix::process
+pub trait runite::os::unix::process::CommandExt
+pub unsafe fn runite::os::unix::process::CommandExt::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
+```
+
 ### `runite::process`
 
 ```rust
+impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::process::Stdio
 pub fn runite::process::ExitStatus::signal(&self) -> core::option::Option<i32>
+pub fn runite::process::Stdio::from(std::os::fd::owned::OwnedFd) -> Self
+pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
 ```
 
 ### `runite::signal::unix`
@@ -1274,7 +1313,7 @@ pub struct runite::signal::unix::Signal
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **150**
+Items: **158**
 
 ### `runite::fd`
 
@@ -1435,10 +1474,28 @@ pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
+### `runite::os::unix`
+
+```rust
+pub mod runite::os::unix
+```
+
+### `runite::os::unix::process`
+
+```rust
+impl runite::os::unix::process::CommandExt for runite::process::Command
+pub mod runite::os::unix::process
+pub trait runite::os::unix::process::CommandExt
+pub unsafe fn runite::os::unix::process::CommandExt::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
+```
+
 ### `runite::process`
 
 ```rust
+impl core::convert::From<std::os::fd::owned::OwnedFd> for runite::process::Stdio
 pub fn runite::process::ExitStatus::signal(&self) -> core::option::Option<i32>
+pub fn runite::process::Stdio::from(std::os::fd::owned::OwnedFd) -> Self
+pub unsafe fn runite::process::Command::pre_exec(&mut self, impl core::ops::function::Fn() -> core::io::error::Result<()> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
 ```
 
 ### `runite::signal::unix`
@@ -1463,7 +1520,7 @@ pub struct runite::signal::unix::Signal
 
 ## Windows x86_64 default target delta (`x86_64-pc-windows-msvc`)
 
-Items: **66**
+Items: **68**
 
 ### `runite::fs`
 
@@ -1536,6 +1593,13 @@ pub fn runite::os::windows::fs::OpenOptionsExt::share_mode(&mut self, u32) -> &m
 pub mod runite::os::windows::fs
 pub trait runite::os::windows::fs::MetadataExt
 pub trait runite::os::windows::fs::OpenOptionsExt
+```
+
+### `runite::process`
+
+```rust
+impl core::convert::From<std::os::windows::io::handle::OwnedHandle> for runite::process::Stdio
+pub fn runite::process::Stdio::from(std::os::windows::io::handle::OwnedHandle) -> Self
 ```
 
 ### `runite::signal::windows`

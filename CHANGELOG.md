@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A child process can be started on a descriptor the caller already owns.
+  `Stdio` gains `From<OwnedFd>` on Unix and `From<OwnedHandle>` on Windows, so
+  any of the three standard streams can be wired to a pseudoterminal, a socket
+  accepted elsewhere, or a preopened file. The descriptor is duplicated at each
+  spawn, so one `Command` can start several children and the caller keeps its
+  original. ([#39](https://github.com/willmtemple/runite/issues/39))
+- `runite::os::unix::process::CommandExt::pre_exec` runs a hook in the child
+  between `fork` and `exec`, mirroring
+  `std::os::unix::process::CommandExt::pre_exec`. This is the window in which
+  a process acquires a controlling terminal (`setsid` then `TIOCSCTTY`), changes
+  process group, or drops privileges. It takes `Fn` rather than `FnMut` because
+  a runite `Command` may be spawned more than once. An error from the hook
+  aborts the spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
+
+  Together these remove the last reason for an otherwise all-runite application
+  to reach for `std::process` — a terminal multiplexer can now start a shell on
+  its own pseudoterminal without a second process API.
+
+- `Child::from_pid` adopts an already-running process, so a process started
+  through some other API can have its exit awaited through the reactor instead
+  of polled. Exit notification is event-driven on every platform — a pidfd on
+  Linux, a `kqueue` process filter on macOS, a registered wait on the process
+  handle on Windows — so no thread is parked for the process's lifetime, and
+  a signal-escalation ladder can be an ordinary task built from `wait` and
+  `time::timeout` rather than a sequence of blocking sleeps.
+  ([#44](https://github.com/willmtemple/runite/issues/44))
+
+  On Unix the process must be a direct child, since reading an exit status
+  requires being its parent; Windows has no such restriction. Adopting a
+  process that does not exist fails at adoption rather than producing a handle
+  whose `wait` never completes.
+
+- `Child` implements `Debug`, reporting the process id and which standard
+  streams are piped. ([#31](https://github.com/willmtemple/runite/issues/31))
+
+### Breaking
+
+- `Stdio` is no longer `Clone`, `Copy`, `PartialEq`, or `Eq`, and `Command` is
+  no longer `Clone`. A `Stdio` can now own a descriptor, and neither copying one
+  implicitly nor comparing one for equality is meaningful; `std::process::Stdio`
+  and `std::process::Command` are not `Clone` for the same reason. Code that
+  relied on passing a `Stdio` by copy should construct one per call, and code
+  that cloned a `Command` should build it twice or wrap it.
+
+  Note that the public API report does not track derived trait impls, so this
+  change does not appear in `docs/public-api.md`.
+
 ## [0.2.0] — 2026-07-27
 
 This release hardens the runtime's lifecycle and completion ownership, adds the
@@ -195,5 +246,6 @@ microtask/macrotask scheduling, local `!Send` futures, explicit worker
 runtimes, async filesystem/network/process/stdio services, timers, channels,
 and synchronization primitives.
 
+[Unreleased]: https://github.com/willmtemple/runite/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/willmtemple/runite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0
