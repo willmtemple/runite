@@ -2,7 +2,6 @@
 //!
 //!
 
-use std::any::Any;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::io;
@@ -49,7 +48,6 @@ enum CompletionKind {
 }
 
 type CompletionHandler = Box<dyn FnOnce(IoUringCqe) + Send + 'static>;
-pub(crate) type CancelGuard = Box<dyn Any + Send + 'static>;
 
 enum WakeTarget {
     MsgRing(OwnedFd),
@@ -222,7 +220,6 @@ pub struct Driver {
     /// memory owned by that future. Entries are keyed by the original operation
     /// token and dropped only when the original CQE proves the kernel released
     /// the referenced storage.
-    pending_cancel_buffers: RefCell<HashMap<u64, Vec<CancelGuard>>>,
     pending_cancel_tokens: RefCell<HashMap<u64, u64>>,
 }
 
@@ -275,7 +272,6 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
             pending_wakes: Cell::new(0),
             pending_timers: Cell::new(0),
             completions: RefCell::new(HashMap::new()),
-            pending_cancel_buffers: RefCell::new(HashMap::new()),
             pending_cancel_tokens: RefCell::new(HashMap::new()),
         },
         ThreadNotifier { inner: notifier },
@@ -633,11 +629,7 @@ impl Driver {
         Ok(main_token)
     }
 
-    pub(crate) fn cancel_operation_with_guard(
-        &self,
-        token: u64,
-        guard: Option<CancelGuard>,
-    ) -> io::Result<()> {
+    pub(crate) fn cancel_operation(&self, token: u64) -> io::Result<()> {
         #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::ASYNC,
@@ -645,18 +637,11 @@ impl Driver {
             token,
             "submitting async driver cancellation"
         );
-        self.stage_cancel_operation(token, guard)?;
+        self.stage_cancel_operation(token)?;
         self.flush_if_immediate()
     }
 
-    fn stage_cancel_operation(&self, token: u64, guard: Option<CancelGuard>) -> io::Result<()> {
-        if let Some(guard) = guard {
-            self.pending_cancel_buffers
-                .borrow_mut()
-                .entry(token)
-                .or_default()
-                .push(guard);
-        }
+    fn stage_cancel_operation(&self, token: u64) -> io::Result<()> {
         let cancel_token = self.next_token(CompletionKind::OperationCancel);
         self.pending_cancel_tokens
             .borrow_mut()
@@ -671,7 +656,6 @@ impl Driver {
                 self.pending_cancel_tokens
                     .borrow_mut()
                     .remove(&cancel_token);
-                let _ = self.pending_cancel_buffers.borrow_mut().remove(&token);
                 Err(error)
             }
         }
@@ -746,10 +730,9 @@ impl Driver {
                 }
             }
             Some(CompletionKind::Operation) => {
-                let _guards = self
-                    .pending_cancel_buffers
-                    .borrow_mut()
-                    .remove(&cqe.user_data);
+                // Dropping the callback drops the staging buffer it owns. This
+                // is the only place kernel-visible storage is released, and it
+                // is reached only by the original operation's terminal CQE.
                 if let Some(callback) = self.completions.borrow_mut().remove(&cqe.user_data) {
                     callback(cqe);
                 }
@@ -797,7 +780,7 @@ impl Driver {
     }
 
     fn quiesce_operations(&self) -> io::Result<()> {
-        if self.completions.borrow().is_empty() && self.pending_cancel_buffers.borrow().is_empty() {
+        if self.completions.borrow().is_empty() {
             return Ok(());
         }
         let tokens = self
@@ -813,7 +796,7 @@ impl Driver {
                 .values()
                 .any(|target| *target == token);
             if !already_canceling {
-                self.stage_cancel_operation(token, None)?;
+                self.stage_cancel_operation(token)?;
             }
         }
 
@@ -824,9 +807,7 @@ impl Driver {
             let drained = self
                 .ring()
                 .drain_completions(|cqe| self.process_cqe(cqe, &mut ready));
-            if self.completions.borrow().is_empty()
-                && self.pending_cancel_buffers.borrow().is_empty()
-            {
+            if self.completions.borrow().is_empty() {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -844,8 +825,6 @@ impl Driver {
     fn leak_kernel_referenced_storage(&mut self) {
         let completions = std::mem::take(self.completions.get_mut());
         std::mem::forget(completions);
-        let guards = std::mem::take(self.pending_cancel_buffers.get_mut());
-        std::mem::forget(guards);
         if let Some(ring) = self.ring.get_mut().take() {
             std::mem::forget(ring);
         }
@@ -1225,8 +1204,10 @@ mod tests {
             .quiesce_operations()
             .expect("shutdown should prove terminal completion");
         assert!(completed.load(Ordering::Acquire));
-        assert!(driver.completions.borrow().is_empty());
-        assert!(driver.pending_cancel_buffers.borrow().is_empty());
+        assert!(
+            driver.completions.borrow().is_empty(),
+            "the terminal CQE must release the callback, and with it the buffer it owns"
+        );
         assert_eq!(
             script
                 .calls()

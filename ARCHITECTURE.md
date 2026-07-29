@@ -399,9 +399,6 @@ terminal CQE. Instead, the runtime uses a conservative staging model:
   (`CompletionKind::OperationCancel`). `pending_cancel_tokens` exists to map the cancel SQE's token
   back to the original for bookkeeping, not for storage release.
 
-  The driver also carries a `pending_cancel_buffers` map intended as a second home for these
-  guards. Every call site passes `None`, so it is always empty and contributes nothing to the
-  invariant above; issue #32 tracks removing it.
 
 On top of the staging model, the concrete I/O types make **reads cancel-safe** by stashing the
 in-flight operation on the object rather than in the transient future: `TcpStream`, `UnixStream`,

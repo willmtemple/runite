@@ -151,6 +151,17 @@ changes.
 
 ### Changed
 
+- Removed the Linux driver's `pending_cancel_buffers` map, the `CancelGuard`
+  type, and the guard parameter threaded down to four call sites that all
+  passed `None`. It was a second, always-empty home for the staging buffers
+  that survive a cancelled operation. The invariant it was meant to enforce is
+  real and unchanged: the buffer is owned by the operation's completion
+  callback, the driver holds that callback until the *original* operation's
+  terminal CQE, and the cancel path never touches it — because
+  `IORING_OP_ASYNC_CANCEL` can report `-EALREADY`, meaning the target may still
+  write. Internal only; no API change.
+  ([#32](https://github.com/willmtemple/runite/issues/32))
+
 - `io_uring` setup failing with `ENOMEM` now says what actually went wrong. The
   rings are pinned against `RLIMIT_MEMLOCK`, so this is a locked-memory limit
   rather than memory exhaustion — but the raw errno renders as "Cannot allocate
