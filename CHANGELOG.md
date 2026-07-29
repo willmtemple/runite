@@ -117,6 +117,16 @@ changes.
   `std`; the divergent one is the one that moved.
   ([#35](https://github.com/willmtemple/runite/issues/35))
 
+- `Stdin::read`, `Stdout::write` and `Stderr::write` are removed, completing
+  the sweep below. These were not duplicates: `Stdin::read` wrapped its poll in
+  a guard that discarded the pending operation and unregistered the waiter on
+  cancellation, while the `AsyncRead` path retained both — so the documented
+  cancel-safety sentence held on one path and not the other, and generic code
+  over `AsyncRead` silently got the undocumented one. Both now share a single
+  read path with retention as the contract, matching every other runite reader:
+  a cancelled read leaves its operation claimable by the next one.
+  ([#53](https://github.com/willmtemple/runite/issues/53))
+
 - The inherent `read`/`write`-family methods on `File`, `TcpStream` and
   `UnixStream` are removed in favour of `AsyncReadExt`, `AsyncWriteExt` and
   `AsyncSeekExt`. `File` had eight of them, `TcpStream` four, `UnixStream`

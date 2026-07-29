@@ -64,11 +64,22 @@ let mut file = runite::fs::File::open("input.txt").await?;
 file.read_to_end(&mut bytes).await?;   // unchanged
 ```
 
+This also covers `Stdin::read`, `Stdout::write` and `Stderr::write`.
+
 The affected names are `read`, `read_exact`, `read_to_end`, `read_to_string`,
 `write`, `write_all`, `flush` and `seek`. **Behaviour is unchanged** — the
 inherent bodies were thin wrappers over the same `poll_read` and
 `poll_write_operation` paths the traits use, so cancel safety and
 write-operation identity are exactly as documented before.
+
+One behaviour change rides along, on stdin only. `Stdin::read` used to discard
+its pending operation and unregister its waiter when cancelled, while the
+`AsyncRead` path kept both — so the two disagreed, and only one matched the
+documentation. They now share one path, and retention is the contract: a
+cancelled stdin read leaves its operation for the next read to claim, exactly
+as `File`, `TcpStream` and `UnixStream` already behaved. Buffered input was
+preserved under either rule, so this is visible only to code inspecting waiter
+registration.
 
 The **positional** methods are unaffected and stay inherent: `read_at`,
 `read_exact_at`, `write_at`, and `write_all_at` take an explicit offset and

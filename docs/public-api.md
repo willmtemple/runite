@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 990 | 1010 | 1029 | 1049 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 990 | 1010 | 1029 | 1049 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 990 | 1010 | 1029 | 1049 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 890 | 904 | 929 | 943 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 985 | 1005 | 1024 | 1044 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 985 | 1005 | 1024 | 1044 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 985 | 1005 | 1024 | 1044 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 885 | 899 | 924 | 938 | 68 |
 
-Portable default items: **822**
+Portable default items: **817**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **822**
 
 ## Portable default surface
 
-Items: **822**
+Items: **817**
 
 ### `runite`
 
@@ -768,13 +768,8 @@ pub mod runite::signal
 
 ```rust
 impl core::ops::drop::Drop for runite::stdio::Stdin
-impl runite::stdio::Stderr
 impl runite::stdio::Stdin
-impl runite::stdio::Stdout
-pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::stdio::Stdin::next_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
-pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
-pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stderr::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
