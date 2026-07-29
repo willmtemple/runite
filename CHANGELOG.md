@@ -56,6 +56,17 @@ changes.
   frequent signal cannot starve the others.
   ([#45](https://github.com/willmtemple/runite/issues/45))
 
+- `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
+  iteration of the event loop, readable from a task poll or a microtask
+  callback and `None` outside a turn. A consumer with its own diagnostics
+  stamps its records with it and joins on equality, so a reactive flush and the
+  runtime turn that drove it become the same row rather than two entries
+  correlated by wall-clock order. Every entry point that drives the loop
+  produces turns, including `run_until_stalled` and `run_ready_tasks`, so a
+  host embedding the runtime sees them too. The identifier carries no
+  information about what the turn did; per-turn statistics belong to
+  [#43](https://github.com/willmtemple/runite/issues/43).
+  ([#52](https://github.com/willmtemple/runite/issues/52))
 - `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
   existed only as an inherent method on `File`. Validation happens once at end
   of input rather than per chunk, so a multi-byte character split across two

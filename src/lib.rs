@@ -222,7 +222,7 @@ mod runtime_api {
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
     pub use crate::platform::current::runtime::{
-        AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+        AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, TurnId,
         WorkerHandle, YieldNow, yield_now,
     };
     pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
@@ -485,6 +485,52 @@ mod runtime_api {
     /// called while this thread is already driving the runtime.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
+    }
+
+    /// Returns the identifier of the event-loop turn currently being driven.
+    ///
+    /// A **turn** is one iteration of the loop: drain driver events, drain
+    /// remote tasks, flush completed workers, run every microtask to
+    /// quiescence, then run at most one macrotask. [`TurnId`] is a stable,
+    /// process-wide, monotonically increasing key for that iteration. It is
+    /// never reused.
+    ///
+    /// This exists so a consumer with its own diagnostics can join its records
+    /// against the runtime's: stamp your record with the turn it happened in
+    /// and match on equality afterwards. A reactive layer that flushes during
+    /// the microtask checkpoint, for example, can tag that flush and know
+    /// exactly which turn drove it — rather than guessing from wall-clock
+    /// order across two separate captures.
+    ///
+    /// Returns `None` when the calling thread is not inside a turn: outside
+    /// the loop entirely, or on a thread that is not a runtime thread.
+    /// Every entry point that drives the loop produces turns —
+    /// [`run`](Self::run), [`block_on`](Self::block_on),
+    /// [`run_until_stalled`](Self::run_until_stalled), and
+    /// [`run_ready_tasks`](Self::run_ready_tasks) — so a host embedding the
+    /// runtime sees them too.
+    ///
+    /// The value carries no information about what the turn did; it is only a
+    /// key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    ///
+    /// assert!(runite::current_turn().is_none(), "not in a turn yet");
+    ///
+    /// let seen = Rc::new(Cell::new(None));
+    /// let recorder = Rc::clone(&seen);
+    /// runite::queue_microtask(move || recorder.set(runite::current_turn()));
+    /// runite::run();
+    ///
+    /// assert!(seen.get().is_some(), "a microtask runs inside a turn");
+    /// assert!(runite::current_turn().is_none(), "and the turn ends with the loop");
+    /// ```
+    pub fn current_turn() -> Option<TurnId> {
+        imp::current_turn()
     }
 
     /// Runs only the tasks and microtasks that are ready right now, then returns.

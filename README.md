@@ -98,7 +98,8 @@ fn main() {
 - **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`),
   `#[runite::test]`, and `block_on` for driving one future to completion.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
-  `queue_microtask`, `spawn`, `yield_now`.
+  `queue_microtask`, `spawn`, `yield_now`, and `current_turn` for a key that joins
+  your own diagnostics to the loop iteration that produced them.
 - **Workers:** `spawn_worker`, nonblocking `WorkerHandle::join`, and the
   `Send`-only cross-thread `ThreadHandle::queue_macrotask`.
 - **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;

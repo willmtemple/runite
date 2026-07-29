@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 987 | 1007 | 1026 | 1046 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 987 | 1007 | 1026 | 1046 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 987 | 1007 | 1026 | 1046 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 887 | 901 | 926 | 940 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 989 | 1009 | 1028 | 1048 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 989 | 1009 | 1028 | 1048 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 989 | 1009 | 1028 | 1048 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 889 | 903 | 928 | 942 | 68 |
 
-Portable default items: **819**
+Portable default items: **821**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **819**
 
 ## Portable default surface
 
-Items: **819**
+Items: **821**
 
 ### `runite`
 
@@ -73,6 +73,7 @@ pub fn runite::JoinError::is_cancelled(&self) -> bool
 pub fn runite::JoinError::is_panicked(&self) -> bool
 pub fn runite::block_on<F>(F) -> <F as core::future::future::Future>::Output where F: core::future::future::Future
 pub fn runite::current_thread_handle() -> ThreadHandle
+pub fn runite::current_turn() -> core::option::Option<TurnId>
 pub fn runite::queue_macrotask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::queue_microtask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::run()
@@ -101,6 +102,7 @@ pub use runite::JoinHandle
 pub use runite::QueueError
 pub use runite::ThreadHandle
 pub use runite::TimeoutHandle
+pub use runite::TurnId
 pub use runite::WorkerHandle
 pub use runite::WorkerJoin
 pub use runite::WorkerJoinError

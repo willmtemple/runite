@@ -149,6 +149,29 @@ not allocate or take locks. Returning `Err` aborts the spawn.
 Together with the previous item, this is enough to start a shell on a
 pseudoterminal without `std::process`.
 
+### A key that joins your diagnostics to the runtime's
+
+`runite::current_turn()` returns a `TurnId` for the event-loop iteration
+currently being driven, or `None` outside one. It exists so a layer with its
+own instrumentation can line its records up with the runtime's without
+guessing from timestamps:
+
+```rust
+// Stamp your own record with the turn that produced it.
+let record = FlushRecord {
+    turn: runite::current_turn(),
+    effects_run,
+};
+```
+
+A turn is one pass of the loop: drain driver events, drain remote tasks, flush
+completed workers, run every microtask to quiescence, then run at most one
+macrotask. So a reactive flush — which happens in the microtask checkpoint —
+belongs to exactly one turn, and the join is structural rather than
+approximate.
+
+`TurnId` is opaque and comparable; identifiers increase and are never reused.
+
 ### Watching several signal kinds on one stream
 
 `signal::unix::signals` replaces the one-task-per-kind shape:

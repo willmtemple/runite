@@ -11,7 +11,7 @@ use std::future::Future;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -483,6 +483,9 @@ pub fn run<R: Runtime>() {
     );
 
     loop {
+        // One iteration of this loop is one turn.
+        let _turn = TurnGuard::begin();
+
         drain_all::<R>();
 
         drain_microtasks::<R>();
@@ -589,6 +592,9 @@ pub fn run_until_stalled<R: Runtime>() {
     let _event_loop = EventLoopGuard::enter();
 
     loop {
+        // One iteration of this loop is one turn.
+        let _turn = TurnGuard::begin();
+
         drain_all::<R>();
 
         drain_microtasks::<R>();
@@ -621,6 +627,9 @@ pub fn run_ready_tasks<R: Runtime>() {
     let _event_loop = EventLoopGuard::enter();
 
     loop {
+        // One iteration of this loop is one turn.
+        let _turn = TurnGuard::begin();
+
         drain_remote_tasks::<R>();
         drain_completed_workers::<R>();
 
@@ -675,6 +684,9 @@ pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
     let mut future = core::pin::pin!(future);
 
     loop {
+        // One iteration of this loop is one turn.
+        let _turn = TurnGuard::begin();
+
         // Poll the top-level future whenever it may have made progress.
         if block_waker.woken.swap(false, Ordering::AcqRel)
             && let Poll::Ready(output) = future.as_mut().poll(&mut context)
@@ -822,6 +834,56 @@ fn run_guarded(task: LocalTask) {
 /// scheduling state, so it is rejected up front. The panic is subject to the
 /// per-task firewall, so a task that illegally re-enters resolves to
 /// `JoinError::Panicked` rather than taking down the outer loop.
+/// Process-wide source of turn identifiers.
+///
+/// Starts at 1 so a zero value can never be mistaken for a real turn. One
+/// relaxed increment per *turn* — not per task, not per microtask — which is
+/// far below the cost of the driver drain that opens the same turn.
+static NEXT_TURN: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static CURRENT_TURN: std::cell::Cell<Option<TurnId>> = const { std::cell::Cell::new(None) };
+}
+
+/// Identifies one turn of an event loop.
+///
+/// See [`crate::current_turn`]. Deliberately opaque: consumers join records on
+/// equality, and keeping the numbering scheme private leaves it changeable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TurnId(u64);
+
+impl std::fmt::Display for TurnId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// Returns the identifier of the turn currently being driven, if any.
+pub fn current_turn() -> Option<TurnId> {
+    CURRENT_TURN.with(std::cell::Cell::get)
+}
+
+/// Marks one iteration of an event loop as a turn.
+///
+/// Restores the previous value rather than clearing, so the mechanism does not
+/// depend on `EventLoopGuard`'s non-reentrancy assertion staying in place.
+struct TurnGuard(Option<TurnId>);
+
+impl TurnGuard {
+    fn begin() -> Self {
+        let previous = CURRENT_TURN.with(std::cell::Cell::get);
+        let id = TurnId(NEXT_TURN.fetch_add(1, Ordering::Relaxed));
+        CURRENT_TURN.with(|current| current.set(Some(id)));
+        Self(previous)
+    }
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        CURRENT_TURN.with(|current| current.set(self.0));
+    }
+}
+
 struct EventLoopGuard;
 
 impl EventLoopGuard {

@@ -137,6 +137,16 @@ reach an after-the-loop check. A long checkpoint with nothing queued behind it s
 warns nothing. Implemented by `drain_all()`, `drain_microtasks()`, and the single
 `pop_macrotask()` per turn (`src/platform/runtime_shared/scheduler.rs`).
 
+Each iteration of that loop is identified by a `TurnId`, readable from inside it with
+`current_turn()`. The counter is a process-wide relaxed `fetch_add` taken once per turn — not per
+task or per microtask — so it is far cheaper than the driver drain that opens the same turn, and
+identifiers do not collide between runtime threads. Being globally unique matters more than being
+dense: a consumer merging several threads into one profile joins on equality, and a per-thread
+counter would force it to carry a thread identity alongside. All four entry points (`run`,
+`block_on`, `run_until_stalled`, `run_ready_tasks`) drive turns, since a host embedding the runtime
+through the latter two needs the key as much as `run` does. The identifier is deliberately opaque
+and carries nothing about what the turn did.
+
 Why this shape exists:
 
 - It gives a deterministic flush point between input handling and rendering.
