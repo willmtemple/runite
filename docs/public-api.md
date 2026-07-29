@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1122 | 1142 | 1165 | 1185 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1122 | 1142 | 1165 | 1185 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1122 | 1142 | 1165 | 1185 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1026 | 1040 | 1069 | 1083 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1132 | 1152 | 1175 | 1195 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1132 | 1152 | 1175 | 1195 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1132 | 1152 | 1175 | 1195 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1036 | 1050 | 1079 | 1093 | 72 |
 
-Portable default items: **954**
+Portable default items: **964**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **954**
 
 ## Portable default surface
 
-Items: **954**
+Items: **964**
 
 ### `runite`
 
@@ -662,15 +662,25 @@ pub use runite::io::SeekFrom
 ### `runite::metrics`
 
 ```rust
+#[non_exhaustive] pub struct runite::metrics::Counters
 #[non_exhaustive] pub struct runite::metrics::Gauges
-pub fn runite::metrics::snapshot() -> runite::metrics::Gauges
+#[non_exhaustive] pub struct runite::metrics::Snapshot
+pub fn runite::metrics::snapshot() -> runite::metrics::Snapshot
 pub mod runite::metrics
+pub runite::metrics::Counters::macrotasks_run: u64
+pub runite::metrics::Counters::microtasks_run: u64
+pub runite::metrics::Counters::remote_tasks_rejected: u64
+pub runite::metrics::Counters::task_polls: u64
+pub runite::metrics::Counters::task_wakes: u64
+pub runite::metrics::Counters::turns: u64
 pub runite::metrics::Gauges::armed_timers: usize
 pub runite::metrics::Gauges::live_tasks: usize
 pub runite::metrics::Gauges::local_macrotask_queue_depth: usize
 pub runite::metrics::Gauges::microtask_queue_depth: usize
 pub runite::metrics::Gauges::outstanding_operations: usize
 pub runite::metrics::Gauges::remote_macrotask_queue_depth: usize
+pub runite::metrics::Snapshot::counters: runite::metrics::Counters
+pub runite::metrics::Snapshot::gauges: runite::metrics::Gauges
 ```
 
 ### `runite::net`

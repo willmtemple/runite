@@ -22,8 +22,8 @@ use super::handles::{
     YieldNow,
 };
 use super::state::{
-    ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, describe_panic,
-    install_thread, lock_queue, thread_teardown_guard, try_ensure_current_thread,
+    ChildWorker, IntervalEntry, MacroTask, RuntimeCounters, ThreadShared, WorkerCompletion,
+    describe_panic, install_thread, lock_queue, thread_teardown_guard, try_ensure_current_thread,
     try_with_installed_thread, with_current_thread, with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
@@ -780,6 +780,9 @@ fn drain_microtasks<R: Runtime>() {
     while let Some(task) = pop_microtask() {
         run_guarded(task);
         microtasks_run += 1;
+        with_installed_thread(|state| {
+            RuntimeCounters::bump(&state.shared.counters.microtasks_run);
+        });
         if !warned
             && microtasks_run.is_multiple_of(MICROTASK_STARVATION_THRESHOLD)
             && macrotask_waiting::<R>()
@@ -886,6 +889,11 @@ struct TurnGuard(Option<TurnId>);
 impl TurnGuard {
     fn begin() -> Self {
         let previous = CURRENT_TURN.with(std::cell::Cell::get);
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                RuntimeCounters::bump(&state.shared.counters.turns);
+            }
+        });
         let id = TurnId(NEXT_TURN.fetch_add(1, Ordering::Relaxed));
         CURRENT_TURN.with(|current| current.set(Some(id)));
         Self(previous)
@@ -1080,6 +1088,9 @@ fn pop_microtask() -> Option<LocalTask> {
 
 fn pop_macrotask<R: Runtime>() -> Option<LocalTask> {
     let entry = with_installed_thread(|state| state.local_macrotasks.borrow_mut().pop_front())?;
+    with_installed_thread(|state| {
+        RuntimeCounters::bump(&state.shared.counters.macrotasks_run);
+    });
     #[cfg(debug_assertions)]
     {
         let now = deadline_from_now::<R>(Duration::ZERO);

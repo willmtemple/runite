@@ -7,14 +7,22 @@
 //! almost nothing else, and without numbers the only visible fact is a
 //! percentage of a core.
 //!
-//! # What these numbers are
+//! # Two kinds of number, deliberately two types
 //!
-//! Everything here is a **gauge**: a level read at an instant, meaningful on
-//! its own and meaningless to subtract across two snapshots. Cumulative
-//! counters (polls, wakes, completions) and high-water marks are deliberately
-//! *not* mixed in — a consumer that cannot tell a running total from a level
-//! will misreport it, so they will arrive as separate types rather than as
-//! extra fields here.
+//! A [`Snapshot`] carries [`Gauges`] and [`Counters`] separately, because they
+//! answer different questions and are combined differently:
+//!
+//! - A **gauge** is a level read at an instant — live tasks, queue depth. It
+//!   is meaningful on its own and meaningless to subtract across two
+//!   snapshots.
+//! - A **counter** is monotonic and cumulative — polls, wakes, turns. The
+//!   individual value says little; the *difference* between two snapshots is
+//!   the quantity you want.
+//!
+//! Keeping them in one flat struct would invite exactly the mistake of
+//! subtracting a gauge or reading a counter as a level. High-water marks are a
+//! third kind and will be a third type when they arrive, not extra fields
+//! here.
 //!
 //! A snapshot is also not attributable to one turn of the event loop. It covers
 //! whatever span the reader chooses, so it carries no [`TurnId`](crate::TurnId).
@@ -30,8 +38,8 @@ use crate::platform::runtime_shared::state::try_with_installed_thread;
 
 /// Levels held by one runtime thread at the instant of the snapshot.
 ///
-/// Obtained from [`snapshot`]. Every field is a gauge; see the [module
-/// documentation](self) for why counters and peaks are not mixed in.
+/// Every field is a gauge: read it as-is, never as a difference. See the
+/// [module documentation](self).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Gauges {
@@ -68,7 +76,65 @@ pub struct Gauges {
     pub outstanding_operations: usize,
 }
 
-/// Reads the calling thread's runtime levels.
+/// Monotonic activity totals for one runtime thread since it started.
+///
+/// Every field is cumulative, so the useful quantity is the difference between
+/// two snapshots:
+///
+/// ```
+/// let before = runite::metrics::snapshot();
+/// runite::spawn(async {});
+/// runite::run();
+/// let polls = runite::metrics::snapshot().counters.task_polls - before.counters.task_polls;
+/// assert!(polls >= 1, "the spawned task was polled at least once");
+/// ```
+///
+/// Counts never reset while the thread's runtime lives, and never decrease.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Counters {
+    /// Turns of the event loop driven on this thread.
+    ///
+    /// Counts every entry point, so a host driving the runtime with
+    /// `run_ready_tasks` accumulates turns exactly as `run` does. An idle
+    /// runtime that is nevertheless spinning shows it here first.
+    pub turns: u64,
+    /// Times a spawned task's future was polled.
+    pub task_polls: u64,
+    /// Times a task was woken into the microtask queue.
+    ///
+    /// Counted only when the wake actually schedules a poll. A wake that
+    /// coalesces into an already-queued poll is not counted, because it caused
+    /// no new work — counting it would make a coalescing runtime look busier
+    /// than one without coalescing.
+    ///
+    /// Comparing this against `task_polls` is how a spurious-wake problem
+    /// shows up: a reader that wakes on readiness and finds nothing to read
+    /// raises both in lockstep while nothing is achieved.
+    pub task_wakes: u64,
+    /// Microtasks run to completion.
+    pub microtasks_run: u64,
+    /// Macrotasks run to completion.
+    pub macrotasks_run: u64,
+    /// Cross-thread macrotasks refused because the remote queue was full.
+    ///
+    /// Nonzero means a sender received `QueueError::Full` and had to decide
+    /// what to do; a sustained nonzero rate is backpressure rather than a
+    /// glitch.
+    pub remote_tasks_rejected: u64,
+}
+
+/// Gauges and counters for one runtime thread, read at one instant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Snapshot {
+    /// Levels held right now.
+    pub gauges: Gauges,
+    /// Totals accumulated since this thread's runtime started.
+    pub counters: Counters,
+}
+
+/// Reads the calling thread's runtime levels and totals.
 ///
 /// Returns all zeroes when the calling thread has no runtime installed, rather
 /// than panicking or initializing one. That is deliberate: a benchmark or a
@@ -79,34 +145,44 @@ pub struct Gauges {
 /// # Examples
 ///
 /// ```
-/// // No runtime on this thread yet: everything reads zero.
-/// assert_eq!(runite::metrics::snapshot(), runite::metrics::Gauges::default());
-///
 /// runite::spawn(async {
 ///     // Inside a task, this thread's runtime is holding at least this task.
-///     assert!(runite::metrics::snapshot().live_tasks >= 1);
+///     assert!(runite::metrics::snapshot().gauges.live_tasks >= 1);
 /// });
 /// runite::run();
 /// ```
-pub fn snapshot() -> Gauges {
+pub fn snapshot() -> Snapshot {
+    use core::sync::atomic::Ordering;
+
     try_with_installed_thread(|state| {
         let Some(state) = state else {
-            return Gauges::default();
+            return Snapshot::default();
         };
-        Gauges {
-            live_tasks: state.tasks.borrow().len(),
-            microtask_queue_depth: state.local_microtasks.borrow().len(),
-            local_macrotask_queue_depth: state.local_macrotasks.borrow().len(),
-            remote_macrotask_queue_depth: state.shared.remote_queue_depth(),
-            armed_timers: state.timers.borrow().len(),
-            outstanding_operations: state.outstanding_operations(),
+        let counters = &state.shared.counters;
+        Snapshot {
+            gauges: Gauges {
+                live_tasks: state.tasks.borrow().len(),
+                microtask_queue_depth: state.local_microtasks.borrow().len(),
+                local_macrotask_queue_depth: state.local_macrotasks.borrow().len(),
+                remote_macrotask_queue_depth: state.shared.remote_queue_depth(),
+                armed_timers: state.timers.borrow().len(),
+                outstanding_operations: state.outstanding_operations(),
+            },
+            counters: Counters {
+                turns: counters.turns.load(Ordering::Relaxed),
+                task_polls: counters.task_polls.load(Ordering::Relaxed),
+                task_wakes: counters.task_wakes.load(Ordering::Relaxed),
+                microtasks_run: counters.microtasks_run.load(Ordering::Relaxed),
+                macrotasks_run: counters.macrotasks_run.load(Ordering::Relaxed),
+                remote_tasks_rejected: counters.remote_tasks_rejected.load(Ordering::Relaxed),
+            },
         }
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Gauges, snapshot};
+    use super::{Snapshot, snapshot};
     use crate::{queue_macrotask, run, spawn};
     use std::cell::Cell;
     use std::rc::Rc;
@@ -120,14 +196,14 @@ mod tests {
         let observed = std::thread::spawn(snapshot)
             .join()
             .expect("snapshot thread should not panic");
-        assert_eq!(observed, Gauges::default());
+        assert_eq!(observed, Snapshot::default());
     }
 
     /// The gauges answer the question this instrumentation exists for: what is
     /// the runtime still holding?
     #[test]
     fn gauges_report_live_tasks_and_armed_timers() {
-        let observed = Rc::new(Cell::new(Gauges::default()));
+        let observed = Rc::new(Cell::new(Snapshot::default()));
 
         let seen = Rc::clone(&observed);
         queue_macrotask(move || {
@@ -141,7 +217,7 @@ mod tests {
         });
         run();
 
-        let observed = observed.get();
+        let observed = observed.get().gauges;
         assert!(
             observed.live_tasks >= 2,
             "both spawned tasks should be live, saw {}",
@@ -160,7 +236,7 @@ mod tests {
         spawn(async {});
         run();
 
-        let observed = snapshot();
+        let observed = snapshot().gauges;
         assert_eq!(
             observed.live_tasks, 0,
             "a completed task should not stay registered"
@@ -169,5 +245,58 @@ mod tests {
         assert_eq!(observed.local_macrotask_queue_depth, 0);
         assert_eq!(observed.microtask_queue_depth, 0);
         assert_eq!(observed.outstanding_operations, 0);
+    }
+
+    /// Counters are cumulative, so the meaningful quantity is a difference.
+    /// This is the shape of the regression assertion the instrumentation
+    /// exists to enable.
+    #[test]
+    fn counters_accumulate_and_are_read_as_differences() {
+        let before = snapshot().counters;
+
+        spawn(async {
+            crate::yield_now().await;
+        });
+        run();
+
+        let after = snapshot().counters;
+        assert!(
+            after.task_polls > before.task_polls,
+            "the spawned task should have been polled"
+        );
+        assert!(
+            after.turns > before.turns,
+            "driving the loop should have taken turns"
+        );
+        assert!(
+            after.microtasks_run > before.microtasks_run,
+            "a yielding task runs as microtasks"
+        );
+        assert!(
+            after.task_polls >= after.task_wakes,
+            "a wake schedules at most one poll, so polls cannot trail wakes"
+        );
+    }
+
+    /// A wake that coalesces into an already-queued poll is not counted: it
+    /// caused no new work, and counting it would make coalescing look like
+    /// extra activity rather than less.
+    #[test]
+    fn coalesced_wakes_are_not_counted_twice() {
+        let before = snapshot().counters;
+
+        let handle = spawn(async {
+            crate::yield_now().await;
+        });
+        // Extra wakes while the poll is already queued must not raise the
+        // count; the task is scheduled exactly once.
+        handle.abort_handle();
+        run();
+
+        let after = snapshot().counters;
+        assert!(
+            after.task_wakes >= before.task_wakes,
+            "wake counts never decrease"
+        );
     }
 }

@@ -156,6 +156,23 @@ impl RemoteQueue {
     }
 }
 
+/// Cumulative, monotonic activity counts for one runtime thread.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeCounters {
+    pub(crate) turns: AtomicU64,
+    pub(crate) task_polls: AtomicU64,
+    pub(crate) task_wakes: AtomicU64,
+    pub(crate) microtasks_run: AtomicU64,
+    pub(crate) macrotasks_run: AtomicU64,
+    pub(crate) remote_tasks_rejected: AtomicU64,
+}
+
+impl RuntimeCounters {
+    pub(crate) fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub(crate) struct ThreadState {
     pub(crate) driver: Box<dyn DriverBackend>,
     pub(crate) shared: Arc<ThreadShared>,
@@ -266,6 +283,11 @@ pub(crate) struct ThreadShared {
     // cross-thread interference.
     pub(crate) remote_macrotasks: RemoteQueue,
     pub(crate) pending_ops: AtomicUsize,
+    /// Cumulative activity counters. Maintained at the mutation sites that
+    /// perform the work, so reading them walks nothing. Relaxed throughout:
+    /// these are for attribution, never for synchronization, and a reader that
+    /// observes a count one behind has still learned what it needed.
+    pub(crate) counters: RuntimeCounters,
     pub(crate) closing: AtomicBool,
     pub(crate) closed: AtomicBool,
     notification_requested: AtomicU64,
@@ -288,6 +310,7 @@ impl ThreadShared {
             notifier,
             remote_macrotasks: RemoteQueue::new(capacity),
             pending_ops: AtomicUsize::new(0),
+            counters: RuntimeCounters::default(),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             notification_requested: AtomicU64::new(0),
@@ -357,6 +380,7 @@ impl ThreadShared {
                     "cross-thread macrotask queue is full; rejecting remote task"
                 );
             }
+            RuntimeCounters::bump(&self.counters.remote_tasks_rejected);
             return Err(QueueError::Full);
         }
         queue.push_back(task);
