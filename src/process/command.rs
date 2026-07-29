@@ -444,8 +444,25 @@ impl Command {
     /// corresponding field on the returned [`Child`] contains an async pipe.
     /// When stdin is inherited, runite's process-wide stdin reader is paused
     /// until the child's exit is observed or the returned handle is dropped.
-    /// On Windows, spawning returns [`io::ErrorKind::WouldBlock`] if a console
-    /// stdin read is already active and therefore cannot be handed off safely.
+    ///
+    /// # Blocking
+    ///
+    /// `spawn` is synchronous and runs on the calling runtime thread. With
+    /// inherited stdin it waits for the process-wide reader to release the
+    /// terminal, which normally takes microseconds — an interrupt releases a
+    /// reader parked in `poll`. It cannot un-issue a `read(2)` the reader has
+    /// already entered, though, and on an interactive terminal that read
+    /// returns only when the user types something. The wait is therefore
+    /// bounded: past that bound `spawn` reports
+    /// [`io::ErrorKind::WouldBlock`] rather than stalling the event loop
+    /// indefinitely, and the caller may retry.
+    ///
+    /// Windows reports the same error immediately rather than waiting, because
+    /// a console read there cannot be interrupted at all.
+    ///
+    /// To keep the event loop free of this entirely, configure stdin with
+    /// [`Stdio::null`] or [`Stdio::piped`], or spawn from
+    /// [`spawn_blocking`](crate::spawn_blocking).
     ///
     /// # Examples
     ///

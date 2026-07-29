@@ -91,6 +91,16 @@ changes.
 
 ### Fixed
 
+- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
+  is inherited. It waits for the process-wide stdin reader to release the
+  terminal, and that wait was unbounded — an interrupt frees a reader parked in
+  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
+  on an interactive terminal returns only when the user types. Spawning a child
+  could therefore hang the whole event loop until a keypress. The wait is now
+  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
+  Windows already did, and the caller may retry.
+  ([#28](https://github.com/willmtemple/runite/issues/28))
+
 - `watch::Sender::send` could report success with no receivers. It checked the
   receiver count under the book lock, released it, then wrote the value, so the
   last `Receiver` dropping in that window left `send` consuming the value,
@@ -100,6 +110,19 @@ changes.
   after both locks are released: dropping it in place would run user code under
   the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
   ([#26](https://github.com/willmtemple/runite/issues/26))
+
+### Documented
+
+- `ChildStdin`'s close can deadlock against a child waiting for end of input,
+  and the hazard is now on the type rather than absent. Because `poll_close`
+  drains pending writes first, a write cancelled with the pipe buffer full
+  cannot complete while the child will not read again until it sees EOF — so
+  the close waits for the write, the write waits for the child, and the child
+  waits for the close. This is inherent to "close flushes what you already
+  wrote"; a bounded drain would replace a visible hang with silent truncation
+  the caller cannot detect. Dropping the handle closes immediately and abandons
+  the pending write, and is now documented as the escape, with a test pinning
+  it. ([#27](https://github.com/willmtemple/runite/issues/27))
 
 ### Changed
 
