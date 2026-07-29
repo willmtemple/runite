@@ -5,13 +5,18 @@ mod common;
 use common::block_on;
 use runite::io::CloseOutcome;
 
+/// Paths for these tests live in the system temporary directory rather than
+/// under `target/`.
+///
+/// A Unix socket address is capped at roughly 108 bytes, and `target/` is
+/// nested arbitrarily deep — when the packaged crate is unpacked for
+/// verification it sits four directories down, which is enough to push a
+/// socket path over the limit and fail with "Unix socket path is too long".
+/// The names are kept short for the same reason.
 fn temp_path(label: &str) -> std::path::PathBuf {
-    let dir = std::env::current_dir()
-        .expect("current dir")
-        .join("target")
-        .join("runite-close-tests");
+    let dir = std::env::temp_dir().join("runite-cl");
     std::fs::create_dir_all(&dir).expect("create close test directory");
-    dir.join(format!("{label}-{}", std::process::id()))
+    dir.join(format!("{label}{}", std::process::id()))
 }
 
 /// The ordinary case: sole owner, so the descriptor is closed.
