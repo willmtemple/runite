@@ -771,8 +771,8 @@ impl runite::stdio::Stderr
 impl runite::stdio::Stdin
 impl runite::stdio::Stdout
 pub async fn runite::stdio::Stderr::write(&mut self, &[u8]) -> core::io::error::Result<usize>
+pub async fn runite::stdio::Stdin::next_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
 pub async fn runite::stdio::Stdin::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
-pub async fn runite::stdio::Stdin::read_line(&mut self) -> core::io::error::Result<core::option::Option<alloc::string::String>>
 pub async fn runite::stdio::Stdout::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub fn runite::stdio::Stderr::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
 pub fn runite::stdio::Stderr::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
@@ -798,7 +798,7 @@ pub struct runite::stdio::Stdout
 
 ```rust
 impl core::default::Default for runite::sync::Notify
-impl core::ops::drop::Drop for runite::sync::Permit<'_>
+impl core::ops::drop::Drop for runite::sync::SemaphorePermit<'_>
 impl runite::sync::Notify
 impl runite::sync::Semaphore
 impl<'a, T: ?core::marker::Sized> core::future::future::Future for runite::sync::RwLockReadFuture<'a, T>
@@ -822,7 +822,7 @@ impl<T> runite::sync::RwLock<T>
 pub async fn runite::sync::Mutex<T>::lock(&self) -> runite::sync::MutexGuard<'_, T>
 pub async fn runite::sync::Notify::notified(&self)
 pub async fn runite::sync::OnceCell<T>::get_or_init<F, Fut>(&self, F) -> &T where F: core::ops::function::FnOnce() -> Fut, Fut: core::future::future::Future<Output = T>
-pub async fn runite::sync::Semaphore::acquire(&self) -> runite::sync::Permit<'_>
+pub async fn runite::sync::Semaphore::acquire(&self) -> runite::sync::SemaphorePermit<'_>
 pub fn runite::sync::Mutex<T>::new(T) -> Self
 pub fn runite::sync::Mutex<T>::try_lock(&self) -> core::option::Option<runite::sync::MutexGuard<'_, T>>
 pub fn runite::sync::MutexGuard<'_, T>::deref(&self) -> &Self::Target
@@ -835,7 +835,6 @@ pub fn runite::sync::Notify::notify_waiters(&self)
 pub fn runite::sync::OnceCell<T>::default() -> Self
 pub fn runite::sync::OnceCell<T>::get(&self) -> core::option::Option<&T>
 pub fn runite::sync::OnceCell<T>::new() -> Self
-pub fn runite::sync::Permit<'_>::drop(&mut self)
 pub fn runite::sync::RwLock<T>::get_mut(&mut self) -> &mut T
 pub fn runite::sync::RwLock<T>::into_inner(self) -> T
 pub fn runite::sync::RwLock<T>::new(T) -> Self
@@ -853,19 +852,20 @@ pub fn runite::sync::RwLockWriteGuard<'_, T>::deref(&self) -> &Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::deref_mut(&mut self) -> &mut Self::Target
 pub fn runite::sync::RwLockWriteGuard<'_, T>::drop(&mut self)
 pub fn runite::sync::Semaphore::new(usize) -> Self
-pub fn runite::sync::Semaphore::try_acquire(&self) -> core::option::Option<runite::sync::Permit<'_>>
+pub fn runite::sync::Semaphore::try_acquire(&self) -> core::option::Option<runite::sync::SemaphorePermit<'_>>
+pub fn runite::sync::SemaphorePermit<'_>::drop(&mut self)
 pub mod runite::sync
 pub struct runite::sync::Mutex<T: ?core::marker::Sized>
 pub struct runite::sync::MutexGuard<'a, T: ?core::marker::Sized>
 pub struct runite::sync::Notify
 pub struct runite::sync::OnceCell<T>
-pub struct runite::sync::Permit<'a>
 pub struct runite::sync::RwLock<T: ?core::marker::Sized>
 pub struct runite::sync::RwLockReadFuture<'a, T: ?core::marker::Sized>
 pub struct runite::sync::RwLockReadGuard<'a, T: ?core::marker::Sized>
 pub struct runite::sync::RwLockWriteFuture<'a, T: ?core::marker::Sized>
 pub struct runite::sync::RwLockWriteGuard<'a, T: ?core::marker::Sized>
 pub struct runite::sync::Semaphore
+pub struct runite::sync::SemaphorePermit<'a>
 pub type runite::sync::MutexGuard<'_, T>::Target = T
 pub type runite::sync::RwLockReadFuture<'a, T>::Output = runite::sync::RwLockReadGuard<'a, T>
 pub type runite::sync::RwLockReadGuard<'_, T>::Target = T

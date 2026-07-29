@@ -18,6 +18,29 @@ runite = "0.3"
 
 This section covers changes the compiler will force you to make.
 
+### `sync::Permit` is now `sync::SemaphorePermit`
+
+A plain rename. It was the only guard in the crate without an owner prefix,
+beside `MutexGuard`, `RwLockReadGuard` and `RwLockWriteGuard`.
+
+### `Stdin::read_line` is now `Stdin::next_line`
+
+`Stdin::read_line` and `BufReader::read_line` shared a name while behaving
+differently in both signature and end-of-input convention:
+
+```rust
+// Allocates, returns the line, `None` at end of input.
+let line: Option<String> = stdin.read_line().await?;   // 0.2
+let line: Option<String> = stdin.next_line().await?;   // 0.3
+
+// Appends to your `String`, `Ok(0)` at end of input. Unchanged: this is the
+// `std` shape, so it keeps the `std` name.
+let read: usize = buf_reader.read_line(&mut line).await?;
+```
+
+Only the divergent one moved. Call sites need the new name; behaviour is
+identical.
+
 ### Inherent `read`/`write` methods moved to the extension traits
 
 `File`, `TcpStream` and `UnixStream` each carried inherent copies of methods the

@@ -82,6 +82,19 @@ changes.
 
 ### Breaking
 
+- `sync::Permit` is renamed `sync::SemaphorePermit`. It was the only guard type
+  in the crate without an owner prefix, beside `MutexGuard`,
+  `RwLockReadGuard` and `RwLockWriteGuard`.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
+
+- `Stdin::read_line` is renamed `Stdin::next_line`. It shared a name with
+  `BufReader::read_line` while having an incompatible signature and a different
+  end-of-input convention — one allocates and returns `Option<String>` with
+  `None` at end of input, the other appends to a caller-supplied `String` and
+  reports `Ok(0)`. `BufReader::read_line` keeps its name because it follows
+  `std`; the divergent one is the one that moved.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
+
 - The inherent `read`/`write`-family methods on `File`, `TcpStream` and
   `UnixStream` are removed in favour of `AsyncReadExt`, `AsyncWriteExt` and
   `AsyncSeekExt`. `File` had eight of them, `TcpStream` four, `UnixStream`

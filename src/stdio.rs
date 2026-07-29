@@ -137,7 +137,7 @@ impl Drop for InheritedStdinHandoff {
 ///
 /// Every handle shares the process-wide bounded stdin reader and implements
 /// [`AsyncRead`] for byte-oriented reads. It also provides
-/// [`read_line`](Self::read_line) for simple line-oriented input. The dedicated
+/// [`next_line`](Self::next_line) for simple line-oriented input. The dedicated
 /// reader thread owns the duplicated operating-system handle; `Stdin` itself
 /// contains no raw handle.
 ///
@@ -145,7 +145,7 @@ impl Drop for InheritedStdinHandoff {
 /// bytes exactly once; cancelling a pending read removes only that handle's
 /// waiter.
 ///
-/// `read_line` keeps partial lines on the handle but leaves bytes after a
+/// `next_line` keeps partial lines on the handle but leaves bytes after a
 /// newline in the shared process buffer.
 ///
 /// Create one with [`stdin`].
@@ -318,19 +318,26 @@ impl Stdin {
     /// Partial lines are retained across waits. Bytes following a newline stay
     /// in the process-wide buffer for another call or another handle.
     ///
+    /// Named `next_line` rather than `read_line` because it is not the `std`
+    /// shape: it allocates and returns the line, and reports end of input as
+    /// `None`. [`BufReader::read_line`](crate::io::BufReader::read_line)
+    /// follows `std` — it appends to a caller-supplied `String` and reports end
+    /// of input as `Ok(0)`. Two methods with one name and incompatible end-of-
+    /// input conventions in the same crate was a trap worth removing.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// runite::spawn(async {
     ///     let mut input = runite::stdin().expect("stdin should open");
-    ///     if let Some(line) = input.read_line().await.expect("stdin should read") {
+    ///     if let Some(line) = input.next_line().await.expect("stdin should read") {
     ///         eprintln!("line length: {}", line.len());
     ///     }
     /// });
     ///
     /// runite::run();
     /// ```
-    pub async fn read_line(&mut self) -> io::Result<Option<String>> {
+    pub async fn next_line(&mut self) -> io::Result<Option<String>> {
         loop {
             if let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
                 let line = self.buffer.drain(..=index).collect::<Vec<_>>();
@@ -1182,10 +1189,10 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_stdin_read_line_retains_its_partial_prefix() {
+    fn cancelled_stdin_next_line_retains_its_partial_prefix() {
         let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         write_test_pipe(&mut writer, b"par").expect("write partial line");
-        let mut pending = Box::pin(input.read_line());
+        let mut pending = Box::pin(input.next_line());
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut cx).is_pending());
         assert!(reader.wait_for_buffered(3, std::time::Duration::from_secs(5)));
@@ -1195,7 +1202,7 @@ mod tests {
 
         write_test_pipe(&mut writer, b"tial\n").expect("finish partial line");
         assert_eq!(
-            crate::block_on(input.read_line())
+            crate::block_on(input.next_line())
                 .expect("replacement line read")
                 .as_deref(),
             Some("partial\n")
@@ -1206,10 +1213,10 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_read_line_prefix_precedes_inherent_and_trait_reads() {
+    fn cancelled_next_line_prefix_precedes_inherent_and_trait_reads() {
         let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         write_test_pipe(&mut writer, b"prefix").expect("write partial line");
-        let mut pending = Box::pin(input.read_line());
+        let mut pending = Box::pin(input.next_line());
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut cx).is_pending());
         assert!(reader.wait_for_buffered(6, std::time::Duration::from_secs(5)));
@@ -1437,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn stdin_read_line_preserves_read_ahead_and_reports_invalid_utf8() {
+    fn stdin_next_line_preserves_read_ahead_and_reports_invalid_utf8() {
         let (mut first, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         let mut second = Stdin::from_reader(Arc::clone(&reader));
         write_test_pipe(&mut writer, b"first\nsecond\nbad \xff\n").expect("write line input");
@@ -1445,16 +1452,16 @@ mod tests {
 
         crate::block_on(async {
             assert_eq!(
-                first.read_line().await.expect("first line").as_deref(),
+                first.next_line().await.expect("first line").as_deref(),
                 Some("first\n")
             );
             assert_eq!(
-                second.read_line().await.expect("second line").as_deref(),
+                second.next_line().await.expect("second line").as_deref(),
                 Some("second\n")
             );
             assert_eq!(
                 second
-                    .read_line()
+                    .next_line()
                     .await
                     .expect_err("invalid UTF-8 should fail")
                     .kind(),
@@ -1462,7 +1469,7 @@ mod tests {
             );
             assert!(
                 second
-                    .read_line()
+                    .next_line()
                     .await
                     .expect("EOF after bad line")
                     .is_none()

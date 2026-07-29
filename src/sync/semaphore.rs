@@ -15,7 +15,7 @@ struct Waiter {
 /// A single-threaded counting semaphore.
 ///
 /// A semaphore holds a number of permits. Each successful acquire removes one
-/// permit, and dropping the returned [`Permit`] releases it.
+/// permit, and dropping the returned [`SemaphorePermit`] releases it.
 ///
 /// # Differences from Tokio
 ///
@@ -74,7 +74,7 @@ pub struct Semaphore {
 ///
 /// Dropping a permit releases it back to the semaphore or hands it directly to
 /// the next queued waiter.
-pub struct Permit<'a> {
+pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     _not_send_sync: PhantomData<Rc<()>>,
 }
@@ -92,16 +92,16 @@ impl Semaphore {
 
     /// Waits until a permit is available and returns it.
     ///
-    /// Waiters are woken in FIFO order. Dropping the returned [`Permit`]
+    /// Waiters are woken in FIFO order. Dropping the returned [`SemaphorePermit`]
     /// releases it.
     ///
     /// # Cancellation
     ///
     /// Dropping the acquire future before it is selected removes it from the
     /// waiter queue. If it has already been selected but is dropped before
-    /// returning a [`Permit`], the permit is passed to the next waiter or
+    /// returning a [`SemaphorePermit`], the permit is passed to the next waiter or
     /// returned to the semaphore.
-    pub async fn acquire(&self) -> Permit<'_> {
+    pub async fn acquire(&self) -> SemaphorePermit<'_> {
         AcquireFuture::new(self).await
     }
 
@@ -109,7 +109,7 @@ impl Semaphore {
     ///
     /// Returns [`None`] if no permit is available or if queued waiters should
     /// receive future permits first.
-    pub fn try_acquire(&self) -> Option<Permit<'_>> {
+    pub fn try_acquire(&self) -> Option<SemaphorePermit<'_>> {
         if !self.waiters.borrow().is_empty() {
             return None;
         }
@@ -120,7 +120,7 @@ impl Semaphore {
         }
 
         self.permits.set(permits - 1);
-        Some(Permit {
+        Some(SemaphorePermit {
             semaphore: self,
             _not_send_sync: PhantomData,
         })
@@ -150,7 +150,7 @@ impl Semaphore {
     }
 }
 
-impl Drop for Permit<'_> {
+impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
         self.semaphore.release_to_next_waiter();
     }
@@ -173,7 +173,7 @@ impl<'a> AcquireFuture<'a> {
 }
 
 impl<'a> Future for AcquireFuture<'a> {
-    type Output = Permit<'a>;
+    type Output = SemaphorePermit<'a>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self
@@ -182,7 +182,7 @@ impl<'a> Future for AcquireFuture<'a> {
             .is_some_and(|(_, selected)| selected.get())
         {
             self.acquired = true;
-            return Poll::Ready(Permit {
+            return Poll::Ready(SemaphorePermit {
                 semaphore: self.semaphore,
                 _not_send_sync: PhantomData,
             });
@@ -194,7 +194,7 @@ impl<'a> Future for AcquireFuture<'a> {
         {
             self.semaphore.permits.set(self.semaphore.permits.get() - 1);
             self.acquired = true;
-            return Poll::Ready(Permit {
+            return Poll::Ready(SemaphorePermit {
                 semaphore: self.semaphore,
                 _not_send_sync: PhantomData,
             });
