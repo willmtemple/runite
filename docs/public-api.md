@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1099 | 1119 | 1142 | 1162 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1099 | 1119 | 1142 | 1162 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1099 | 1119 | 1142 | 1162 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1003 | 1017 | 1046 | 1060 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1100 | 1120 | 1143 | 1163 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1100 | 1120 | 1143 | 1163 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1100 | 1120 | 1143 | 1163 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1004 | 1018 | 1047 | 1061 | 72 |
 
-Portable default items: **931**
+Portable default items: **932**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **931**
 
 ## Portable default surface
 
-Items: **931**
+Items: **932**
 
 ### `runite`
 
@@ -997,6 +997,7 @@ pub fn runite::task::JoinSet<T>::join_next(&mut self) -> impl core::future::futu
 pub fn runite::task::JoinSet<T>::len(&self) -> usize
 pub fn runite::task::JoinSet<T>::new() -> Self
 pub fn runite::task::JoinSet<T>::spawn<F>(&mut self, F) where F: core::future::future::Future<Output = T> + 'static, T: 'static
+pub fn runite::task::is_retryable(&core::io::error::Error) -> bool
 pub fn runite::task::spawn_blocking<F, R>(F) -> core::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub mod runite::task
 pub runite::task::JoinError::Aborted

@@ -123,6 +123,14 @@ changes.
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
+  worth retrying: `true` only for a momentarily full queue, `false` for a
+  stopped or uncreatable pool. Deliberately takes `io::Error` rather than
+  introducing a dedicated error type — the kinds already carry the
+  distinction, and keeping `spawn_blocking` in `io::Result` lets it compose
+  with the rest of the crate without a conversion at every seam.
+  ([#46](https://github.com/willmtemple/runite/issues/46))
+
 - `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
   `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
   `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
