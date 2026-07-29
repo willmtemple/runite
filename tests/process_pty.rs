@@ -128,11 +128,23 @@ fn stdio_from_fd_puts_the_child_on_a_terminal() {
 ///
 /// Opening `/dev/tty` succeeds only for a process that has one, so writing
 /// through it is a direct test of the acquisition rather than of inheritance.
+///
+/// The controller is drained on a separate thread, concurrently with the
+/// child's exit, rather than after it. Because the child owns the pty as its
+/// controlling terminal, exit runs the terminal's teardown: a session leader's
+/// last close drains the output queue before the line is torn down, and that
+/// drain only advances while something reads the controller. Reading only after
+/// `wait` would wedge the child mid-exit and hang `wait` forever. The concurrent
+/// read is the correct pattern on every platform — Linux merely tolerates the
+/// after-the-fact read that BSD-derived kernels (including macOS) deadlock on.
 #[test]
 fn pre_exec_gives_the_child_a_controlling_terminal() {
     let (controller, user) = open_pty();
     let user_raw = user.as_raw_fd();
     let (child_in, child_out, child_err) = (dup(&user), dup(&user), dup(&user));
+
+    let controller_raw = controller.as_raw_fd();
+    let reader = std::thread::spawn(move || read_until(controller_raw, "HAS_CTTY"));
 
     let status = block_on(move || async move {
         let mut command = Command::new("sh");
@@ -150,7 +162,12 @@ fn pre_exec_gives_the_child_a_controlling_terminal() {
                 if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(user_raw, libc::TIOCSCTTY, 0) == -1 {
+                // `TIOCSCTTY` is `c_uint` on Apple but the request type
+                // (`c_ulong`) elsewhere, so `.into()` is a real widening on
+                // macOS and a no-op on Linux; let inference pick the target
+                // rather than hard-coding a type that breaks on musl.
+                #[allow(clippy::useless_conversion)]
+                if libc::ioctl(user_raw, libc::TIOCSCTTY.into(), 0) == -1 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
@@ -166,9 +183,10 @@ fn pre_exec_gives_the_child_a_controlling_terminal() {
         "writing to /dev/tty should succeed once the child owns the terminal"
     );
 
-    // Drained before the last user-side descriptor closes; see the note in
-    // `stdio_from_fd_puts_the_child_on_a_terminal`.
-    let output = read_until(controller.as_raw_fd(), "HAS_CTTY");
+    // The controller was drained on `reader` while the child exited; joining it
+    // collects what reached the controller. Keeping `user` open until here holds
+    // the line up so that read cannot race the teardown to end-of-input.
+    let output = reader.join().expect("controller reader should not panic");
     drop(user);
     assert!(
         output.contains("HAS_CTTY"),

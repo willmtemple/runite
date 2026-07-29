@@ -61,7 +61,7 @@ pub trait CommandExt {
     ///         if libc::setsid() == -1 {
     ///             return Err(std::io::Error::last_os_error());
     ///         }
-    ///         if libc::ioctl(raw, libc::TIOCSCTTY, 0) == -1 {
+    ///         if libc::ioctl(raw, libc::TIOCSCTTY.into(), 0) == -1 {
     ///             return Err(std::io::Error::last_os_error());
     ///         }
     ///         Ok(())
@@ -72,6 +72,18 @@ pub trait CommandExt {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Once the child owns the terminal this way, **read the controller
+    /// concurrently with the child's exit, not after it.** A session leader's
+    /// exit runs the terminal's teardown, which drains the pending output queue
+    /// before tearing the line down; on BSD-derived kernels (including macOS)
+    /// that drain blocks until something reads the controller. A parent that
+    /// [`waits`](crate::process::Child::wait) for the child before reading the
+    /// controller therefore deadlocks — the child cannot finish exiting until
+    /// its output is read, and the read never begins until the child exits.
+    /// Drive the controller read and the wait together, or drain the controller
+    /// on another thread. Linux tolerates reading afterward; the concurrent read
+    /// is correct everywhere.
     unsafe fn pre_exec(
         &mut self,
         hook: impl Fn() -> io::Result<()> + Send + Sync + 'static,
