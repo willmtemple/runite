@@ -90,6 +90,76 @@ fn microtask_drains_before_macrotask() {
     assert_eq!(order.as_slice(), ["microtask", "macrotask"]);
 }
 
+/// A microtask queued *from inside a macrotask* still runs before the next
+/// macrotask.
+///
+/// This is the invariant a fine-grained reactive layer batches on: it schedules
+/// one flush microtask while application code runs, and relies on that flush
+/// happening before anything else macro-scheduled can observe the graph. If a
+/// macrotask could slip in between, effect runs would interleave with unrelated
+/// work and a half-propagated graph would become observable.
+///
+/// The macrotask is the *last* phase of a turn, so the microtask it queues
+/// drains in the next turn's checkpoint — which is still before that turn's
+/// macrotask. The guarantee is about ordering, not about staying in one turn.
+#[test]
+fn a_microtask_queued_by_a_macrotask_beats_the_next_macrotask() {
+    let order = record_order(|order| {
+        let order = Rc::clone(order);
+        queue_macrotask(move || {
+            order.borrow_mut().push("first_macrotask");
+            {
+                let order = Rc::clone(&order);
+                queue_macrotask(move || order.borrow_mut().push("second_macrotask"));
+            }
+            {
+                let order = Rc::clone(&order);
+                queue_microtask(move || order.borrow_mut().push("microtask"));
+            }
+        });
+    });
+    assert_eq!(
+        order.as_slice(),
+        ["first_macrotask", "microtask", "second_macrotask"]
+    );
+}
+
+/// A microtask chain drains to quiescence within one checkpoint, so every
+/// microtask queued transitively still precedes the next macrotask.
+///
+/// A reactive flush that schedules further reactive work during the flush
+/// therefore completes before any macrotask observes the result.
+#[test]
+fn a_microtask_chain_completes_before_the_next_macrotask() {
+    let order = record_order(|order| {
+        let order = Rc::clone(order);
+        queue_macrotask(move || {
+            {
+                let order = Rc::clone(&order);
+                queue_macrotask(move || order.borrow_mut().push("macrotask"));
+            }
+
+            fn chain(order: Order, remaining: usize) {
+                order.borrow_mut().push("microtask");
+                if remaining > 0 {
+                    queue_microtask(move || chain(order, remaining - 1));
+                }
+            }
+            queue_microtask(move || chain(order, 3));
+        });
+    });
+    assert_eq!(
+        order.as_slice(),
+        [
+            "microtask",
+            "microtask",
+            "microtask",
+            "microtask",
+            "macrotask"
+        ]
+    );
+}
+
 #[test]
 fn yield_now_is_a_microtask_and_beats_a_pending_macrotask() {
     let order = record_order(|order| {
