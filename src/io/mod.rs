@@ -70,7 +70,7 @@ mod traits;
 pub use buf::{BufReader, BufWriter};
 pub use ext::{
     AsyncReadExt, AsyncSeekExt, AsyncWriteExt, Close, Copy, CopyBidirectional, Flush, Lines, Read,
-    ReadExact, ReadToEnd, ReadVectored, Seek, Write, WriteAll, WriteVectored, copy,
+    ReadExact, ReadToEnd, ReadToString, ReadVectored, Seek, Write, WriteAll, WriteVectored, copy,
     copy_bidirectional,
 };
 pub(crate) use pending::{

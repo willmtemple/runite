@@ -6,7 +6,7 @@ use std::io;
 use std::net::{Shutdown, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use crate::io::{AsyncWriteExt, next_operation_id};
+use crate::io::{AsyncReadExt, AsyncWriteExt, next_operation_id};
 use crate::{queue_macrotask, run, spawn};
 
 use super::{TcpListener, TcpStream};

@@ -18,6 +18,42 @@ runite = "0.3"
 
 This section covers changes the compiler will force you to make.
 
+### Inherent `read`/`write` methods moved to the extension traits
+
+`File`, `TcpStream` and `UnixStream` each carried inherent copies of methods the
+`AsyncReadExt`/`AsyncWriteExt`/`AsyncSeekExt` traits already provide — unevenly,
+so `ChildStdin`, `BufReader` and the owned split halves had none. Because
+inherent methods win name resolution, two identical-looking calls dispatched to
+different code depending on the concrete type, and turning a concrete type into
+a generic silently changed which implementation ran.
+
+The fix is an import:
+
+```rust
+// 0.2
+let mut file = runite::fs::File::open("input.txt").await?;
+file.read_to_end(&mut bytes).await?;
+
+// 0.3
+use runite::io::AsyncReadExt;          // add this
+
+let mut file = runite::fs::File::open("input.txt").await?;
+file.read_to_end(&mut bytes).await?;   // unchanged
+```
+
+The affected names are `read`, `read_exact`, `read_to_end`, `read_to_string`,
+`write`, `write_all`, `flush` and `seek`. **Behaviour is unchanged** — the
+inherent bodies were thin wrappers over the same `poll_read` and
+`poll_write_operation` paths the traits use, so cancel safety and
+write-operation identity are exactly as documented before.
+
+The **positional** methods are unaffected and stay inherent: `read_at`,
+`read_exact_at`, `write_at`, and `write_all_at` take an explicit offset and
+shadow nothing.
+
+`read_to_string` previously existed only on `File`; it is now on
+`AsyncReadExt`, so every reader has it.
+
 ### `net::unix::Incoming` lost its lifetime parameter
 
 `UnixListener::incoming()` used to borrow the listener, while the TCP

@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 996 | 1016 | 1035 | 1055 | 171 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 996 | 1016 | 1035 | 1055 | 171 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 996 | 1016 | 1035 | 1055 | 171 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 893 | 907 | 932 | 946 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 987 | 1007 | 1026 | 1046 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 987 | 1007 | 1026 | 1046 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 987 | 1007 | 1026 | 1046 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 887 | 901 | 926 | 940 | 68 |
 
-Portable default items: **825**
+Portable default items: **819**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **825**
 
 ## Portable default surface
 
-Items: **825**
+Items: **819**
 
 ### `runite`
 
@@ -288,22 +288,14 @@ impl runite::fs::OpenOptions
 impl runite::fs::ReadDir
 pub async fn runite::fs::DirEntry::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
 pub async fn runite::fs::File::create(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub async fn runite::fs::File::flush(&mut self) -> core::io::error::Result<()>
 pub async fn runite::fs::File::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
 pub async fn runite::fs::File::open(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub async fn runite::fs::File::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::fs::File::read_at(&self, u64, &mut [u8]) -> core::io::error::Result<usize>
-pub async fn runite::fs::File::read_exact(&mut self, &mut [u8]) -> core::io::error::Result<()>
 pub async fn runite::fs::File::read_exact_at(&self, u64, &mut [u8]) -> core::io::error::Result<()>
-pub async fn runite::fs::File::read_to_end(&mut self, &mut alloc::vec::Vec<u8>) -> core::io::error::Result<usize>
-pub async fn runite::fs::File::read_to_string(&mut self, &mut alloc::string::String) -> core::io::error::Result<usize>
-pub async fn runite::fs::File::seek(&mut self, std::io::SeekFrom) -> core::io::error::Result<u64>
 pub async fn runite::fs::File::set_len(&self, u64) -> core::io::error::Result<()>
 pub async fn runite::fs::File::sync_all(&self) -> core::io::error::Result<()>
 pub async fn runite::fs::File::sync_data(&self) -> core::io::error::Result<()>
 pub async fn runite::fs::File::try_clone(&self) -> core::io::error::Result<Self>
-pub async fn runite::fs::File::write(&mut self, &[u8]) -> core::io::error::Result<usize>
-pub async fn runite::fs::File::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 pub async fn runite::fs::File::write_all_at(&self, u64, &[u8]) -> core::io::error::Result<()>
 pub async fn runite::fs::File::write_at(&self, u64, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::fs::OpenOptions::open(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<runite::fs::File>
@@ -383,6 +375,7 @@ impl<R: runite::io::AsyncRead + ?core::marker::Sized> runite::io::AsyncReadExt f
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Read<'_, R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadExact<'_, R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadToEnd<'_, R>
+impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadToString<'_, R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::ReadVectored<'_, '_, R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::AsyncBufRead for runite::io::BufReader<R>
 impl<R: runite::io::AsyncRead + core::marker::Unpin> runite::io::AsyncRead for runite::io::BufReader<R>
@@ -432,6 +425,7 @@ pub fn R::lines(self) -> runite::io::Lines<Self> where Self: core::marker::Sized
 pub fn R::read<'a>(&'a mut self, &'a mut [u8]) -> runite::io::Read<'a, Self> where Self: core::marker::Unpin
 pub fn R::read_exact<'a>(&'a mut self, &'a mut [u8]) -> runite::io::ReadExact<'a, Self> where Self: core::marker::Unpin
 pub fn R::read_to_end<'a>(&'a mut self, &'a mut alloc::vec::Vec<u8>) -> runite::io::ReadToEnd<'a, Self> where Self: core::marker::Unpin
+pub fn R::read_to_string<'a>(&'a mut self, &'a mut alloc::string::String) -> runite::io::ReadToString<'a, Self> where Self: core::marker::Unpin
 pub fn R::read_vectored<'a, 'buf>(&'a mut self, &'a mut [core::io::io_slice::IoSliceMut<'buf>]) -> runite::io::ReadVectored<'a, 'buf, Self> where Self: core::marker::Unpin
 pub fn S::collect<C>(self) -> runite::io::Collect<Self, C> where Self: core::marker::Sized, C: core::default::Default + core::iter::traits::collect::Extend<Self::Item>
 pub fn S::filter<F>(self, F) -> runite::io::Filter<Self, F> where Self: core::marker::Sized, F: core::ops::function::FnMut(&Self::Item) -> bool
@@ -454,6 +448,7 @@ pub fn runite::io::AsyncReadExt::lines(self) -> runite::io::Lines<Self> where Se
 pub fn runite::io::AsyncReadExt::read<'a>(&'a mut self, &'a mut [u8]) -> runite::io::Read<'a, Self> where Self: core::marker::Unpin
 pub fn runite::io::AsyncReadExt::read_exact<'a>(&'a mut self, &'a mut [u8]) -> runite::io::ReadExact<'a, Self> where Self: core::marker::Unpin
 pub fn runite::io::AsyncReadExt::read_to_end<'a>(&'a mut self, &'a mut alloc::vec::Vec<u8>) -> runite::io::ReadToEnd<'a, Self> where Self: core::marker::Unpin
+pub fn runite::io::AsyncReadExt::read_to_string<'a>(&'a mut self, &'a mut alloc::string::String) -> runite::io::ReadToString<'a, Self> where Self: core::marker::Unpin
 pub fn runite::io::AsyncReadExt::read_vectored<'a, 'buf>(&'a mut self, &'a mut [core::io::io_slice::IoSliceMut<'buf>]) -> runite::io::ReadVectored<'a, 'buf, Self> where Self: core::marker::Unpin
 pub fn runite::io::AsyncSeek::poll_seek(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, std::io::SeekFrom) -> core::task::poll::Poll<core::io::error::Result<u64>>
 pub fn runite::io::AsyncSeekExt::seek(&mut self, std::io::SeekFrom) -> runite::io::Seek<'_, Self> where Self: core::marker::Unpin
@@ -507,6 +502,7 @@ pub fn runite::io::Next<'_, S>::poll(core::pin::Pin<&mut Self>, &mut core::task:
 pub fn runite::io::Read<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::ReadExact<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::ReadToEnd<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+pub fn runite::io::ReadToString<'_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::ReadVectored<'_, '_, R>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::Seek<'_, S>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::io::Skip<S>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
@@ -543,6 +539,7 @@ pub struct runite::io::Next<'a, S: ?core::marker::Sized>
 pub struct runite::io::Read<'a, R: ?core::marker::Sized>
 pub struct runite::io::ReadExact<'a, R: ?core::marker::Sized>
 pub struct runite::io::ReadToEnd<'a, R: ?core::marker::Sized>
+pub struct runite::io::ReadToString<'a, R: ?core::marker::Sized>
 pub struct runite::io::ReadVectored<'a, 'buf, R: ?core::marker::Sized>
 pub struct runite::io::Seek<'a, S: ?core::marker::Sized>
 pub struct runite::io::Skip<S>
@@ -573,6 +570,7 @@ pub type runite::io::Next<'_, S>::Output = core::option::Option<<S as runite::io
 pub type runite::io::Read<'_, R>::Output = core::result::Result<usize, core::io::error::Error>
 pub type runite::io::ReadExact<'_, R>::Output = core::result::Result<(), core::io::error::Error>
 pub type runite::io::ReadToEnd<'_, R>::Output = core::result::Result<usize, core::io::error::Error>
+pub type runite::io::ReadToString<'_, R>::Output = core::result::Result<usize, core::io::error::Error>
 pub type runite::io::ReadVectored<'_, '_, R>::Output = core::result::Result<usize, core::io::error::Error>
 pub type runite::io::Seek<'_, S>::Output = core::result::Result<u64, core::io::error::Error>
 pub type runite::io::Skip<S>::Item = <S as runite::io::Stream>::Item
@@ -604,12 +602,8 @@ pub async fn runite::net::TcpListener::bind<A>(A) -> core::io::error::Result<Sel
 pub async fn runite::net::TcpSocket::connect(self, core::net::socket_addr::SocketAddr) -> core::io::error::Result<runite::net::TcpStream>
 pub async fn runite::net::TcpStream::connect<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::TcpStream::connect_timeout(&core::net::socket_addr::SocketAddr, core::time::Duration) -> core::io::error::Result<Self>
-pub async fn runite::net::TcpStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
-pub async fn runite::net::TcpStream::read_exact(&mut self, &mut [u8]) -> core::io::error::Result<()>
 pub async fn runite::net::TcpStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::TcpStream::try_clone(&self) -> core::io::error::Result<Self>
-pub async fn runite::net::TcpStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
-pub async fn runite::net::TcpStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 pub async fn runite::net::UdpSocket::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::UdpSocket::connect<A>(&self, A) -> core::io::error::Result<()> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::UdpSocket::peek(&self, &mut [u8]) -> core::io::error::Result<usize>
@@ -938,7 +932,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **171**
+Items: **168**
 
 ### `runite::fd`
 
@@ -1037,10 +1031,7 @@ pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::er
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
-pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
@@ -1158,7 +1149,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **171**
+Items: **168**
 
 ### `runite::fd`
 
@@ -1257,10 +1248,7 @@ pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::er
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
-pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
@@ -1378,7 +1366,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **171**
+Items: **168**
 
 ### `runite::fd`
 
@@ -1477,10 +1465,7 @@ pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::er
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
-pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
-pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)

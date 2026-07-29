@@ -254,6 +254,50 @@ pub trait AsyncReadExt: AsyncRead {
         }
     }
 
+    /// Reads to end of input and appends the bytes to `buf` as UTF-8.
+    ///
+    /// Returns the number of bytes read. The reader is drained even when the
+    /// bytes turn out not to be valid UTF-8, in which case `buf` is left
+    /// unchanged and the error kind is [`io::ErrorKind::InvalidData`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::pin::Pin;
+    /// # use core::task::{Context, Poll};
+    /// # use std::io;
+    /// # use runite::io::{AsyncRead, AsyncReadExt};
+    /// # struct Bytes(&'static [u8]);
+    /// # impl AsyncRead for Bytes {
+    /// #     fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+    /// #         let take = self.0.len().min(buf.len());
+    /// #         buf[..take].copy_from_slice(&self.0[..take]);
+    /// #         self.0 = &self.0[take..];
+    /// #         Poll::Ready(Ok(take))
+    /// #     }
+    /// # }
+    /// runite::spawn(async {
+    ///     let mut reader = Bytes(b" world");
+    ///     let mut text = String::from("hello");
+    ///     let read = reader.read_to_string(&mut text).await.unwrap();
+    ///     assert_eq!(read, 6);
+    ///     assert_eq!(text, "hello world");
+    /// });
+    /// runite::run();
+    /// ```
+    fn read_to_string<'a>(&'a mut self, buf: &'a mut String) -> ReadToString<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadToString {
+            reader: self,
+            buf,
+            bytes: Vec::new(),
+            chunk: vec![0; READ_TO_END_CHUNK],
+            initialized: false,
+        }
+    }
+
     /// Splits this reader into a stream of UTF-8 lines.
     ///
     /// A trailing `\n` byte is not included in yielded strings; CRLF input
@@ -739,6 +783,48 @@ impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToEnd<'_, R> {
                 return Poll::Ready(Ok(this.buf.len() - this.start_len));
             }
             this.buf.extend_from_slice(&this.chunk[..read]);
+        }
+    }
+}
+
+/// Future returned by [`AsyncReadExt::read_to_string`].
+///
+/// Reads into a private byte buffer and validates once at end of input, so a
+/// multi-byte character split across two reads is not rejected — which a
+/// chunk-by-chunk validation would do.
+#[must_use = "futures do nothing unless awaited or polled"]
+pub struct ReadToString<'a, R: ?Sized> {
+    reader: &'a mut R,
+    buf: &'a mut String,
+    bytes: Vec<u8>,
+    chunk: Vec<u8>,
+    initialized: bool,
+}
+
+impl<R: AsyncRead + Unpin + ?Sized> Future for ReadToString<'_, R> {
+    type Output = io::Result<usize>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        if !this.initialized {
+            this.bytes.clear();
+            this.initialized = true;
+        }
+
+        loop {
+            let read = match Pin::new(&mut *this.reader).poll_read(cx, &mut this.chunk) {
+                Poll::Ready(result) => result?,
+                Poll::Pending => return Poll::Pending,
+            };
+            if read == 0 {
+                let bytes = core::mem::take(&mut this.bytes);
+                let read = bytes.len();
+                let text = String::from_utf8(bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                this.buf.push_str(&text);
+                return Poll::Ready(Ok(read));
+            }
+            this.bytes.extend_from_slice(&this.chunk[..read]);
         }
     }
 }

@@ -27,6 +27,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use runite::channel::oneshot;
+use runite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use runite::net::{TcpListener, TcpStream};
 use runite::time::sleep;
 use runite::{queue_macrotask, queue_microtask, run, spawn, yield_now};

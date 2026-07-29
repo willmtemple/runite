@@ -10,6 +10,8 @@
 //! socket path:
 //!
 //! ```
+//! use runite::io::{AsyncReadExt, AsyncWriteExt};
+//!
 //! runite::spawn(async {
 //!     let (mut left, mut right) = runite::net::unix::UnixStream::pair().unwrap();
 //!     left.write_all(b"x").await.unwrap();
@@ -102,6 +104,8 @@ impl UnixStream {
     /// # Examples
     ///
     /// ```no_run
+    /// use runite::io::AsyncWriteExt;
+    ///
     /// runite::spawn(async {
     ///     let mut stream = runite::net::unix::UnixStream::connect("service.sock")
     ///         .await
@@ -132,44 +136,6 @@ impl UnixStream {
             // endpoint, and `OwnedFd` takes it exactly once.
             Self::from_owned_fd(unsafe { OwnedFd::from_raw_fd(right.into_raw_fd()) }),
         ))
-    }
-
-    /// Reads bytes from the stream.
-    ///
-    /// Returns the number of bytes copied into `buf`. A return value of `0`
-    /// indicates EOF when `buf` is not empty.
-    ///
-    /// Delegates to the [`AsyncRead`] path so the in-flight
-    /// read is stashed on the stream and is cancel-safe: a dropped read future
-    /// retains its bytes for the next read.
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
-    }
-
-    /// Writes bytes to the stream.
-    ///
-    /// The operation may write fewer bytes than `buf.len()`; use
-    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
-    /// sent.
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let generation = crate::io::next_operation_id();
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write_operation(cx, buf, generation))
-            .await
-    }
-
-    /// Writes the entire buffer to the stream.
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            let written = self.write(buf).await?;
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            buf = &buf[written..];
-        }
-        Ok(())
     }
 
     /// Returns the local socket address of this stream.
@@ -1237,6 +1203,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use crate::{queue_macrotask, run, spawn};
 
     use super::{UnixDatagram, UnixListener, UnixStream};

@@ -56,6 +56,10 @@ changes.
   frequent signal cannot starve the others.
   ([#45](https://github.com/willmtemple/runite/issues/45))
 
+- `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
+  existed only as an inherent method on `File`. Validation happens once at end
+  of input rather than per chunk, so a multi-byte character split across two
+  reads is not rejected.
 - `AsyncRead`, `AsyncBufRead`, `AsyncWrite`, and `AsyncSeek` are implemented for
   `&mut T`, `Box<T>`, and `Pin<P>`. Only `Stream` had these before, so wrapping
   a borrowed reader did not work — `BufReader::new(&mut file)` failed to
@@ -66,6 +70,24 @@ changes.
   cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
 
 ### Breaking
+
+- The inherent `read`/`write`-family methods on `File`, `TcpStream` and
+  `UnixStream` are removed in favour of `AsyncReadExt`, `AsyncWriteExt` and
+  `AsyncSeekExt`. `File` had eight of them, `TcpStream` four, `UnixStream`
+  three, while `ChildStdin`, `BufReader` and the owned split halves had none.
+  Inherent methods win name resolution, so identical-looking calls dispatched
+  to different code depending on the concrete type, and refactoring a concrete
+  type into `fn f<R: AsyncRead>(r: &mut R)` silently changed which
+  implementation ran. The bodies were already thin wrappers over the same
+  `poll_read`/`poll_write_operation` paths the ext traits use, so behaviour —
+  including cancel safety and write-operation identity — is unchanged; only the
+  import is new. Add `use runite::io::{AsyncReadExt, AsyncWriteExt};` (and
+  `AsyncSeekExt` for `File::seek`).
+
+  The positional methods (`read_at`, `read_exact_at`, `write_at`,
+  `write_all_at`) are **not** affected: they take an explicit offset, do not
+  shadow a trait method, and remain inherent.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
 
 - `net::unix::Incoming` no longer borrows its listener. It was `Incoming<'a>`
   holding `&'a UnixListener` while the TCP `net::Incoming` held an owned
