@@ -23,8 +23,8 @@ use super::handles::{
 };
 use super::state::{
     ChildWorker, IntervalEntry, MacroTask, ThreadShared, WorkerCompletion, describe_panic,
-    install_thread, lock_queue, thread_teardown_guard, try_with_installed_thread,
-    with_current_thread, with_installed_thread,
+    install_thread, lock_queue, thread_teardown_guard, try_ensure_current_thread,
+    try_with_installed_thread, with_current_thread, with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
 use super::{IntervalCallback, LocalTask, MICROTASK_STARVATION_THRESHOLD};
@@ -670,6 +670,20 @@ pub fn run_ready_tasks<R: Runtime>() {
 /// thread (see the reentrancy guard shared with [`run`]).
 pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
     with_current_thread::<R, _>(|_| {});
+    block_on_installed::<R, F>(future)
+}
+
+/// Fallible counterpart to [`block_on`]: reports driver-creation failure rather
+/// than panicking on it.
+///
+/// Only *startup* is fallible. Once the runtime is installed, this is
+/// `block_on`, and any error from the future itself is the future's own.
+pub fn try_block_on<R: Runtime, F: Future>(future: F) -> io::Result<F::Output> {
+    try_ensure_current_thread::<R>()?;
+    Ok(block_on_installed::<R, F>(future))
+}
+
+fn block_on_installed<R: Runtime, F: Future>(future: F) -> F::Output {
     let _event_loop = EventLoopGuard::enter();
 
     let owner = with_installed_thread(|state| state.handle());

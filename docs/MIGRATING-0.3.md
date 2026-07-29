@@ -172,6 +172,32 @@ not allocate or take locks. Returning `Err` aborts the spawn.
 Together with the previous item, this is enough to start a shell on a
 pseudoterminal without `std::process`.
 
+### Startup failure can be reported instead of panicking
+
+`try_block_on` is `block_on` with a reportable startup boundary:
+
+```rust
+fn main() -> std::process::ExitCode {
+    match runite::try_block_on(run()) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("could not start: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+```
+
+Worth using if your program can run anywhere you do not control. `io_uring` is
+disabled outright by some container and hardening policies
+(`ErrorKind::Unsupported`), and the locked-memory budget can be exhausted by
+something else in the process — a profiler charging its sample buffers to the
+same limit is the usual case (`ErrorKind::QuotaExceeded`). Neither is the
+application's fault, and neither is something a backtrace helps with.
+
+Only startup is fallible. An error from your own future comes back inside
+`Ok`.
+
 ### A key that joins your diagnostics to the runtime's
 
 `runite::current_turn()` returns a `TurnId` for the event-loop iteration

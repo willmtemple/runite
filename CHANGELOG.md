@@ -56,6 +56,15 @@ changes.
   frequent signal cannot starve the others.
   ([#45](https://github.com/willmtemple/runite/issues/45))
 
+- `try_block_on`, a fallible counterpart to `block_on`. Creating a thread's
+  platform driver can fail for reasons that are about the machine rather than
+  the program — `io_uring` disabled by a container or hardening policy, or the
+  locked-memory budget exhausted — and `block_on` treats those as
+  unrecoverable. A panic there gives the user a backtrace through the runtime
+  and no way to act; an error lets an application explain itself, fall back to
+  a synchronous path, or choose its own exit status. Only startup is fallible:
+  an error produced by the future is returned inside `Ok`.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
 - `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
   iteration of the event loop, readable from a task poll or a microtask
   callback and `None` outside a turn. A consumer with its own diagnostics

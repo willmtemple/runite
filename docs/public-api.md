@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 989 | 1009 | 1028 | 1048 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 989 | 1009 | 1028 | 1048 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 989 | 1009 | 1028 | 1048 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 889 | 903 | 928 | 942 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 990 | 1010 | 1029 | 1049 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 990 | 1010 | 1029 | 1049 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 990 | 1010 | 1029 | 1049 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 890 | 904 | 929 | 943 | 68 |
 
-Portable default items: **821**
+Portable default items: **822**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **821**
 
 ## Portable default surface
 
-Items: **821**
+Items: **822**
 
 ### `runite`
 
@@ -85,6 +85,7 @@ pub fn runite::spawn_worker<Init, Exit>(Init, Exit) -> WorkerHandle where Init: 
 pub fn runite::stderr() -> core::io::error::Result<runite::stdio::Stderr>
 pub fn runite::stdin() -> core::io::error::Result<runite::stdio::Stdin>
 pub fn runite::stdout() -> core::io::error::Result<runite::stdio::Stdout>
+pub fn runite::try_block_on<F>(F) -> core::io::error::Result<<F as core::future::future::Future>::Output> where F: core::future::future::Future
 pub macro runite::join!
 pub macro runite::select!
 pub macro runite::try_join!

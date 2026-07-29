@@ -151,3 +151,46 @@ fn ordinary_thread_exit_uses_platform_safe_cleanup() {
         "Windows loader-lock fallback must not run arbitrary task destructors"
     );
 }
+
+/// `try_block_on` is `block_on` with a reportable startup boundary. On a
+/// machine where the driver initializes, it behaves identically and the future
+/// is driven the same way.
+#[test]
+fn try_block_on_matches_block_on_when_startup_succeeds() {
+    let value = runite::try_block_on(async {
+        let mut total = 0;
+        for step in 1..=4 {
+            total += step;
+            runite::yield_now().await;
+        }
+        total
+    })
+    .expect("startup should succeed on a machine that can run the tests");
+    assert_eq!(value, 10);
+}
+
+/// Startup is the only fallible part. An error produced *by* the future is the
+/// future's own, and arrives inside `Ok`.
+#[test]
+fn try_block_on_does_not_absorb_the_future_s_own_error() {
+    let outcome: std::io::Result<std::io::Result<()>> = runite::try_block_on(async {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the future's own error",
+        ))
+    });
+
+    let inner = outcome.expect("startup should succeed");
+    let error = inner.expect_err("the future's error should survive");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+/// Repeated entry works: the runtime is installed once and reused, so a second
+/// call does not attempt to create a second driver on the same thread.
+#[test]
+fn try_block_on_reuses_an_installed_runtime() {
+    assert_eq!(runite::try_block_on(async { 1 }).expect("first"), 1);
+    assert_eq!(runite::try_block_on(async { 2 }).expect("second"), 2);
+    // And it interoperates with the panicking entry point on the same thread.
+    assert_eq!(runite::block_on(async { 3 }), 3);
+}

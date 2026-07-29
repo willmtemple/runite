@@ -123,6 +123,13 @@ where
     shared::block_on::<MacosRuntime, F>(future)
 }
 
+pub fn try_block_on<F>(future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    shared::try_block_on::<MacosRuntime, F>(future)
+}
+
 pub fn run_until_stalled() {
     shared::run_until_stalled::<MacosRuntime>()
 }

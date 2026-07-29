@@ -779,22 +779,36 @@ fn remote_queue_capacity() -> usize {
 
 /// Lazy-initializing accessor. Use from any public entry point on the
 /// scheduler — initializes a fresh `ThreadState` on first use.
+///
+/// # Panics
+///
+/// Panics if the platform driver cannot be created. Entry points that want to
+/// report that failure instead use [`try_ensure_current_thread`] first.
 pub(crate) fn with_current_thread<R: Runtime, T>(f: impl FnOnce(&ThreadState) -> T) -> T {
-    let mut ptr = current_thread_ptr();
-    if ptr.is_null() {
-        assert!(
-            matches!(thread_phase(), ThreadPhase::Empty),
-            "runite: runtime state is unavailable during thread teardown"
-        );
-        let (driver, notifier) = R::create_driver_pair().expect("runtime driver should initialize");
-        let shared = Arc::new(ThreadShared::new(notifier));
-        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        ptr = install_owned_state(Box::new(ThreadState::new(shared, driver, None, generation)));
+    if let Err(error) = try_ensure_current_thread::<R>() {
+        panic!("runtime driver should initialize: {error:?}");
     }
-    // SAFETY: `ptr` is non-null per the lazy-init branch above and points to a
-    // `ThreadState` owned by this thread's `THREAD_OWNER`. The borrow is
-    // confined to `f`.
-    unsafe { f(&*ptr) }
+    with_installed_thread(f)
+}
+
+/// Installs this thread's runtime state if it is not installed already,
+/// reporting driver-creation failure instead of panicking.
+///
+/// Idempotent: a thread that already has state installed returns `Ok(())`
+/// without touching the driver.
+pub(crate) fn try_ensure_current_thread<R: Runtime>() -> io::Result<()> {
+    if !current_thread_ptr().is_null() {
+        return Ok(());
+    }
+    assert!(
+        matches!(thread_phase(), ThreadPhase::Empty),
+        "runite: runtime state is unavailable during thread teardown"
+    );
+    let (driver, notifier) = R::create_driver_pair()?;
+    let shared = Arc::new(ThreadShared::new(notifier));
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    install_owned_state(Box::new(ThreadState::new(shared, driver, None, generation)));
+    Ok(())
 }
 
 /// Non-initializing accessor. Use from contexts that are guaranteed to run

@@ -472,6 +472,61 @@ mod runtime_api {
         imp::block_on(future)
     }
 
+    /// Drives `future` to completion, reporting startup failure instead of
+    /// panicking on it.
+    ///
+    /// Identical to [`block_on`](Self::block_on) once the runtime is running.
+    /// The difference is only at the boundary: creating this thread's platform
+    /// driver can fail, and `block_on` treats that as unrecoverable.
+    ///
+    /// Use this when an application needs to say something useful about not
+    /// starting. Driver creation fails for reasons that are about the machine
+    /// rather than the program, and none of them are the application's fault:
+    ///
+    /// - `io_uring` is disabled by a container or hardening policy, so there is
+    ///   no I/O backend at all (`ErrorKind::Unsupported`).
+    /// - The locked-memory budget is exhausted, commonly because a profiler in
+    ///   the same process charges its sample buffers to it
+    ///   (`ErrorKind::QuotaExceeded`).
+    ///
+    /// A panic in those situations gives the user a backtrace through the
+    /// runtime and no way to act. An error lets the program explain itself, or
+    /// fall back to a synchronous path, and exit with a status of its choosing.
+    ///
+    /// Only startup is fallible here. An error produced *by* the future is the
+    /// future's own and is returned inside `Ok`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the driver returns an unexpected error while running, or if
+    /// called from within a task already running on this thread (the event loop
+    /// cannot be re-entered). Neither is a startup condition.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> std::process::ExitCode {
+    /// use std::process::ExitCode;
+    ///
+    /// match runite::try_block_on(async { 6 * 7 }) {
+    ///     Ok(answer) => {
+    ///         assert_eq!(answer, 42);
+    ///         ExitCode::SUCCESS
+    ///     }
+    ///     Err(error) => {
+    ///         eprintln!("could not start the runtime: {error}");
+    ///         ExitCode::FAILURE
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn try_block_on<F>(future: F) -> std::io::Result<F::Output>
+    where
+        F: core::future::Future,
+    {
+        imp::try_block_on(future)
+    }
+
     /// Drives the event loop until it would next block waiting on the I/O driver.
     ///
     /// Runs all currently ready tasks, microtasks, and expired timers, then
