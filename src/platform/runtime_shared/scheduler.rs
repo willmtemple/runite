@@ -501,15 +501,6 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
-        if !with_installed_thread(|state| state.try_begin_idle_probe()) {
-            continue;
-        }
-
-        // From here `closing` is `true`. This guard restores it to `false` on
-        // any early exit from the shutdown-probe region below — including a
-        // panic unwind — and is disarmed only once we commit to exiting.
-        let mut closing_reset = ClosingResetGuard::new();
-
         drain_all::<R>();
 
         if has_ready_work() {
@@ -527,7 +518,6 @@ pub fn run<R: Runtime>() {
 
         if busy {
             with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
                 #[cfg(debug_assertions)]
                 tracing::trace!(
                     target: trace_targets::RUNTIME,
@@ -552,7 +542,6 @@ pub fn run<R: Runtime>() {
         let worker_closed = match commit_idle() {
             IdleCommit::Retry => {
                 // A completion or remote task raced the preliminary probes.
-                // `closing_reset` restores the flag before retrying.
                 continue;
             }
             IdleCommit::CancelTasks(tasks) => {
@@ -561,14 +550,8 @@ pub fn run<R: Runtime>() {
                 cancel_tasks_for_shutdown(tasks);
                 continue;
             }
-            IdleCommit::MainIdle => {
-                closing_reset.disarm();
-                false
-            }
-            IdleCommit::WorkerClosed => {
-                closing_reset.disarm();
-                true
-            }
+            IdleCommit::MainIdle => false,
+            IdleCommit::WorkerClosed => true,
         };
 
         tracing::debug!(
@@ -610,9 +593,6 @@ pub fn run_until_stalled<R: Runtime>() {
             continue;
         }
 
-        with_installed_thread(|state| {
-            state.shared.closing.store(false, Ordering::Release);
-        });
         return;
     }
 }
@@ -647,9 +627,6 @@ pub fn run_ready_tasks<R: Runtime>() {
             continue;
         }
 
-        with_installed_thread(|state| {
-            state.shared.closing.store(false, Ordering::Release);
-        });
         return;
     }
 }
@@ -974,40 +951,6 @@ impl Drop for EventLoopGuard {
     }
 }
 
-/// Resets the current thread's `closing` flag on drop.
-///
-/// `run()` sets `closing` while it probes for a run-to-idle return. On every
-/// non-idle path the flag must return to `false` so the loop can be re-entered.
-/// This guard makes that reset happen even if a panic unwinds through the
-/// probe. Runtime-owned workers may instead atomically commit `closed`; other
-/// threads leave final closure to their teardown owner.
-struct ClosingResetGuard {
-    armed: bool,
-}
-
-impl ClosingResetGuard {
-    fn new() -> Self {
-        Self { armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ClosingResetGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        try_with_installed_thread(|state| {
-            if let Some(state) = state {
-                state.shared.closing.store(false, Ordering::Release);
-            }
-        });
-    }
-}
-
 /// Reap all external events into the local queues: poll the driver for I/O
 /// completions and expired timers, splice in cross-thread (remote) tasks, and
 /// collect exited workers.
@@ -1198,7 +1141,6 @@ fn commit_idle() -> IdleCommit {
             state.shared.closed.store(true, Ordering::Release);
             IdleCommit::WorkerClosed
         } else {
-            state.shared.closing.store(false, Ordering::Release);
             IdleCommit::MainIdle
         }
     })

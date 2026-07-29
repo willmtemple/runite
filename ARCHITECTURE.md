@@ -216,7 +216,7 @@ arm count (`proc_macros/src/lib.rs`, `src/macros/mod.rs`).
 
 - Drains all currently ready work.
 - Does not block for future driver events.
-- Returns when no immediately runnable work remains, and clears `closing`
+- Returns when no immediately runnable work remains
   (`src/platform/runtime_shared/scheduler.rs`).
 - Intended for tests and host-loop integrations that own the outer wait.
 
@@ -250,8 +250,6 @@ A panic must never tear down the event loop that observes it:
   the OS thread and only then publishes `WorkerCompletion`, so `is_finished`, `on_exit`, and
   `WorkerJoin` cannot observe pre-TLS-exit state. Setup and runtime/teardown failures become
   `WorkerJoinError`.
-- The idle probe in `run()` holds a scope guard that restores the `closing` flag on any
-  non-committed exit, including a panic unwind.
 
 In all cases the panic is still reported through the process panic hook.
 
@@ -262,22 +260,27 @@ accepted and then mistaken for quiescence:
 
 1. Drain everything currently observable.
 2. If ready work exists, keep running.
-3. Set `closing = true` with a CAS via `try_begin_idle_probe`
-   (`src/platform/runtime_shared/state.rs`).
-4. Drain again.
-5. If any ready work appeared, clear `closing` and continue
+3. Drain again.
+4. If any ready work appeared, continue
    (`src/platform/runtime_shared/scheduler.rs`).
-6. If timers, child workers, or async operations remain, clear `closing`, wait on the driver, and
+5. If timers, child workers, or async operations remain, wait on the driver and
    continue (`src/platform/runtime_shared/scheduler.rs`).
-7. Otherwise take the remote-queue lock.
-8. Recheck that queue and `pending_ops` under the same ordering used by completion publication.
-   If either is non-empty, clear `closing` and retry.
-9. Atomically remove remaining task-registry entries. Release the queue lock, mark every task
+6. Otherwise take the remote-queue lock.
+7. Recheck that queue and `pending_ops` under the same ordering used by completion publication.
+   If either is non-empty, release the lock and retry.
+8. Atomically remove remaining task-registry entries. Release the queue lock, mark every task
    cancelled, then invoke join wakers and future destructors only after all registry state is
    terminal. Loop once more to process cleanup work.
-10. An ordinary thread clears `closing` and returns idle with state installed. A worker sets
-    `closed` while still holding the queue lock, so `enqueue_macro` is mutually ordered against
-    final closure.
+9. An ordinary thread returns idle with state installed. A worker sets
+   `closed` while still holding the queue lock, so `enqueue_macro` is mutually ordered against
+   final closure.
+
+The correctness of this rests entirely on the recheck in step 7 happening under the
+same lock that `enqueue_macro` takes, and on `pending_ops` being read with the
+ordering completion publication uses. There is no separate "am I shutting down"
+flag: a thread that is probing for idle is not distinguishable from one that is
+not, and does not need to be, because nothing outside the owning thread ever
+reads such a state.
 
 Runtime-state ownership is RAII (`THREAD_OWNER`), while `CURRENT_THREAD` is a
 scoped non-owning fast-path pointer. Unix ordinary threads finalize at TLS

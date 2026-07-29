@@ -335,13 +335,6 @@ impl ThreadState {
         RuntimePeaks::observe(&peaks.outstanding_operations, self.outstanding_operations());
         RuntimePeaks::observe(&peaks.armed_timers, self.timers.borrow().len());
     }
-
-    pub(crate) fn try_begin_idle_probe(&self) -> bool {
-        self.shared
-            .closing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
 }
 
 pub(crate) struct ThreadShared {
@@ -369,7 +362,6 @@ pub(crate) struct ThreadShared {
     /// question after an incident. Updated where the corresponding gauge
     /// rises, so reading one is a load.
     pub(crate) peaks: RuntimePeaks,
-    pub(crate) closing: AtomicBool,
     pub(crate) closed: AtomicBool,
     notification_requested: AtomicU64,
     notification_delivered: AtomicU64,
@@ -394,7 +386,6 @@ impl ThreadShared {
             counters: RuntimeCounters::default(),
             ready_tasks: AtomicUsize::new(0),
             peaks: RuntimePeaks::default(),
-            closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             notification_requested: AtomicU64::new(0),
             notification_delivered: AtomicU64::new(0),
@@ -625,7 +616,6 @@ impl ThreadShared {
     }
 
     fn close(&self) -> VecDeque<SendTask> {
-        self.closing.store(true, Ordering::Release);
         let mut queue = lock_queue(&self.remote_macrotasks);
         self.closed.store(true, Ordering::Release);
         self.notification_delivered.store(
@@ -657,7 +647,6 @@ impl ThreadShared {
 
     #[cfg(windows)]
     fn mark_closed_without_cleanup(&self) {
-        self.closing.store(true, Ordering::Release);
         self.closed.store(true, Ordering::Release);
         self.notification_delivered.store(
             self.notification_requested.load(Ordering::Acquire),
