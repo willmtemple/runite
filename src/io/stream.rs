@@ -361,6 +361,12 @@ pub struct Next<'a, S: ?Sized> {
     stream: &'a mut S,
 }
 
+impl<'a, S: ?Sized> std::fmt::Debug for Next<'a, S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Next").finish_non_exhaustive()
+    }
+}
+
 impl<S: Stream + Unpin + ?Sized> Future for Next<'_, S> {
     type Output = Option<S::Item>;
 
@@ -374,6 +380,12 @@ impl<S: Stream + Unpin + ?Sized> Future for Next<'_, S> {
 pub struct Map<S, F> {
     stream: S,
     f: F,
+}
+
+impl<S, F> std::fmt::Debug for Map<S, F> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Map").finish_non_exhaustive()
+    }
 }
 
 impl<S, F> Unpin for Map<S, F> {}
@@ -402,6 +414,12 @@ where
 pub struct Filter<S, F> {
     stream: S,
     predicate: F,
+}
+
+impl<S, F> std::fmt::Debug for Filter<S, F> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Filter").finish_non_exhaustive()
+    }
 }
 
 impl<S, F> Unpin for Filter<S, F> {}
@@ -435,6 +453,12 @@ pub struct Collect<S, C> {
     collection: C,
 }
 
+impl<S, C> std::fmt::Debug for Collect<S, C> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Collect").finish_non_exhaustive()
+    }
+}
+
 impl<S, C> Unpin for Collect<S, C> {}
 
 impl<S, C> Future for Collect<S, C>
@@ -462,6 +486,12 @@ pub struct ForEach<S, F, Fut> {
     stream: S,
     f: F,
     pending: Option<Pin<Box<Fut>>>,
+}
+
+impl<S, F, Fut> std::fmt::Debug for ForEach<S, F, Fut> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ForEach").finish_non_exhaustive()
+    }
 }
 
 impl<S, F, Fut> Unpin for ForEach<S, F, Fut> {}
@@ -504,6 +534,12 @@ pub struct Take<S> {
     remaining: usize,
 }
 
+impl<S> std::fmt::Debug for Take<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Take").finish_non_exhaustive()
+    }
+}
+
 impl<S> Unpin for Take<S> {}
 
 impl<S> Stream for Take<S>
@@ -542,6 +578,12 @@ where
 pub struct Skip<S> {
     stream: S,
     remaining: usize,
+}
+
+impl<S> std::fmt::Debug for Skip<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Skip").finish_non_exhaustive()
+    }
 }
 
 impl<S> Unpin for Skip<S> {}

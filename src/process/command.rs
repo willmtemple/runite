@@ -45,19 +45,35 @@ pub struct Output {
     pub stderr: Vec<u8>,
 }
 
+/// The owned OS object a [`Stdio`] can be built from.
+///
+/// A file descriptor on Unix, a handle on Windows.
+#[cfg(unix)]
+pub(crate) type OwnedStdio = std::os::fd::OwnedFd;
+/// The owned OS object a [`Stdio`] can be built from.
+///
+/// A file descriptor on Unix, a handle on Windows.
+#[cfg(windows)]
+pub(crate) type OwnedStdio = std::os::windows::io::OwnedHandle;
+
 /// Subprocess standard I/O configuration.
 ///
 /// Use this with [`Command::stdin`], [`Command::stdout`], and
 /// [`Command::stderr`] to decide whether a child inherits a standard stream,
-/// connects it to the null device, or exposes it as an async pipe.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// connects it to the null device, exposes it as an async pipe, or is wired to
+/// a descriptor the caller already owns.
+///
+/// Like [`std::process::Stdio`], this is neither `Clone` nor `Copy`: a variant
+/// built from an owned descriptor owns that descriptor.
+#[derive(Debug)]
 pub struct Stdio(pub(crate) StdioKind);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum StdioKind {
     Inherit,
     Null,
     Piped,
+    Raw(OwnedStdio),
 }
 
 impl Stdio {
@@ -104,6 +120,74 @@ impl Stdio {
     }
 }
 
+/// Wires a child standard stream to a descriptor the caller already owns.
+///
+/// The descriptor is duplicated at each [`Command::spawn`], so the `Stdio`
+/// stays usable across repeated spawns and the caller's original is unaffected.
+/// This is how a child is attached to something runite does not model — a
+/// pseudoterminal, a socket accepted elsewhere, a preopened log file.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn example() -> std::io::Result<()> {
+/// use std::fs::File;
+/// use std::os::fd::OwnedFd;
+/// use runite::process::Stdio;
+///
+/// let log: OwnedFd = File::create("child.log")?.into();
+/// let stdout = Stdio::from(log);
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(unix)]
+impl From<std::os::fd::OwnedFd> for Stdio {
+    fn from(fd: std::os::fd::OwnedFd) -> Self {
+        Self(StdioKind::Raw(fd))
+    }
+}
+
+/// Wires a child standard stream to a handle the caller already owns.
+///
+/// The handle is duplicated at each [`Command::spawn`], so the `Stdio` stays
+/// usable across repeated spawns and the caller's original is unaffected.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn example() -> std::io::Result<()> {
+/// use std::fs::File;
+/// use std::os::windows::io::OwnedHandle;
+/// use runite::process::Stdio;
+///
+/// let log: OwnedHandle = File::create("child.log")?.into();
+/// let stdout = Stdio::from(log);
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(windows)]
+impl From<std::os::windows::io::OwnedHandle> for Stdio {
+    fn from(handle: std::os::windows::io::OwnedHandle) -> Self {
+        Self(StdioKind::Raw(handle))
+    }
+}
+
+/// A hook to run in the child between `fork` and `exec`.
+///
+/// Stored behind an [`Arc`](std::sync::Arc) so a [`Command`] can be spawned
+/// more than once. The `Debug` impl is opaque because a closure has nothing
+/// useful to print.
+#[cfg(unix)]
+#[derive(Clone)]
+pub(crate) struct PreExec(pub(crate) std::sync::Arc<dyn Fn() -> io::Result<()> + Send + Sync>);
+
+#[cfg(unix)]
+impl std::fmt::Debug for PreExec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreExec(..)")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum EnvChange {
     Set(OsString, OsString),
@@ -111,7 +195,7 @@ pub(crate) enum EnvChange {
     Clear,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct CommandSpec {
     pub program: OsString,
     pub args: Vec<OsString>,
@@ -120,6 +204,8 @@ pub(crate) struct CommandSpec {
     pub stdin: StdioKind,
     pub stdout: StdioKind,
     pub stderr: StdioKind,
+    #[cfg(unix)]
+    pub pre_exec: Option<PreExec>,
 }
 
 /// Builder for spawning an async subprocess.
@@ -132,7 +218,11 @@ pub(crate) struct CommandSpec {
 /// Calling [`spawn`](Self::spawn) itself is synchronous and delegates to
 /// [`std::process::Command::spawn`]. Async runtime integration begins with
 /// [`Child::wait`](super::Child::wait) and with piped standard streams.
-#[derive(Clone, Debug)]
+///
+/// Like [`std::process::Command`], this is not `Clone`: a standard stream can
+/// own a descriptor (see [`Stdio::from`]), and duplicating one implicitly would
+/// hide a `dup` behind a `clone`.
+#[derive(Debug)]
 pub struct Command {
     spec: CommandSpec,
 }
@@ -157,8 +247,21 @@ impl Command {
                 stdin: StdioKind::Inherit,
                 stdout: StdioKind::Inherit,
                 stderr: StdioKind::Inherit,
+                #[cfg(unix)]
+                pre_exec: None,
             },
         }
+    }
+
+    /// Registers a hook to run in the child between `fork` and `exec`.
+    ///
+    /// Used internally by
+    /// [`os::unix::process::CommandExt::pre_exec`](crate::os::unix::process::CommandExt::pre_exec),
+    /// which carries the safety contract.
+    #[cfg(unix)]
+    pub(crate) fn set_pre_exec(&mut self, hook: PreExec) -> &mut Self {
+        self.spec.pre_exec = Some(hook);
+        self
     }
 
     /// Adds one argument to the command line.
@@ -341,8 +444,25 @@ impl Command {
     /// corresponding field on the returned [`Child`] contains an async pipe.
     /// When stdin is inherited, runite's process-wide stdin reader is paused
     /// until the child's exit is observed or the returned handle is dropped.
-    /// On Windows, spawning returns [`io::ErrorKind::WouldBlock`] if a console
-    /// stdin read is already active and therefore cannot be handed off safely.
+    ///
+    /// # Blocking
+    ///
+    /// `spawn` is synchronous and runs on the calling runtime thread. With
+    /// inherited stdin it waits for the process-wide reader to release the
+    /// terminal, which normally takes microseconds — an interrupt releases a
+    /// reader parked in `poll`. It cannot un-issue a `read(2)` the reader has
+    /// already entered, though, and on an interactive terminal that read
+    /// returns only when the user types something. The wait is therefore
+    /// bounded: past that bound `spawn` reports
+    /// [`io::ErrorKind::WouldBlock`] rather than stalling the event loop
+    /// indefinitely, and the caller may retry.
+    ///
+    /// Windows reports the same error immediately rather than waiting, because
+    /// a console read there cannot be interrupted at all.
+    ///
+    /// To keep the event loop free of this entirely, configure stdin with
+    /// [`Stdio::null`] or [`Stdio::piped`], or spawn from
+    /// [`spawn_blocking`](crate::spawn_blocking).
     ///
     /// # Examples
     ///
@@ -359,7 +479,7 @@ impl Command {
     /// # }
     /// ```
     pub fn spawn(&mut self) -> io::Result<Child> {
-        let stdin_handoff = (self.spec.stdin == StdioKind::Inherit)
+        let stdin_handoff = matches!(self.spec.stdin, StdioKind::Inherit)
             .then(crate::stdio::handoff_stdin_to_child)
             .transpose()?;
         let inner = crate::sys::current::process::spawn(&self.spec)?;

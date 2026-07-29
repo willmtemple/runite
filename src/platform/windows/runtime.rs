@@ -22,8 +22,8 @@ use super::driver::{self, Driver, DriverId};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
-    YieldNow, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
@@ -115,6 +115,13 @@ where
     F: Future,
 {
     shared::block_on::<WindowsRuntime, F>(future)
+}
+
+pub fn try_block_on<F>(future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    shared::try_block_on::<WindowsRuntime, F>(future)
 }
 
 pub fn run_until_stalled() {

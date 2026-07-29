@@ -10,7 +10,7 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use runite::hyper_rt::{RuniteExecutor, RuniteTimer};
-use runite::io::AsyncReadExt;
+use runite::io::{AsyncReadExt, AsyncWriteExt as _};
 use runite::net::{TcpListener, TcpStream};
 
 async fn hello(_req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {

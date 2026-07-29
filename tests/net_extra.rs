@@ -484,6 +484,46 @@ mod unix_extra {
     use runite::net::unix::{UnixDatagram, UnixListener, UnixStream};
     use std::path::Path;
 
+    /// `unix::Incoming` owns a shared handle to its listener rather than
+    /// borrowing it, so the stream can be built on one side and moved into a
+    /// task while the listener stays usable here. The borrowed form could not
+    /// express this, which also meant generic code over both listener kinds
+    /// could not be written once.
+    #[test]
+    fn unix_incoming_can_be_moved_into_a_task_without_the_listener() {
+        let path = unique_socket_path("stream-incoming-owned");
+        remove_socket_file(&path);
+        let path_for_test = path.clone();
+
+        block_on(move || async move {
+            let listener = UnixListener::bind(&path_for_test).expect("bind unix listener");
+            // Built here, moved below; `listener` stays live and usable.
+            let mut incoming = listener.incoming();
+
+            let server = runite::spawn(async move {
+                incoming
+                    .next()
+                    .await
+                    .expect("incoming is infinite")
+                    .expect("accept incoming stream")
+            });
+
+            let client = UnixStream::connect(&path_for_test)
+                .await
+                .expect("connect unix stream");
+            let accepted = server.await.expect("server task");
+
+            assert_eq!(
+                listener.local_addr().expect("local addr").as_pathname(),
+                Some(path_for_test.as_path()),
+                "the listener outlives the stream built from it"
+            );
+            drop((client, accepted));
+        });
+
+        remove_socket_file(&path);
+    }
+
     #[test]
     fn unix_stream_connect_incoming_round_trip_and_eof() {
         let path = unique_socket_path("stream-incoming");

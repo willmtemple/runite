@@ -12,8 +12,9 @@ deliberately prefers simple per-thread event loops, thread-local state, and
 predictable scheduling over work-stealing, `Send`-future ergonomics, and maximum
 I/O throughput.
 
-> **Status:** early 0.x release. APIs may change before 1.0; breaking 0.2
-> changes are documented in the [migration guide](./docs/MIGRATING-0.2.md).
+> **Status:** early 0.x release. APIs may change before 1.0. Breaking changes
+> are documented per release in the migration guides:
+> [0.1 → 0.2](./docs/MIGRATING-0.2.md), [0.2 → 0.3](./docs/MIGRATING-0.3.md).
 
 ## Platform support
 
@@ -97,7 +98,8 @@ fn main() {
 - **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`),
   `#[runite::test]`, and `block_on` for driving one future to completion.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
-  `queue_microtask`, `spawn`, `yield_now`.
+  `queue_microtask`, `spawn`, `yield_now`, and `current_turn` for a key that joins
+  your own diagnostics to the loop iteration that produced them.
 - **Workers:** `spawn_worker`, nonblocking `WorkerHandle::join`, and the
   `Send`-only cross-thread `ThreadHandle::queue_macrotask`.
 - **Tasks:** spawned futures return `JoinHandle<T>` that awaits to `Result<T, JoinError>`;
@@ -116,12 +118,16 @@ fn main() {
 - **Control flow:** fair-by-default `select!` with `biased;`, branch guards,
   `else`, output patterns, and handlers that can await or leave the surrounding
   control-flow context.
-- **Processes:** `process::{Command, Child}` with piped async stdio, `kill`, and `wait`.
+- **Processes:** `process::{Command, Child}` with piped async stdio, `kill`, and `wait`;
+  standard streams can be wired to a descriptor you already own (`Stdio::from(OwnedFd)`),
+  a Unix `pre_exec` hook runs between fork and exec, and `Child::from_pid` adopts a
+  process started elsewhere.
 - **Channels & sync:** `channel::{mpsc, oneshot, broadcast, watch}`,
   `sync::{Mutex, RwLock, Semaphore, Notify, OnceCell}`.
 - **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
 - **Signals:** portable `signal::ctrl_c`, async Unix signal handling (including SIGWINCH
-  via `SignalKind::WindowChange`), and Windows console control events (`signal::windows`).
+  via `SignalKind::WindowChange`) with `signal::unix::signals` for watching several
+  kinds on one stream, and Windows console control events (`signal::windows`).
 
 Accepted reads are resource-owned and cancel-safe: bytes remain available to a
 later caller. Cancelling an accepted write does not promise that the OS write
@@ -182,8 +188,9 @@ cargo run --example hyper_http_client --features hyper
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the threading model, micro/macro task
 scheduling, run lifecycle, cancellation and buffer-ownership rules, the driver abstraction,
-the platform parity matrix, and the documented safety invariants. Upgrading
-from 0.1? Read [Migrating to 0.2](./docs/MIGRATING-0.2.md).
+the platform parity matrix, and the documented safety invariants. Upgrading?
+Read [Migrating to 0.2](./docs/MIGRATING-0.2.md) or
+[Migrating to 0.3](./docs/MIGRATING-0.3.md).
 
 ## Development
 

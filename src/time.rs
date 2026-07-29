@@ -48,11 +48,18 @@ use crate::platform::current::runtime as imp;
 /// Future returned by [`sleep`] that completes after a runtime timer fires.
 ///
 /// Dropping the future before it completes cancels the timer registration.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Sleep {
     delay: Option<Duration>,
     state: Option<Rc<SleepState>>,
     handle: Option<crate::TimeoutHandle>,
     completed: bool,
+}
+
+impl std::fmt::Debug for Sleep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sleep").finish_non_exhaustive()
+    }
 }
 
 /// An awaitable timer that yields ticks separated by a fixed period.
@@ -96,6 +103,12 @@ pub struct Interval {
     first_tick: bool,
     sleep: Option<Sleep>,
     missed_tick_behavior: MissedTickBehavior,
+}
+
+impl std::fmt::Debug for Interval {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Interval").finish_non_exhaustive()
+    }
 }
 
 /// How an [`Interval`] schedules ticks after the consumer has fallen behind.

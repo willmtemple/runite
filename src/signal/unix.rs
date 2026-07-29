@@ -5,6 +5,11 @@
 //! for Unix-specific runtime integration such as graceful shutdown hooks,
 //! reconfiguration on `SIGHUP`, or terminal UI redraws after `SIGWINCH`.
 //!
+//! Use [`signals`] when several kinds mean the same thing to the application.
+//! It yields the [`SignalKind`] that produced each event from one [`Signals`]
+//! stream, rotating which kind it polls first so a frequent signal cannot
+//! starve the rest.
+//!
 //! This implementation deliberately uses one dedicated OS reader thread
 //! (`runite-signal`) instead of a per-runtime-thread drain. Signals are
 //! process-global, so one async-signal-safe handler writes to one process-wide
@@ -45,7 +50,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use crate::ThreadHandle;
 
@@ -175,30 +180,192 @@ impl Signal {
     /// # }
     /// ```
     pub async fn recv(&mut self) -> Option<()> {
-        poll_fn(|cx| {
-            let current = self.state.generation.load(Ordering::Acquire);
-            if current != self.last_seen {
-                self.last_seen = current;
-                return Poll::Ready(Some(()));
-            }
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
 
-            let mut waker = self
-                .state
-                .waker
-                .lock()
-                .expect("signal stream waker mutex poisoned");
-            *waker = Some(cx.waker().clone());
+    /// Polls for the next event, registering `cx`'s waker if none is pending.
+    ///
+    /// The waker is stored under the state lock and re-checked afterwards, so a
+    /// signal delivered between the first load and the store cannot be missed.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        let current = self.state.generation.load(Ordering::Acquire);
+        if current != self.last_seen {
+            self.last_seen = current;
+            return Poll::Ready(Some(()));
+        }
 
-            let current = self.state.generation.load(Ordering::Acquire);
-            if current != self.last_seen {
-                self.last_seen = current;
-                *waker = None;
-                Poll::Ready(Some(()))
-            } else {
-                Poll::Pending
+        let mut waker = self
+            .state
+            .waker
+            .lock()
+            .expect("signal stream waker mutex poisoned");
+        *waker = Some(cx.waker().clone());
+
+        let current = self.state.generation.load(Ordering::Acquire);
+        if current != self.last_seen {
+            self.last_seen = current;
+            *waker = None;
+            Poll::Ready(Some(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// An async stream over several signal kinds at once.
+///
+/// Created by [`signals`]. Each event names the kind that produced it, so one
+/// task can serve "any of these means shut down" rather than one task per
+/// kind.
+///
+/// Like [`Signal`], this is tied to the runtime thread that created it and is
+/// intentionally `!Send`. It holds one underlying registration per kind, so
+/// dropping it unregisters all of them.
+pub struct Signals {
+    streams: Vec<(SignalKind, Signal)>,
+    next: usize,
+}
+
+/// Registers interest in every kind in `kinds` on the current runtime thread.
+///
+/// Equivalent to calling [`signal`] for each kind, but the events arrive on one
+/// stream tagged with the kind that produced it. Duplicate kinds are
+/// registered once.
+///
+/// Events are coalesced per kind exactly as they are for [`Signal`]: several
+/// deliveries of the same signal before the stream is polled may yield one
+/// event. Polling starts from a rotating position, so a kind that fires
+/// constantly cannot starve the others.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] if `kinds` is empty — an empty set
+/// would produce a stream that is never ready, which is more likely a bug than
+/// an intent. Otherwise returns the same errors as [`signal`], and registers
+/// nothing if any kind fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use runite::signal::unix::{signals, SignalKind};
+///
+/// runite::spawn(async {
+///     let mut shutdown = signals(&[
+///         SignalKind::Interrupt,
+///         SignalKind::Terminate,
+///         SignalKind::Hangup,
+///     ])
+///     .expect("shutdown handlers should install");
+///
+///     if let Some(kind) = shutdown.recv().await {
+///         eprintln!("shutting down after {kind:?}");
+///     }
+/// });
+///
+/// runite::run();
+/// ```
+pub fn signals(kinds: &[SignalKind]) -> io::Result<Signals> {
+    if kinds.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "signals() needs at least one signal kind",
+        ));
+    }
+
+    let mut streams: Vec<(SignalKind, Signal)> = Vec::with_capacity(kinds.len());
+    for &kind in kinds {
+        if streams
+            .iter()
+            .any(|(existing, _)| existing.index() == kind.index())
+        {
+            continue;
+        }
+        // A failure here drops the streams registered so far, which
+        // unregisters them, so a partial registration is not left behind.
+        streams.push((kind, signal(kind)?));
+    }
+
+    Ok(Signals { streams, next: 0 })
+}
+
+impl Signals {
+    /// Waits for the next event from any of the registered kinds.
+    ///
+    /// Returns the kind that produced it. Like [`Signal::recv`], this does not
+    /// currently produce `None`; the `Option` leaves room for a closed state.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// use runite::signal::unix::{signals, SignalKind};
+    ///
+    /// let mut events = signals(&[SignalKind::User1, SignalKind::User2])?;
+    /// let kind = events.recv().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn recv(&mut self) -> Option<SignalKind> {
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<SignalKind>> {
+        let count = self.streams.len();
+        let start = self.next;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let (kind, stream) = &mut self.streams[index];
+            let kind = *kind;
+            if let Poll::Ready(Some(())) = stream.poll_recv(cx) {
+                // Resume after the arm that fired, so a hot signal cannot
+                // starve the others.
+                self.next = (index + 1) % count;
+                return Poll::Ready(Some(kind));
             }
-        })
-        .await
+        }
+        Poll::Pending
+    }
+
+    /// Returns the kinds this stream is registered for, in registration order.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example() -> std::io::Result<()> {
+    /// use runite::signal::unix::{signals, SignalKind};
+    ///
+    /// let events = signals(&[SignalKind::Interrupt, SignalKind::Interrupt])?;
+    /// assert_eq!(events.kinds().len(), 1, "duplicates register once");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn kinds(&self) -> Vec<SignalKind> {
+        self.streams.iter().map(|(kind, _)| *kind).collect()
+    }
+}
+
+impl crate::io::Stream for Signals {
+    type Item = SignalKind;
+
+    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<SignalKind>> {
+        // `Signals` is `Unpin`: it owns a `Vec` and an index, and nothing
+        // borrows from it across polls.
+        self.get_mut().poll_recv(cx)
+    }
+}
+
+impl std::fmt::Debug for Signals {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Signals")
+            .field("kinds", &self.kinds())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Signal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Signal").finish_non_exhaustive()
     }
 }
 

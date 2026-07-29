@@ -70,12 +70,14 @@ mod traits;
 pub use buf::{BufReader, BufWriter};
 pub use ext::{
     AsyncReadExt, AsyncSeekExt, AsyncWriteExt, Close, Copy, CopyBidirectional, Flush, Lines, Read,
-    ReadExact, ReadToEnd, ReadVectored, Seek, Write, WriteAll, WriteVectored, copy,
+    ReadExact, ReadToEnd, ReadToString, ReadVectored, Seek, Write, WriteAll, WriteVectored, copy,
     copy_bidirectional,
 };
-pub(crate) use pending::{
-    CursorState, IoFuture, ReadState, WriteOperation, WriteState, next_operation_id,
-};
+pub(crate) use pending::{CursorState, IoFuture, ReadState, WriteOperation, WriteState};
+// Only reachable from tests now: every production write goes through
+// `AsyncWrite::poll_write_operation`, which mints its own generation.
+#[cfg(test)]
+pub(crate) use pending::next_operation_id;
 pub use std::io::SeekFrom;
 pub use stream::{Collect, Filter, ForEach, Map, Next, Skip, Stream, StreamExt, Take};
 pub use traits::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};

@@ -31,8 +31,125 @@ use crate::process::{CommandSpec, EnvChange, StdioKind};
 use crate::sys::handle::RawFile;
 use crate::sys::windows::overlapped;
 
+/// The process object a [`Child`] waits on.
+///
+/// A child runite spawned is a [`std::process::Child`], which reaps itself.
+/// A child adopted by pid is a bare process handle opened with `OpenProcess`,
+/// for which the backend does the exit-code query itself.
+enum Process {
+    Spawned(std::process::Child),
+    Adopted { pid: u32, handle: OwnedHandle },
+}
+
+impl Process {
+    fn raw_handle(&self) -> RawHandle {
+        match self {
+            Self::Spawned(child) => child.as_raw_handle(),
+            Self::Adopted { handle, .. } => handle.as_raw_handle(),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        match self {
+            Self::Spawned(child) => child.id(),
+            Self::Adopted { pid, .. } => *pid,
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<StdExitStatus>> {
+        match self {
+            Self::Spawned(child) => child.try_wait(),
+            Self::Adopted { handle, .. } => adopted_try_wait(handle),
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Spawned(child) => child.kill(),
+            Self::Adopted { handle, .. } => {
+                // SAFETY: `handle` is a live process handle opened with
+                // `PROCESS_TERMINATE`; the exit code is a plain value.
+                let ok = unsafe {
+                    windows_sys::Win32::System::Threading::TerminateProcess(
+                        handle.as_raw_handle() as HANDLE,
+                        1,
+                    )
+                };
+                if ok == 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+/// Polls an adopted process handle without blocking.
+///
+/// `GetExitCodeProcess` reports `STILL_ACTIVE` for a running process, which is
+/// indistinguishable from a process that genuinely exited with that value, so
+/// the handle's signalled state decides and the exit code is only read once the
+/// wait says the process object is signalled.
+fn adopted_try_wait(handle: &OwnedHandle) -> io::Result<Option<StdExitStatus>> {
+    use std::os::windows::process::ExitStatusExt;
+    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+    // SAFETY: `handle` is a live process handle opened with `SYNCHRONIZE`.
+    let wait = unsafe { WaitForSingleObject(handle.as_raw_handle() as HANDLE, 0) };
+    if wait == WAIT_TIMEOUT {
+        return Ok(None);
+    }
+    if wait == WAIT_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    debug_assert_eq!(wait, WAIT_OBJECT_0);
+
+    let mut code = 0u32;
+    // SAFETY: `handle` is live and opened with
+    // `PROCESS_QUERY_LIMITED_INFORMATION`; `code` is a valid out-pointer.
+    let ok = unsafe { GetExitCodeProcess(handle.as_raw_handle() as HANDLE, &mut code) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(StdExitStatus::from_raw(code)))
+}
+
+/// Adopts an already-running process for exit notification.
+pub(crate) fn from_pid(pid: u32) -> io::Result<Child> {
+    // `SYNCHRONIZE` is a standard access right applying to every waitable
+    // object, but windows-sys declares it once, as a `FILE_ACCESS_RIGHTS`
+    // under `Storage::FileSystem`. The value is the same for a process handle.
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    // SAFETY: `OpenProcess` takes only scalars and returns null on failure.
+    let raw = unsafe {
+        OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `OpenProcess` returned a fresh handle that nothing else owns.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+    Ok(Child {
+        inner: Some(Process::Adopted { pid, handle }),
+        status: None,
+        stdin: None,
+        stdout: None,
+        stderr: None,
+    })
+}
+
 pub(crate) struct Child {
-    inner: Option<std::process::Child>,
+    inner: Option<Process>,
     status: Option<StdExitStatus>,
     pub(crate) stdin: Option<Pipe>,
     pub(crate) stdout: Option<Pipe>,
@@ -58,9 +175,9 @@ pub(crate) fn spawn(spec: &CommandSpec) -> io::Result<Child> {
     if let Some(dir) = &spec.current_dir {
         command.current_dir(dir);
     }
-    command.stdin(stdio(spec.stdin));
-    command.stdout(stdio(spec.stdout));
-    command.stderr(stdio(spec.stderr));
+    command.stdin(stdio(&spec.stdin)?);
+    command.stdout(stdio(&spec.stdout)?);
+    command.stderr(stdio(&spec.stderr)?);
 
     let mut child = command.spawn()?;
     let stdin = child.stdin.take().map(adopt_pipe).transpose()?;
@@ -68,7 +185,7 @@ pub(crate) fn spawn(spec: &CommandSpec) -> io::Result<Child> {
     let stderr = child.stderr.take().map(adopt_pipe).transpose()?;
 
     Ok(Child {
-        inner: Some(child),
+        inner: Some(Process::Spawned(child)),
         status: None,
         stdin,
         stdout,
@@ -81,7 +198,7 @@ impl Child {
         if self.status.is_some() {
             return None;
         }
-        self.inner.as_ref().map(std::process::Child::id)
+        self.inner.as_ref().map(Process::id)
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<StdExitStatus>> {
@@ -118,7 +235,7 @@ impl Child {
                 .inner
                 .as_ref()
                 .expect("child handle is present until reaped")
-                .as_raw_handle();
+                .raw_handle();
             wait_process_exit(process).await?;
         }
     }
@@ -260,10 +377,13 @@ async fn wait_process_exit(process: RawHandle) -> io::Result<()> {
     result
 }
 
-fn stdio(kind: StdioKind) -> std::process::Stdio {
-    match kind {
+fn stdio(kind: &StdioKind) -> io::Result<std::process::Stdio> {
+    Ok(match kind {
         StdioKind::Inherit => std::process::Stdio::inherit(),
         StdioKind::Null => std::process::Stdio::null(),
         StdioKind::Piped => std::process::Stdio::piped(),
-    }
+        // Duplicated rather than consumed, so the same `Command` can be spawned
+        // again and the caller's handle stays theirs.
+        StdioKind::Raw(handle) => std::process::Stdio::from(handle.try_clone()?),
+    })
 }

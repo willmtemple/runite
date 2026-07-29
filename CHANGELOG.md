@@ -5,6 +5,341 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+See the [0.2 → 0.3 migration guide](docs/MIGRATING-0.3.md) for required source
+changes.
+
+### Added
+
+- A child process can be started on a descriptor the caller already owns.
+  `Stdio` gains `From<OwnedFd>` on Unix and `From<OwnedHandle>` on Windows, so
+  any of the three standard streams can be wired to a pseudoterminal, a socket
+  accepted elsewhere, or a preopened file. The descriptor is duplicated at each
+  spawn, so one `Command` can start several children and the caller keeps its
+  original. ([#39](https://github.com/willmtemple/runite/issues/39))
+- `runite::os::unix::process::CommandExt::pre_exec` runs a hook in the child
+  between `fork` and `exec`, mirroring
+  `std::os::unix::process::CommandExt::pre_exec`. This is the window in which
+  a process acquires a controlling terminal (`setsid` then `TIOCSCTTY`), changes
+  process group, or drops privileges. It takes `Fn` rather than `FnMut` because
+  a runite `Command` may be spawned more than once. An error from the hook
+  aborts the spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
+
+  Together these remove the last reason for an otherwise all-runite application
+  to reach for `std::process` — a terminal multiplexer can now start a shell on
+  its own pseudoterminal without a second process API.
+
+- `Child::from_pid` adopts an already-running process, so a process started
+  through some other API can have its exit awaited through the reactor instead
+  of polled. Exit notification is event-driven on every platform — a pidfd on
+  Linux, a `kqueue` process filter on macOS, a registered wait on the process
+  handle on Windows — so no thread is parked for the process's lifetime, and
+  a signal-escalation ladder can be an ordinary task built from `wait` and
+  `time::timeout` rather than a sequence of blocking sleeps.
+  ([#44](https://github.com/willmtemple/runite/issues/44))
+
+  On Unix the process must be a direct child, since reading an exit status
+  requires being its parent; Windows has no such restriction. Adopting a
+  process that does not exist fails at adoption rather than producing a handle
+  whose `wait` never completes.
+
+- `Child` implements `Debug`, reporting the process id and which standard
+  streams are piped. ([#31](https://github.com/willmtemple/runite/issues/31))
+
+- `signal::unix::signals` watches several signal kinds on one stream, yielding
+  the `SignalKind` that produced each event. An application whose SIGINT,
+  SIGTERM and SIGHUP all mean "shut down" needed one spawned task per kind,
+  each duplicating the teardown call. `Signals` implements `io::Stream`,
+  deduplicates repeated kinds, rejects an empty set rather than returning a
+  stream that is never ready, and rotates which kind it polls first so a
+  frequent signal cannot starve the others.
+  ([#45](https://github.com/willmtemple/runite/issues/45))
+
+- `try_block_on`, a fallible counterpart to `block_on`. Creating a thread's
+  platform driver can fail for reasons that are about the machine rather than
+  the program — `io_uring` disabled by a container or hardening policy, or the
+  locked-memory budget exhausted — and `block_on` treats those as
+  unrecoverable. A panic there gives the user a backtrace through the runtime
+  and no way to act; an error lets an application explain itself, fall back to
+  a synchronous path, or choose its own exit status. Only startup is fallible:
+  an error produced by the future is returned inside `Ok`.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+- `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
+  iteration of the event loop, readable from a task poll or a microtask
+  callback and `None` outside a turn. A consumer with its own diagnostics
+  stamps its records with it and joins on equality, so a reactive flush and the
+  runtime turn that drove it become the same row rather than two entries
+  correlated by wall-clock order. Every entry point that drives the loop
+  produces turns, including `run_until_stalled` and `run_ready_tasks`, so a
+  host embedding the runtime sees them too. The identifier carries no
+  information about what the turn did; per-turn statistics belong to
+  [#43](https://github.com/willmtemple/runite/issues/43).
+  ([#52](https://github.com/willmtemple/runite/issues/52))
+- `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
+  existed only as an inherent method on `File`. Validation happens once at end
+  of input rather than per chunk, so a multi-byte character split across two
+  reads is not rejected.
+- `AsyncRead`, `AsyncBufRead`, `AsyncWrite`, and `AsyncSeek` are implemented for
+  `&mut T`, `Box<T>`, and `Pin<P>`. Only `Stream` had these before, so wrapping
+  a borrowed reader did not work — `BufReader::new(&mut file)` failed to
+  compile, and code that only held a `&mut` had to give up ownership or
+  restructure. Every method is forwarded explicitly, including the vectored
+  methods and the internal cancellation-generation hooks, so wrapping a
+  runtime-backed writer in a pointer cannot silently make its writes
+  cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
+
+### Fixed
+
+- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
+  is inherited. It waits for the process-wide stdin reader to release the
+  terminal, and that wait was unbounded — an interrupt frees a reader parked in
+  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
+  on an interactive terminal returns only when the user types. Spawning a child
+  could therefore hang the whole event loop until a keypress. The wait is now
+  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
+  Windows already did, and the caller may retry.
+  ([#28](https://github.com/willmtemple/runite/issues/28))
+
+- `watch::Sender::send` could report success with no receivers. It checked the
+  receiver count under the book lock, released it, then wrote the value, so the
+  last `Receiver` dropping in that window left `send` consuming the value,
+  advancing the version, and returning `Ok(())` — contradicting its documented
+  contract. The check and the write now happen under one book lock. The
+  previous value is moved out rather than assigned over, so `T::drop` runs
+  after both locks are released: dropping it in place would run user code under
+  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
+  ([#26](https://github.com/willmtemple/runite/issues/26))
+
+- `Debug` on the 67 public types that lacked it, and
+  `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
+  cannot reopen. Coverage was inconsistent within single modules —
+  `fs::Metadata` and `DirEntry` derived it while `File`, `OpenOptions` and
+  `ReadDir` did not; every channel error derived it while no channel `Sender`
+  or `Receiver` did — which poisoned `#[derive(Debug)]` on any downstream type
+  holding one. The impls are deliberately opaque
+  (`debug_struct(..).finish_non_exhaustive()`): most of these are futures and
+  guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
+  on type parameters that frequently cannot have it.
+  ([#31](https://github.com/willmtemple/runite/issues/31))
+
+- `fd::read_chunks`, which encapsulates the readiness loop that `wait_readable`
+  otherwise asks every caller to write. The loop carries three pieces of
+  load-bearing knowledge the raw API does not express, each a bug when missed
+  rather than an inefficiency: chunks must be delivered *before* the loop
+  parks, or a burst ending mid-frame stays invisible until the next write;
+  `Interrupted` must retry rather than wait for readiness already reported; and
+  the caller needs a way to stop, or a descriptor producing faster than it
+  consumes starves everything else sharing the loop.
+
+  `on_chunk` runs for each read as it completes, so delivery-before-parking is
+  structural rather than advisory, and returning `ControlFlow::Break` ends the
+  drain. One-shot readiness is deliberately kept rather than replaced by an
+  `AsyncRead` for descriptors: a consumer sharing its thread with a frame clock
+  needs the yield point that reading to completion inside a single stream call
+  would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
+
+- `metrics::snapshot()`, returning a `Snapshot` of `Gauges` and `Counters`.
+  Gauges are levels read at an instant — live tasks, microtask and macrotask
+  queue depths, remote queue depth, armed timers, outstanding driver
+  operations. Counters are monotonic totals — turns, task polls, task wakes,
+  microtasks and macrotasks run, remote tasks rejected — whose useful quantity
+  is the difference between two snapshots.
+
+  They are two types rather than one flat struct on purpose: a flat struct
+  invites subtracting a gauge or reading a counter as a level, and a consumer
+  that cannot tell them apart will misreport. High-water marks are a third kind
+  and will be a third type.
+
+  Reading a snapshot walks nothing. Gauges come from state the runtime already
+  maintains, counters are incremented at the mutation sites that do the work,
+  and taking a snapshot is a handful of loads — because the act of measuring an
+  idle runtime must not itself be work. A thread with no runtime installed
+  reads zeroes rather than panicking or installing one, so a benchmark or test
+  harness that drives application logic without a reactor can still call it.
+
+  `task_wakes` counts only wakes that actually schedule a poll; one coalescing
+  into an already-queued poll is not counted, since it caused no new work.
+  Comparing it against `task_polls` is how a spurious-wake problem surfaces. A
+  snapshot spans whatever interval the reader chooses, so it carries no
+  `TurnId`. ([#43](https://github.com/willmtemple/runite/issues/43))
+
+- `sync::CancellationToken`: cloneable, hierarchical cooperative cancellation
+  that `!Send` tasks can await. It complements `AbortHandle` rather than
+  replacing it — an abort is done *to* a task at its next suspension point, a
+  token is something a task chooses to observe, so work that must flush a
+  buffer or release a lock before stopping can do so. `child_token` derives a
+  token cancelled when its parent is, letting a subsystem cancel its own work
+  without touching its siblings; cancellation flows down only.
+  ([#11](https://github.com/willmtemple/runite/issues/11))
+
+- `TimeoutHandle::cancel_on_drop` and `IntervalHandle::cancel_on_drop`, which
+  wrap a timer token in a `CancelOnDrop` guard that stops the timer when it
+  falls out of scope. The plain handles keep their token semantics — dropping
+  one leaves the timer running, matching `setInterval`/`clearInterval` and this
+  crate's own `JoinHandle` — so this is opt-in and changes nothing by default.
+  It matters most for intervals, where an uncancelled timer keeps the runtime
+  alive and a leaked one stops `run()` from ever returning. The guard is not
+  `Clone`, and `into_inner` releases the timer to a longer-lived owner without
+  cancelling. ([#8](https://github.com/willmtemple/runite/issues/8))
+
+- `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
+  worth retrying: `true` only for a momentarily full queue, `false` for a
+  stopped or uncreatable pool. Deliberately takes `io::Error` rather than
+  introducing a dedicated error type — the kinds already carry the
+  distinction, and keeping `spawn_blocking` in `io::Result` lets it compose
+  with the rest of the crate without a conversion at every seam.
+  ([#46](https://github.com/willmtemple/runite/issues/46))
+
+- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
+  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
+  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
+  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
+  compiled without a warning.
+
+  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
+  Dropping a join handle detaches the task, which is a documented and intended
+  operation rather than a mistake — unlike an unawaited future, which does
+  nothing at all. Marking them flagged 141 call sites across this repository's
+  own tests and examples, essentially all of them correct.
+  ([#30](https://github.com/willmtemple/runite/issues/30))
+
+### Fixed
+
+- `release-verify` no longer passes `--allow-dirty` to `cargo package`
+  unconditionally. That flag writes `"dirty": true` into
+  `.cargo_vcs_info.json`, which changes the bytes of the produced `.crate` and
+  therefore its checksum — while the release workflow's whole idempotency
+  argument rests on that checksum being reproducible, and a mismatch there
+  wedges a version permanently. Verifying from a dirty tree was therefore
+  verifying an artifact the real release could never produce. The flag is now
+  opt-in via `release-verify --allow-dirty`; without it, a dirty packaged file
+  fails loudly instead. ([#29](https://github.com/willmtemple/runite/issues/29))
+
+### Documented
+
+- The scheduling guarantee that layers built on runite batch on — *a microtask
+  queued during a turn runs before the next macrotask* — is now stated as a
+  contract in the crate documentation, along with the fact that runite imposes
+  no scheduling budget and that cooperative yielding is the only mechanism.
+  Tests pin the guarantee (`tests/event_loop_order.rs`), so it cannot be
+  removed silently. ([#14](https://github.com/willmtemple/runite/issues/14))
+
+- `spawn_blocking`'s refusals now say which are retryable. The two failures
+  already carried distinct `io::ErrorKind`s — `WouldBlock` for a full queue,
+  `BrokenPipe` for a stopped pool — but nothing said so, so callers discarded
+  the error and lost the distinction. Both are now also reported as `tracing`
+  warnings on the `runite::runtime` target, so a caller that drops the error
+  still leaves evidence; the downstream symptom is work that silently stops
+  happening, which is otherwise hard to trace back.
+  ([#46](https://github.com/willmtemple/runite/issues/46))
+
+- `ChildStdin`'s close can deadlock against a child waiting for end of input,
+  and the hazard is now on the type rather than absent. Because `poll_close`
+  drains pending writes first, a write cancelled with the pipe buffer full
+  cannot complete while the child will not read again until it sees EOF — so
+  the close waits for the write, the write waits for the child, and the child
+  waits for the close. This is inherent to "close flushes what you already
+  wrote"; a bounded drain would replace a visible hang with silent truncation
+  the caller cannot detect. Dropping the handle closes immediately and abandons
+  the pending write, and is now documented as the escape, with a test pinning
+  it. ([#27](https://github.com/willmtemple/runite/issues/27))
+
+### Changed
+
+- Fixed two intra-doc links on `TcpStream` that pointed at inherent
+  `read_exact`/`write_all` methods removed in this release; they now name the
+  extension-trait methods.
+- Removed `FuturesCompat`'s `poll_write_vectored_operation` override, which was
+  identical to its `poll_write_vectored` and to what the trait default already
+  forwards to, plus two `#[allow(dead_code)]` attributes that had gone stale as
+  their targets became unconditionally used.
+  ([#32](https://github.com/willmtemple/runite/issues/32))
+- Removed the Linux driver's `pending_cancel_buffers` map, the `CancelGuard`
+  type, and the guard parameter threaded down to four call sites that all
+  passed `None`. It was a second, always-empty home for the staging buffers
+  that survive a cancelled operation. The invariant it was meant to enforce is
+  real and unchanged: the buffer is owned by the operation's completion
+  callback, the driver holds that callback until the *original* operation's
+  terminal CQE, and the cancel path never touches it — because
+  `IORING_OP_ASYNC_CANCEL` can report `-EALREADY`, meaning the target may still
+  write. Internal only; no API change.
+  ([#32](https://github.com/willmtemple/runite/issues/32))
+
+- `io_uring` setup failing with `ENOMEM` now says what actually went wrong. The
+  rings are pinned against `RLIMIT_MEMLOCK`, so this is a locked-memory limit
+  rather than memory exhaustion — but the raw errno renders as "Cannot allocate
+  memory", which sends the reader to look at free RAM on a machine with tens of
+  gigabytes of it. The error now reports the current `RLIMIT_MEMLOCK`, names
+  profilers as the usual competitor for the same budget (`perf record` with
+  default settings is the common case; `-m 32` leaves room), and uses
+  `ErrorKind::QuotaExceeded` rather than `OutOfMemory` so a caller matching on
+  the kind is not misled either.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+
+### Breaking
+
+- `sync::Permit` is renamed `sync::SemaphorePermit`. It was the only guard type
+  in the crate without an owner prefix, beside `MutexGuard`,
+  `RwLockReadGuard` and `RwLockWriteGuard`.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
+
+- `Stdin::read_line` is renamed `Stdin::next_line`. It shared a name with
+  `BufReader::read_line` while having an incompatible signature and a different
+  end-of-input convention — one allocates and returns `Option<String>` with
+  `None` at end of input, the other appends to a caller-supplied `String` and
+  reports `Ok(0)`. `BufReader::read_line` keeps its name because it follows
+  `std`; the divergent one is the one that moved.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
+
+- `Stdin::read`, `Stdout::write` and `Stderr::write` are removed, completing
+  the sweep below. These were not duplicates: `Stdin::read` wrapped its poll in
+  a guard that discarded the pending operation and unregistered the waiter on
+  cancellation, while the `AsyncRead` path retained both — so the documented
+  cancel-safety sentence held on one path and not the other, and generic code
+  over `AsyncRead` silently got the undocumented one. Both now share a single
+  read path with retention as the contract, matching every other runite reader:
+  a cancelled read leaves its operation claimable by the next one.
+  ([#53](https://github.com/willmtemple/runite/issues/53))
+
+- The inherent `read`/`write`-family methods on `File`, `TcpStream` and
+  `UnixStream` are removed in favour of `AsyncReadExt`, `AsyncWriteExt` and
+  `AsyncSeekExt`. `File` had eight of them, `TcpStream` four, `UnixStream`
+  three, while `ChildStdin`, `BufReader` and the owned split halves had none.
+  Inherent methods win name resolution, so identical-looking calls dispatched
+  to different code depending on the concrete type, and refactoring a concrete
+  type into `fn f<R: AsyncRead>(r: &mut R)` silently changed which
+  implementation ran. The bodies were already thin wrappers over the same
+  `poll_read`/`poll_write_operation` paths the ext traits use, so behaviour —
+  including cancel safety and write-operation identity — is unchanged; only the
+  import is new. Add `use runite::io::{AsyncReadExt, AsyncWriteExt};` (and
+  `AsyncSeekExt` for `File::seek`).
+
+  The positional methods (`read_at`, `read_exact_at`, `write_at`,
+  `write_all_at`) are **not** affected: they take an explicit offset, do not
+  shadow a trait method, and remain inherent.
+  ([#35](https://github.com/willmtemple/runite/issues/35))
+
+- `net::unix::Incoming` no longer borrows its listener. It was `Incoming<'a>`
+  holding `&'a UnixListener` while the TCP `net::Incoming` held an owned
+  listener, so the same method name produced a movable stream for TCP and a
+  borrowed one for Unix — `spawn(async move { listener.incoming()... })`
+  compiled for one and not the other, and generic code over both could not be
+  written once. `UnixListener` now reference-counts its descriptor internally,
+  exactly as `TcpListener` already did, and `incoming()` returns an owned
+  `Incoming`. Code that named the lifetime (`Incoming<'_>`, `Incoming<'a>`)
+  drops it. ([#35](https://github.com/willmtemple/runite/issues/35))
+
+- `Stdio` is no longer `Clone`, `Copy`, `PartialEq`, or `Eq`, and `Command` is
+  no longer `Clone`. A `Stdio` can now own a descriptor, and neither copying one
+  implicitly nor comparing one for equality is meaningful; `std::process::Stdio`
+  and `std::process::Command` are not `Clone` for the same reason. Code that
+  relied on passing a `Stdio` by copy should construct one per call, and code
+  that cloned a `Command` should build it twice or wrap it.
+
+  Note that the public API report does not track derived trait impls, so this
+  change does not appear in `docs/public-api.md`.
+
 ## [0.2.0] — 2026-07-27
 
 This release hardens the runtime's lifecycle and completion ownership, adds the
@@ -195,5 +530,6 @@ microtask/macrotask scheduling, local `!Send` futures, explicit worker
 runtimes, async filesystem/network/process/stdio services, timers, channels,
 and synchronization primitives.
 
+[Unreleased]: https://github.com/willmtemple/runite/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/willmtemple/runite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0

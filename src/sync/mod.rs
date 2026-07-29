@@ -9,8 +9,9 @@
 //!
 //! Use [`Mutex`] for exclusive access to shared task-local state, [`RwLock`] for
 //! shared-or-exclusive access, [`Semaphore`] for limiting concurrent access,
-//! [`Notify`] for one-shot task wakeups, and [`OnceCell`] for asynchronous
-//! initialize-once values.
+//! [`Notify`] for one-shot task wakeups, [`OnceCell`] for asynchronous
+//! initialize-once values, and [`CancellationToken`] for cooperative
+//! cancellation that tasks observe rather than have imposed on them.
 //!
 //! # Examples
 //!
@@ -63,14 +64,16 @@
 //! assert!(woke.get());
 //! ```
 
+mod cancellation;
 mod mutex;
 mod notify;
 mod once_cell;
 mod rw_lock;
 mod semaphore;
 
+pub use cancellation::CancellationToken;
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::Notify;
 pub use once_cell::OnceCell;
 pub use rw_lock::{RwLock, RwLockReadFuture, RwLockReadGuard, RwLockWriteFuture, RwLockWriteGuard};
-pub use semaphore::{Permit, Semaphore};
+pub use semaphore::{Semaphore, SemaphorePermit};

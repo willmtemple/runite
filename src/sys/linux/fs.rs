@@ -414,7 +414,7 @@ where
     })?;
 
     handle.set_cancel(move || {
-        cancel_operation_on_owner(owner, token, None);
+        cancel_operation_on_owner(owner, token);
     });
 
     future.await

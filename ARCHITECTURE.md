@@ -137,6 +137,16 @@ reach an after-the-loop check. A long checkpoint with nothing queued behind it s
 warns nothing. Implemented by `drain_all()`, `drain_microtasks()`, and the single
 `pop_macrotask()` per turn (`src/platform/runtime_shared/scheduler.rs`).
 
+Each iteration of that loop is identified by a `TurnId`, readable from inside it with
+`current_turn()`. The counter is a process-wide relaxed `fetch_add` taken once per turn — not per
+task or per microtask — so it is far cheaper than the driver drain that opens the same turn, and
+identifiers do not collide between runtime threads. Being globally unique matters more than being
+dense: a consumer merging several threads into one profile joins on equality, and a per-thread
+counter would force it to carry a thread identity alongside. All four entry points (`run`,
+`block_on`, `run_until_stalled`, `run_ready_tasks`) drive turns, since a host embedding the runtime
+through the latter two needs the key as much as `run` does. The identifier is deliberately opaque
+and carries nothing about what the turn did.
+
 Why this shape exists:
 
 - It gives a deterministic flush point between input handling and rendering.
@@ -376,12 +386,19 @@ terminal CQE. Instead, the runtime uses a conservative staging model:
   and copy the completed bytes into the caller's slice before returning.
 - Write operations copy the caller's slice into an internal owned buffer before submission so the
   kernel can keep reading from it after the user-visible future is dropped.
-- On normal completion, the operation callback drops the internal buffer after mapping the CQE.
-- On Drop before completion, the cancel callback submits `IORING_OP_ASYNC_CANCEL` and detaches a
-  guard into the Linux driver's `pending_cancel_buffers` map, keyed by the original operation token.
-  `pending_cancel_tokens` maps the cancel SQE token back to that original token. A cancel CQE alone
-  never releases kernel-visible storage; the driver drops the guard only after the original
-  operation's terminal CQE.
+- The internal buffer is **moved into the operation's completion callback**, and the Linux driver
+  holds that callback in its `completions` map keyed by the operation token. Buffer liveness is
+  therefore a consequence of callback retention: the allocation lives exactly as long as the entry.
+- On normal completion, the callback maps the CQE and is then dropped, which drops the buffer.
+- On Drop before completion, the cancel callback submits `IORING_OP_ASYNC_CANCEL` but does **not**
+  touch `completions`. The entry — and so the buffer — survives the cancel.
+- A cancel CQE alone never releases kernel-visible storage. `IORING_OP_ASYNC_CANCEL` can report
+  `-EALREADY`, meaning the target operation was already executing, could not be stopped, and may
+  still write into the buffer. The driver therefore releases the entry only on the *original*
+  operation's terminal CQE (`CompletionKind::Operation`), never on the cancel's own
+  (`CompletionKind::OperationCancel`). `pending_cancel_tokens` exists to map the cancel SQE's token
+  back to the original for bookkeeping, not for storage release.
+
 
 On top of the staging model, the concrete I/O types make **reads cancel-safe** by stashing the
 in-flight operation on the object rather than in the transient future: `TcpStream`, `UnixStream`,
@@ -421,6 +438,23 @@ kqueue and is woken by the exit event, then collects the status with `waitpid`
 (`src/sys/macos/process.rs`). Registering a child that has already exited returns `ESRCH`, which is
 treated as a wakeup so the caller reaps it rather than waiting for an event that can never arrive.
 There is no periodic timer and no blocking-pool offload for child exit on any platform.
+
+`Child::from_pid` adopts a process runite did not spawn, using the same wait paths. Linux opens a
+fresh pidfd, macOS registers the same `EVFILT_PROC` filter, and Windows opens the process with
+`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE`. Because an adopted Windows
+process is a bare handle rather than a `std::process::Child`, the backend's process object is an
+enum over the two, and the adopted arm polls exit itself: it waits on the handle with a zero timeout
+and only reads `GetExitCodeProcess` once the object is signalled, since `STILL_ACTIVE` is
+indistinguishable from a process that genuinely exited with that value. Adoption validates the
+target up front on every platform, so a process that is already gone fails to adopt rather than
+producing a handle whose `wait` never completes. On Unix the target must be a direct child, because
+reading an exit status requires being its parent.
+
+A standard stream configured from a caller-owned descriptor (`Stdio::from`) is duplicated at each
+spawn rather than consumed, which keeps a `Command` reusable and leaves the caller's descriptor
+theirs. On Unix a `pre_exec` hook is stored behind an `Arc` and forwarded to
+`std::os::unix::process::CommandExt::pre_exec` for the same reason — a runite `Command` may be
+spawned more than once, so the hook is `Fn` rather than std's `FnMut`.
 
 Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
 Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, macOS uses the

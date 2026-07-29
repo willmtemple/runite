@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+use runite::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use std::io::SeekFrom;
 use std::os::unix::fs::symlink;
 

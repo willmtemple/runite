@@ -4,6 +4,7 @@
 mod common;
 
 use common::block_on;
+use runite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use runite::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use std::net::Shutdown;
 

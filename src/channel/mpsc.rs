@@ -108,12 +108,26 @@ pub struct Sender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
 }
 
+impl<T: Send + 'static> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
 /// Unbounded multi-producer sender.
 ///
 /// Sends never wait for capacity; they only fail after the receiver is closed or
 /// dropped.
 pub struct UnboundedSender<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
+}
+
+impl<T: Send + 'static> std::fmt::Debug for UnboundedSender<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnboundedSender")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Single consumer for both bounded and unbounded MPSC channels.
@@ -126,6 +140,12 @@ pub struct UnboundedSender<T: Send + 'static> {
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Mutex<State<T>>>,
     stream_wait: Option<CompletionFuture<()>>,
+}
+
+impl<T: Send + 'static> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 struct State<T: Send + 'static> {

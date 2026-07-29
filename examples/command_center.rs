@@ -136,7 +136,7 @@ async fn interactive(board: Rc<RefCell<JobBoard>>) -> std::io::Result<()> {
     // This await parks *this task*, not the thread: jobs continue to run and
     // print their completions while we wait for the next line. The loop ends
     // on `quit` or EOF (e.g. piped input running out).
-    while let Some(line) = input.read_line().await? {
+    while let Some(line) = input.next_line().await? {
         if !dispatch(&board, line.trim()) {
             break;
         }

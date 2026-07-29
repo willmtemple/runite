@@ -4,7 +4,9 @@
 //! thread-local event loop. [`ctrl_c`] is the portable entry point for shutdown
 //! handling; the platform submodule (`unix` or `windows`) exposes streams for
 //! specific event kinds, such as terminal resize notifications on Unix or
-//! Ctrl-Break events on Windows.
+//! Ctrl-Break events on Windows. On Unix, `unix::signals` serves several kinds
+//! from one stream, so "any of these means shut down" needs one task rather
+//! than one per kind.
 //!
 //! POSIX signals are process-global, while this runtime is thread-local and
 //! supports `!Send` futures. The Unix backend therefore uses one process-wide

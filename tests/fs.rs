@@ -4,6 +4,7 @@ mod common;
 
 use common::block_on;
 use runite::fs::{self, File, OpenOptions};
+use runite::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};

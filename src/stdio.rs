@@ -137,7 +137,7 @@ impl Drop for InheritedStdinHandoff {
 ///
 /// Every handle shares the process-wide bounded stdin reader and implements
 /// [`AsyncRead`] for byte-oriented reads. It also provides
-/// [`read_line`](Self::read_line) for simple line-oriented input. The dedicated
+/// [`next_line`](Self::next_line) for simple line-oriented input. The dedicated
 /// reader thread owns the duplicated operating-system handle; `Stdin` itself
 /// contains no raw handle.
 ///
@@ -145,7 +145,7 @@ impl Drop for InheritedStdinHandoff {
 /// bytes exactly once; cancelling a pending read removes only that handle's
 /// waiter.
 ///
-/// `read_line` keeps partial lines on the handle but leaves bytes after a
+/// `next_line` keeps partial lines on the handle but leaves bytes after a
 /// newline in the shared process buffer.
 ///
 /// Create one with [`stdin`].
@@ -155,6 +155,12 @@ pub struct Stdin {
     buffer: Vec<u8>,
     reader: Arc<stdin_reader::StdinReader>,
     waiter_id: u64,
+}
+
+impl std::fmt::Debug for Stdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stdin").finish_non_exhaustive()
+    }
 }
 
 /// Async writer for standard output.
@@ -172,6 +178,12 @@ pub struct Stdout {
     writer: StandardWriter,
 }
 
+impl std::fmt::Debug for Stdout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stdout").finish_non_exhaustive()
+    }
+}
+
 /// Async writer for standard error.
 ///
 /// Created by [`stderr`], this handle duplicates the process stderr descriptor
@@ -185,6 +197,12 @@ pub struct Stdout {
 /// Dropping it does not close the process-wide stderr stream.
 pub struct Stderr {
     writer: StandardWriter,
+}
+
+impl std::fmt::Debug for Stderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Stderr").finish_non_exhaustive()
+    }
 }
 
 struct StandardWriter {
@@ -318,19 +336,26 @@ impl Stdin {
     /// Partial lines are retained across waits. Bytes following a newline stay
     /// in the process-wide buffer for another call or another handle.
     ///
+    /// Named `next_line` rather than `read_line` because it is not the `std`
+    /// shape: it allocates and returns the line, and reports end of input as
+    /// `None`. [`BufReader::read_line`](crate::io::BufReader::read_line)
+    /// follows `std` — it appends to a caller-supplied `String` and reports end
+    /// of input as `Ok(0)`. Two methods with one name and incompatible end-of-
+    /// input conventions in the same crate was a trap worth removing.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// runite::spawn(async {
     ///     let mut input = runite::stdin().expect("stdin should open");
-    ///     if let Some(line) = input.read_line().await.expect("stdin should read") {
+    ///     if let Some(line) = input.next_line().await.expect("stdin should read") {
     ///         eprintln!("line length: {}", line.len());
     ///     }
     /// });
     ///
     /// runite::run();
     /// ```
-    pub async fn read_line(&mut self) -> io::Result<Option<String>> {
+    pub async fn next_line(&mut self) -> io::Result<Option<String>> {
         loop {
             if let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
                 let line = self.buffer.drain(..=index).collect::<Vec<_>>();
@@ -351,57 +376,34 @@ impl Stdin {
         }
     }
 
-    /// Reads bytes from standard input into `buf`.
-    ///
-    /// Returns the number of bytes copied into `buf`, or `0` if `buf` is empty
-    /// or stdin reaches EOF.
-    ///
-    /// For extension methods such as `read_exact` and `read_to_end`, use the
-    /// [`AsyncReadExt`](crate::io::AsyncReadExt) trait.
-    ///
-    /// # Cancel safety
-    ///
-    /// This method is cancel-safe on every supported platform. Dropping the
-    /// returned future unregisters its waiter; input already read by the
-    /// dedicated thread remains in the shared buffer for a later read. Stdin
-    /// never occupies a runtime blocking-pool worker.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// runite::spawn(async {
-    ///     let mut input = runite::stdin().expect("stdin should open");
-    ///     let mut byte = [0; 1];
-    ///     let _read = input.read(&mut byte).await.expect("stdin should read");
-    /// });
-    ///
-    /// runite::run();
-    /// ```
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_buffered(buf, false).await
-    }
-
     async fn read_line_chunk(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.read_buffered(buf, true).await
     }
 
     async fn read_buffered(&mut self, buf: &mut [u8], stop_at_newline: bool) -> io::Result<usize> {
+        core::future::poll_fn(|cx| self.poll_buffered(cx, buf, stop_at_newline)).await
+    }
+
+    /// The single read path, shared by `next_line`, the inherent `read`, and
+    /// the `AsyncRead` impl, so all three agree on cancellation.
+    fn poll_buffered(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+        stop_at_newline: bool,
+    ) -> Poll<io::Result<usize>> {
         if buf.is_empty() {
-            return Ok(0);
+            return Poll::Ready(Ok(0));
         }
         if !stop_at_newline && let Some(read) = self.drain_line_buffer(buf) {
-            return Ok(read);
+            return Poll::Ready(Ok(read));
         }
 
-        let mut read = StdinReadGuard::new(
-            &mut self.read_state,
-            Arc::clone(&self.reader),
-            self.waiter_id,
-            stop_at_newline,
-        );
-        let result = core::future::poll_fn(|cx| read.poll(cx, buf)).await;
-        read.complete();
-        result
+        let reader = Arc::clone(&self.reader);
+        let waiter_id = self.waiter_id;
+        self.read_state.poll_slice(cx, buf, move |len| {
+            reader.read_future(waiter_id, len, stop_at_newline)
+        })
     }
 
     fn drain_line_buffer(&mut self, buf: &mut [u8]) -> Option<usize> {
@@ -421,108 +423,9 @@ impl Drop for Stdin {
     }
 }
 
-struct StdinReadGuard<'a> {
-    read_state: &'a mut ReadState,
-    reader: Arc<stdin_reader::StdinReader>,
-    waiter_id: u64,
-    stop_at_newline: bool,
-    armed: bool,
-}
+impl Stdout {}
 
-impl<'a> StdinReadGuard<'a> {
-    fn new(
-        read_state: &'a mut ReadState,
-        reader: Arc<stdin_reader::StdinReader>,
-        waiter_id: u64,
-        stop_at_newline: bool,
-    ) -> Self {
-        Self {
-            read_state,
-            reader,
-            waiter_id,
-            stop_at_newline,
-            armed: true,
-        }
-    }
-
-    fn poll(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        let reader = Arc::clone(&self.reader);
-        let waiter_id = self.waiter_id;
-        let stop_at_newline = self.stop_at_newline;
-        self.read_state.poll_slice(cx, buf, move |len| {
-            reader.read_future(waiter_id, len, stop_at_newline)
-        })
-    }
-
-    fn complete(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for StdinReadGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            *self.read_state = ReadState::default();
-            self.reader.abandon(self.waiter_id);
-        }
-    }
-}
-
-impl Stdout {
-    /// Writes bytes to standard output.
-    ///
-    /// The write is sent through the platform backend immediately and may write
-    /// fewer bytes than `buf.len()`. Use
-    /// [`write_all`](crate::io::AsyncWriteExt::write_all) to retry until the
-    /// full buffer is written. `flush()` is a no-op for durability and libc
-    /// buffering; it does not call `fflush` or `fsync`.
-    ///
-    /// For extension methods such as `write_all` and `flush`, use the
-    /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// runite::spawn(async {
-    ///     let mut out = runite::stdout().expect("stdout should open");
-    ///     let bytes = out.write(b"partial frame\n").await.expect("stdout should write");
-    ///     assert!(bytes > 0);
-    /// });
-    ///
-    /// runite::run();
-    /// ```
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.writer.write(buf).await
-    }
-}
-
-impl Stderr {
-    /// Writes bytes to standard error.
-    ///
-    /// The write is sent through the platform backend immediately and may write
-    /// fewer bytes than `buf.len()`. Use
-    /// [`write_all`](crate::io::AsyncWriteExt::write_all) to retry until the
-    /// full buffer is written. `flush()` is a no-op for durability and libc
-    /// buffering; it does not call `fflush` or `fsync`.
-    ///
-    /// For extension methods such as `write_all` and `flush`, use the
-    /// [`AsyncWriteExt`](crate::io::AsyncWriteExt) trait.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// runite::spawn(async {
-    ///     let mut err = runite::stderr().expect("stderr should open");
-    ///     let bytes = err.write(b"warning\n").await.expect("stderr should write");
-    ///     assert!(bytes > 0);
-    /// });
-    ///
-    /// runite::run();
-    /// ```
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.writer.write(buf).await
-    }
-}
+impl Stderr {}
 
 impl StandardWriter {
     fn new(fd: OwnedFile) -> Self {
@@ -532,6 +435,10 @@ impl StandardWriter {
         }
     }
 
+    /// Test-only convenience. The public writers reach this through
+    /// `AsyncWrite::poll_write_operation`; nothing in the crate awaits a
+    /// `StandardWriter` directly outside tests.
+    #[cfg(test)]
     async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let generation = crate::io::next_operation_id();
         core::future::poll_fn(|cx| self.poll_write(cx, buf, generation)).await
@@ -561,20 +468,7 @@ impl AsyncRead for Stdin {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
-        let this = self.get_mut();
-        if let Some(read) = this.drain_line_buffer(buf) {
-            return Poll::Ready(Ok(read));
-        }
-
-        let reader = Arc::clone(&this.reader);
-        let waiter_id = this.waiter_id;
-        this.read_state.poll_slice(cx, buf, move |len| {
-            reader.read_future(waiter_id, len, false)
-        })
+        self.get_mut().poll_buffered(cx, buf, false)
     }
 }
 
@@ -1035,8 +929,7 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    #[cfg(unix)]
-    use crate::io::AsyncWriteExt;
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -1111,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_stdin_read_preserves_later_input_and_removes_its_waiter() {
+    fn cancelled_stdin_read_preserves_later_input_and_retains_its_operation() {
         let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         let mut abandoned = [0u8; 8];
 
@@ -1123,7 +1016,9 @@ mod tests {
             })
             .await;
             drop(pending);
-            assert_eq!(reader.waiter_count(), 0);
+            // The operation is retained rather than abandoned, which is what
+            // makes the cancelled read cancel-safe: the next read claims it.
+            assert_eq!(reader.waiter_count(), 1);
 
             write_test_pipe(&mut writer, b"kept").expect("write after cancellation");
             let mut observed = [0u8; 4];
@@ -1133,6 +1028,48 @@ mod tests {
             );
             assert_eq!(&observed, b"kept");
         });
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    /// A read cancelled in one mode leaves an operation the *other* mode can
+    /// claim, and claiming it makes progress rather than waiting.
+    ///
+    /// `ReadState` resumes a pending operation without consulting the new
+    /// caller's mode, because the mode is bound when the operation starts. That
+    /// is sound here only because `stop_at_newline` bounds how much the reader
+    /// takes rather than making it wait for a newline — so a byte read that
+    /// inherits a line-mode operation gets a possibly-shorter read, which its
+    /// contract already allows, and never a stall.
+    #[test]
+    fn a_byte_read_can_claim_a_cancelled_line_read_s_operation() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+
+        // Park a line read with nothing to read, so a line-mode operation is
+        // pending and no bytes are buffered on the handle.
+        let mut pending = Box::pin(input.next_line());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        drop(pending);
+        assert_eq!(
+            reader.waiter_count(),
+            1,
+            "the cancelled line read should leave its operation claimable"
+        );
+
+        // Bytes with no newline: a reader that waited for one would never
+        // return.
+        write_test_pipe(&mut writer, b"abc").expect("write unterminated bytes");
+
+        let mut observed = [0u8; 8];
+        let read = crate::block_on(async {
+            crate::time::timeout(std::time::Duration::from_secs(5), input.read(&mut observed))
+                .await
+                .expect("claiming the operation must make progress, not stall")
+        })
+        .expect("byte read should succeed");
+        assert_eq!(&observed[..read], b"abc");
 
         drop(writer);
         assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
@@ -1182,20 +1119,22 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_stdin_read_line_retains_its_partial_prefix() {
+    fn cancelled_stdin_next_line_retains_its_partial_prefix() {
         let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         write_test_pipe(&mut writer, b"par").expect("write partial line");
-        let mut pending = Box::pin(input.read_line());
+        let mut pending = Box::pin(input.next_line());
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut cx).is_pending());
         assert!(reader.wait_for_buffered(3, std::time::Duration::from_secs(5)));
         assert!(pending.as_mut().poll(&mut cx).is_pending());
         drop(pending);
-        assert_eq!(reader.waiter_count(), 0);
+        // Retained, not abandoned: the next line read resumes the same
+        // line-mode operation.
+        assert_eq!(reader.waiter_count(), 1);
 
         write_test_pipe(&mut writer, b"tial\n").expect("finish partial line");
         assert_eq!(
-            crate::block_on(input.read_line())
+            crate::block_on(input.next_line())
                 .expect("replacement line read")
                 .as_deref(),
             Some("partial\n")
@@ -1206,10 +1145,10 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_read_line_prefix_precedes_inherent_and_trait_reads() {
+    fn cancelled_next_line_prefix_precedes_inherent_and_trait_reads() {
         let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         write_test_pipe(&mut writer, b"prefix").expect("write partial line");
-        let mut pending = Box::pin(input.read_line());
+        let mut pending = Box::pin(input.next_line());
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut cx).is_pending());
         assert!(reader.wait_for_buffered(6, std::time::Duration::from_secs(5)));
@@ -1437,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn stdin_read_line_preserves_read_ahead_and_reports_invalid_utf8() {
+    fn stdin_next_line_preserves_read_ahead_and_reports_invalid_utf8() {
         let (mut first, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
         let mut second = Stdin::from_reader(Arc::clone(&reader));
         write_test_pipe(&mut writer, b"first\nsecond\nbad \xff\n").expect("write line input");
@@ -1445,16 +1384,16 @@ mod tests {
 
         crate::block_on(async {
             assert_eq!(
-                first.read_line().await.expect("first line").as_deref(),
+                first.next_line().await.expect("first line").as_deref(),
                 Some("first\n")
             );
             assert_eq!(
-                second.read_line().await.expect("second line").as_deref(),
+                second.next_line().await.expect("second line").as_deref(),
                 Some("second\n")
             );
             assert_eq!(
                 second
-                    .read_line()
+                    .next_line()
                     .await
                     .expect_err("invalid UTF-8 should fail")
                     .kind(),
@@ -1462,7 +1401,7 @@ mod tests {
             );
             assert!(
                 second
-                    .read_line()
+                    .next_line()
                     .await
                     .expect("EOF after bad line")
                     .is_none()

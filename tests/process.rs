@@ -503,3 +503,42 @@ fn exit_status_accessors_report_success_failure_and_signal() {
     #[cfg(unix)]
     assert_eq!(statuses.2.2, Some(libc::SIGKILL));
 }
+
+/// Dropping `ChildStdin` closes it immediately, abandoning any pending write.
+///
+/// This is the documented escape from `close().await`, which drains first and
+/// therefore cannot complete while a child is waiting for end of input before
+/// reading again. The child here reads nothing until EOF, so only a close that
+/// does *not* drain lets it proceed.
+#[test]
+fn dropping_child_stdin_closes_without_draining() {
+    let status = block_on(|| async {
+        // `cat` with stdin closed exits; the point is that it observes EOF at
+        // all, which a draining close would not deliver here.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            // Sleep first so the parent's write is still in flight, then read
+            // to end: the child only finishes once it sees EOF.
+            .arg("sleep 0.2; cat >/dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("child should spawn");
+
+        let mut stdin = child.stdin.take().expect("stdin should be piped");
+        stdin
+            .write_all(b"payload")
+            .await
+            .expect("write should land");
+
+        // Drop rather than `close().await`.
+        drop(stdin);
+
+        time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("dropping stdin should deliver EOF and let the child exit")
+            .expect("child should be waitable")
+    });
+
+    assert!(status.success(), "the child should exit cleanly after EOF");
+}

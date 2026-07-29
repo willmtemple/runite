@@ -38,7 +38,7 @@ async fn submit_poll(fd: RawFd, mask: i16) -> io::Result<()> {
     })?;
 
     handle.set_cancel(move || {
-        cancel_operation_on_owner(owner, token, None);
+        cancel_operation_on_owner(owner, token);
     });
 
     future.await

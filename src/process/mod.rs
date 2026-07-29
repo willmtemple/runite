@@ -75,7 +75,7 @@
 //! ```
 
 mod child;
-mod command;
+pub(crate) mod command;
 pub(crate) mod pipe;
 mod status;
 

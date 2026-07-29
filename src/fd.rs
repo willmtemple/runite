@@ -115,6 +115,95 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
     crate::sys::current::fd::wait_writable(raw).await
 }
 
+/// Drains a nonblocking descriptor, delivering each chunk as it arrives.
+///
+/// This is the readiness loop that [`wait_readable`] otherwise asks every
+/// caller to write, and it exists because that loop carries three pieces of
+/// load-bearing knowledge the raw API does not express — each of which is a
+/// bug when missed rather than an inefficiency.
+///
+/// **Chunks are delivered before the loop parks.** `on_chunk` runs for every
+/// read as it completes, so whatever the caller does with the bytes has
+/// already happened by the time this waits for more. Written by hand, the
+/// natural shape is to accumulate and flush after the loop, and then a burst
+/// that ends mid-frame stays invisible until the *next* write arrives — for a
+/// terminal, a shell prompt that appears seconds late or not at all.
+///
+/// **`Interrupted` retries rather than parking.** A signal arriving mid-read
+/// is not a reason to wait for readiness that has already been reported.
+///
+/// **The caller sets its own budget.** Returning
+/// [`ControlFlow::Break`](core::ops::ControlFlow::Break) stops
+/// the drain and returns `Ok(())`, so a consumer sharing its thread with a
+/// frame clock can bound how much it processes at once. Without that, a
+/// descriptor producing faster than the caller consumes — `cat` of a large
+/// file into a terminal — starves everything else on the loop for as long as
+/// it takes.
+///
+/// Returns when the descriptor reports end of input, when `on_chunk` breaks,
+/// or on error. The descriptor must already be nonblocking; a blocking one
+/// will stall the event loop inside `read`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example(fd: std::os::fd::OwnedFd) -> std::io::Result<()> {
+/// use std::ops::ControlFlow;
+///
+/// let mut buffer = vec![0; 64 * 1024];
+/// let mut budget: usize = 1024 * 1024;
+///
+/// runite::fd::read_chunks(&fd, &mut buffer, |chunk| {
+///     // Consume immediately: this runs before the loop waits for more.
+///     budget = budget.saturating_sub(chunk.len());
+///     if budget == 0 {
+///         ControlFlow::Break(())
+///     } else {
+///         ControlFlow::Continue(())
+///     }
+/// })
+/// .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn read_chunks<Fd: AsFd>(
+    fd: &Fd,
+    buffer: &mut [u8],
+    mut on_chunk: impl FnMut(&[u8]) -> core::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    let raw = fd.as_fd().as_raw_fd();
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    loop {
+        // SAFETY: `raw` is borrowed from `fd` for the whole call, and `buffer`
+        // points to `buffer.len()` writable bytes.
+        let read = unsafe {
+            libc::read(
+                raw,
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+        if read > 0 {
+            let read = read as usize;
+            if on_chunk(&buffer[..read]).is_break() {
+                return Ok(());
+            }
+            continue;
+        }
+        if read == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => wait_readable(fd.as_fd()).await?,
+            _ => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::wait_readable;
@@ -187,5 +276,102 @@ mod tests {
 
         run();
         assert!(observed.load(Ordering::SeqCst));
+    }
+
+    /// The three properties `read_chunks` exists to encode: chunks arrive
+    /// before the loop parks, a break stops the drain, and end of input ends
+    /// it.
+    #[test]
+    fn read_chunks_delivers_before_parking_and_honours_a_break() {
+        use std::cell::RefCell;
+        use std::ops::ControlFlow;
+        use std::rc::Rc;
+
+        let mut fds = [0; 2];
+        // SAFETY: two writable `c_int` slots that `pipe` initializes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        // SAFETY: the read end is open; O_NONBLOCK is required by the contract.
+        unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+
+        // SAFETY: `write_fd` is the open write end.
+        let write = |bytes: &[u8]| unsafe {
+            libc::write(write_fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len())
+        };
+        assert!(write(b"first") > 0);
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let collected = Rc::clone(&seen);
+
+        queue_macrotask(move || {
+            spawn(async move {
+                // SAFETY: `read_fd` stays open until this task closes it.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(read_fd) };
+                let mut buffer = [0u8; 64];
+                let mut chunks = 0;
+                super::read_chunks(&borrowed, &mut buffer, |chunk| {
+                    collected
+                        .borrow_mut()
+                        .push(String::from_utf8_lossy(chunk).into_owned());
+                    chunks += 1;
+                    // Stop after the first chunk: the drain must honour this
+                    // rather than continuing to end of input.
+                    if chunks == 1 {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .await
+                .expect("read_chunks should not error");
+                // SAFETY: this task owns the descriptor's lifetime here.
+                unsafe { libc::close(read_fd) };
+            });
+        });
+        run();
+        // SAFETY: the write end is still open and owned by this test.
+        unsafe { libc::close(write_fd) };
+
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.as_slice(),
+            ["first"],
+            "the chunk should arrive, and the break should stop the drain"
+        );
+    }
+
+    /// End of input ends the drain without an error, which is what a consumer
+    /// keys on to notice its peer is gone.
+    #[test]
+    fn read_chunks_returns_at_end_of_input() {
+        use std::ops::ControlFlow;
+
+        let mut fds = [0; 2];
+        // SAFETY: two writable `c_int` slots that `pipe` initializes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        // SAFETY: the read end is open.
+        unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+        // Close the write end immediately: the reader sees end of input.
+        // SAFETY: the write end is open and unused.
+        unsafe { libc::close(write_fd) };
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        queue_macrotask(move || {
+            spawn(async move {
+                // SAFETY: `read_fd` stays open until this task closes it.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(read_fd) };
+                let mut buffer = [0u8; 16];
+                super::read_chunks(&borrowed, &mut buffer, |_| ControlFlow::Continue(()))
+                    .await
+                    .expect("end of input is not an error");
+                flag.store(true, Ordering::Release);
+                // SAFETY: this task owns the descriptor's lifetime here.
+                unsafe { libc::close(read_fd) };
+            });
+        });
+        run();
+        assert!(finished.load(Ordering::Acquire));
     }
 }

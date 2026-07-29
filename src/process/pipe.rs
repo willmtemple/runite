@@ -78,10 +78,48 @@ impl Pipe {
 /// closing the descriptor, preserving operation ordering. Await
 /// [`write_all`](crate::io::AsyncWriteExt::write_all) before `close` when the
 /// child must receive the whole buffer.
+///
+/// # Closing can deadlock against a child that is waiting for EOF
+///
+/// Because `close` drains first, it cannot complete while a write cannot. If a
+/// write was cancelled with the pipe buffer full, and the child will not read
+/// again until it sees end of input, the three parties wait on each other: the
+/// close waits for the write, the write waits for the child to drain the pipe,
+/// and the child waits for the close.
+///
+/// This is inherent to "close flushes what you already wrote" and is not
+/// resolvable by a timeout — a bounded drain would replace a visible hang with
+/// silent truncation, and the caller could not tell whether the child received
+/// the bytes.
+///
+/// **Dropping the handle is the escape.** Drop closes the descriptor
+/// immediately and abandons the pending write, so the child observes end of
+/// input and can proceed. Use it when the whole buffer reaching the child is
+/// not required:
+///
+/// ```no_run
+/// # async fn example(mut child: runite::process::Child) -> std::io::Result<()> {
+/// use runite::io::AsyncWriteExt;
+///
+/// let mut stdin = child.stdin.take().expect("stdin should be piped");
+/// stdin.write_all(b"input").await?;
+/// // `close().await` drains first, and can block on a child waiting for EOF.
+/// // Dropping closes now.
+/// drop(stdin);
+/// child.wait().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ChildStdin {
     // Pending writes must be dropped before the pipe descriptor.
     write_state: WriteState,
     pipe: Pipe,
+}
+
+impl std::fmt::Debug for ChildStdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ChildStdin").finish_non_exhaustive()
+    }
 }
 
 /// Async reader connected to a child process's standard output.
@@ -95,6 +133,14 @@ pub struct ChildStdout {
     pipe: Pipe,
 }
 
+impl std::fmt::Debug for ChildStdout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildStdout")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Async reader connected to a child process's standard error.
 ///
 /// Created when [`Command::stderr`](super::Command::stderr) is configured with
@@ -105,6 +151,14 @@ pub struct ChildStderr {
     // Pending reads must be dropped before the pipe descriptor.
     read_state: ReadState,
     pipe: Pipe,
+}
+
+impl std::fmt::Debug for ChildStderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildStderr")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChildStdin {

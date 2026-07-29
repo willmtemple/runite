@@ -4,6 +4,7 @@
 
 #![cfg(unix)]
 
+use runite::io::AsyncReadExt as _;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
 /// A `std::net::TcpListener` adopted via `from_std` is switched to non-blocking

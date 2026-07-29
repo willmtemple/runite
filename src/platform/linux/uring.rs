@@ -281,26 +281,65 @@ pub(crate) fn is_unsupported_operation(error: &io::Error) -> bool {
 
 #[derive(Debug)]
 pub(crate) struct IoUringUnavailable {
-    message: &'static str,
+    message: std::borrow::Cow<'static, str>,
 }
 
 impl IoUringUnavailable {
     fn kernel_too_old_or_disabled() -> Self {
         Self {
-            message: "io_uring is not available on this kernel (CONFIG_IO_URING not enabled or kernel too old)",
+            message: std::borrow::Cow::Borrowed(
+                "io_uring is not available on this kernel (CONFIG_IO_URING not enabled or kernel too old)",
+            ),
         }
     }
 
     fn blocked_by_seccomp() -> Self {
         Self {
-            message: "io_uring is not available because io_uring_setup was blocked (likely by seccomp)",
+            message: std::borrow::Cow::Borrowed(
+                "io_uring is not available because io_uring_setup was blocked (likely by seccomp)",
+            ),
+        }
+    }
+
+    /// `ENOMEM` from `io_uring_setup` almost never means the machine is out of
+    /// memory. The rings are pinned against `RLIMIT_MEMLOCK`, and anything else
+    /// in the process charged to the same budget — a profiler's sample buffers
+    /// are the common case — can exhaust it on a machine with tens of gigabytes
+    /// free. The raw errno renders as "Cannot allocate memory", which sends the
+    /// reader to look at free RAM, which is the wrong place entirely.
+    fn locked_memory_exhausted() -> Self {
+        let limit = match locked_memory_limit() {
+            Some(u64::MAX) => "RLIMIT_MEMLOCK is unlimited, so the limit is elsewhere".to_string(),
+            Some(bytes) => format!("RLIMIT_MEMLOCK is {} KiB", bytes / 1024),
+            None => "RLIMIT_MEMLOCK could not be read".to_string(),
+        };
+        Self {
+            message: std::borrow::Cow::Owned(format!(
+                "could not initialize the io_uring driver: locked-memory limit reached ({limit}). \
+                 Another tool in this process may hold part of it; profilers charge their sample \
+                 buffers to the same budget, so `perf record` with default settings is a common \
+                 cause and `perf record -m 32` leaves room. Raise the limit, or reduce the \
+                 requested ring size."
+            )),
         }
     }
 }
 
+/// Reads the soft `RLIMIT_MEMLOCK` in bytes, or `None` if it cannot be read.
+fn locked_memory_limit() -> Option<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is valid writable storage for one `rlimit`, and
+    // `RLIMIT_MEMLOCK` is a valid resource identifier.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+    (result == 0).then_some(limit.rlim_cur)
+}
+
 impl fmt::Display for IoUringUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message)
+        f.write_str(&self.message)
     }
 }
 
@@ -1263,6 +1302,13 @@ fn normalize_setup_error(error: io::Error) -> io::Error {
             io::ErrorKind::Unsupported,
             IoUringUnavailable::blocked_by_seccomp(),
         ),
+        // Deliberately not `OutOfMemory`: the kind is what a caller matches on,
+        // and reporting a resource-limit failure as memory exhaustion is the
+        // half of this that misdirects hardest.
+        Some(libc::ENOMEM) => io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            IoUringUnavailable::locked_memory_exhausted(),
+        ),
         _ => error,
     }
 }
@@ -1444,7 +1490,8 @@ mod tests {
         IORING_ENTER_GETEVENTS, IORING_OP_MSG_RING, IORING_OP_NOP, IORING_OP_POLL_ADD,
         IORING_SETUP_DEFER_TASKRUN, IORING_SETUP_SINGLE_ISSUER, IOSQE_CQE_SKIP_SUCCESS, IoUring,
         IoUringEnter, IoUringEnterCall, ScriptedIoUringEnter, SupportedOps,
-        is_unsupported_operation, load_u32, override_supported_ops, supported_ops_for_ring,
+        is_unsupported_operation, load_u32, normalize_setup_error, override_supported_ops,
+        supported_ops_for_ring,
     };
     use std::fs::File;
     use std::io;
@@ -1995,5 +2042,49 @@ mod tests {
             script.calls()[1].min_complete,
             u32::from(ring.supports_submit_all())
         );
+    }
+
+    /// `ENOMEM` from `io_uring_setup` is a locked-memory limit, not memory
+    /// exhaustion. The raw errno renders as "Cannot allocate memory", which
+    /// sends the reader to look at free RAM on a machine that has plenty.
+    #[test]
+    fn enomem_setup_failure_names_the_locked_memory_limit() {
+        let normalized = normalize_setup_error(io::Error::from_raw_os_error(libc::ENOMEM));
+
+        assert_eq!(
+            normalized.kind(),
+            io::ErrorKind::QuotaExceeded,
+            "a resource-limit failure should not present as memory exhaustion"
+        );
+
+        let message = normalized.to_string();
+        assert!(
+            message.contains("RLIMIT_MEMLOCK"),
+            "the message should name the limit that was hit, got {message:?}"
+        );
+        assert!(
+            message.contains("perf record"),
+            "the message should name the common cause, got {message:?}"
+        );
+        assert!(
+            !message.contains("Cannot allocate memory"),
+            "the misleading raw errno text should not survive, got {message:?}"
+        );
+    }
+
+    /// The other mapped errnos keep their diagnosis, and an errno with no known
+    /// cause is passed through rather than guessed at.
+    #[test]
+    fn other_setup_errors_keep_their_mapping() {
+        let unsupported = normalize_setup_error(io::Error::from_raw_os_error(libc::ENOSYS));
+        assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
+        assert!(unsupported.to_string().contains("kernel"));
+
+        let blocked = normalize_setup_error(io::Error::from_raw_os_error(libc::EPERM));
+        assert_eq!(blocked.kind(), io::ErrorKind::Unsupported);
+        assert!(blocked.to_string().contains("seccomp"));
+
+        let untouched = normalize_setup_error(io::Error::from_raw_os_error(libc::EIO));
+        assert_eq!(untouched.raw_os_error(), Some(libc::EIO));
     }
 }

@@ -28,6 +28,7 @@
 //! A TCP listener and client can run on the same local runtime loop:
 //!
 //! ```
+//! use runite::io::{AsyncReadExt, AsyncWriteExt};
 //! use runite::net::{TcpListener, TcpStream};
 //!
 //! runite::spawn(async {
@@ -104,8 +105,10 @@ struct SocketTimeouts {
 ///
 /// `TcpStream` owns a connected stream socket and provides async byte-oriented
 /// reads, writes, shutdown, socket option access, and owned split halves. Reads
-/// and writes may complete partially; use [`read_exact`](Self::read_exact) or
-/// [`write_all`](Self::write_all) when a protocol needs a full buffer.
+/// and writes may complete partially; use
+/// [`read_exact`](crate::io::AsyncReadExt::read_exact) or
+/// [`write_all`](crate::io::AsyncWriteExt::write_all) when a protocol needs a
+/// full buffer.
 ///
 /// Pending operations are stored in the stream and are tied to the current
 /// runite event loop. Cancelling a public read or write future leaves its
@@ -414,6 +417,8 @@ impl TcpStream {
     /// # Examples
     ///
     /// ```no_run
+    /// use runite::io::AsyncWriteExt;
+    ///
     /// runite::spawn(async {
     ///     let mut stream = runite::net::TcpStream::connect("127.0.0.1:8080")
     ///         .await
@@ -452,78 +457,6 @@ impl TcpStream {
         crate::sys::current::net::connect_stream_timeout(*addr, timeout)
             .await
             .map(Self::from_owned_fd)
-    }
-
-    /// Reads bytes from the stream.
-    ///
-    /// Returns the number of bytes copied into `buf`. This may be fewer bytes
-    /// than requested. A return value of `0` indicates EOF when `buf` is not
-    /// empty. If a configured read timeout expires, the error kind is
-    /// [`io::ErrorKind::TimedOut`].
-    ///
-    /// # Cancel safety
-    ///
-    /// This method is cancel-safe. If the returned future is dropped before it
-    /// resolves, bytes that the in-flight read already received are retained on
-    /// the stream and returned by the next read, so no data is lost — it is safe
-    /// to use in a `select!`.
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Delegate to the AsyncRead path so the in-flight recv is stashed on the
-        // stream: dropping this future retains the operation (cancel-safe — a
-        // completed-but-unclaimed read is served by the next read via the
-        // overflow buffer) and it cannot race a concurrent trait-based read.
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
-    }
-
-    /// Reads exactly `buf.len()` bytes from the stream.
-    pub async fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            let read = self.read(buf).await?;
-            if read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                ));
-            }
-            buf = &mut buf[read..];
-        }
-        Ok(())
-    }
-
-    /// Writes bytes to the stream.
-    ///
-    /// The operation may write fewer bytes than `buf.len()`. If a configured
-    /// write timeout expires, the error kind is [`io::ErrorKind::TimedOut`]; use
-    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
-    /// sent.
-    ///
-    /// # Cancel safety
-    ///
-    /// This method is **not** cancel-safe. Because the write is completion-based,
-    /// a future dropped mid-flight may have already committed bytes to the
-    /// kernel without reporting the count. A later write with a different
-    /// buffer waits for and consumes that abandoned completion before submitting
-    /// its own operation, so a stale count is never reported for the new bytes.
-    /// Drive writes to completion rather than cancelling them in a `select!`.
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let generation = crate::io::next_operation_id();
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_write_operation(cx, buf, generation))
-            .await
-    }
-
-    /// Writes the entire buffer to the stream.
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            let written = self.write(buf).await?;
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            buf = &buf[written..];
-        }
-        Ok(())
     }
 
     /// Shuts down the read, write, or both halves of the connection.
@@ -1537,6 +1470,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use crate::{queue_macrotask, run, spawn};
 
     use super::{TcpListener, TcpStream, UdpSocket};

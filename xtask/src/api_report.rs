@@ -200,6 +200,9 @@ fn validate_surface(
     let unix_items = [
         "pub mod runite::fd",
         "pub mod runite::net::unix",
+        "pub mod runite::os::unix",
+        "pub mod runite::os::unix::process",
+        "pub trait runite::os::unix::process::CommandExt",
         "pub mod runite::signal::unix",
     ];
 
@@ -308,8 +311,12 @@ fn is_platform_extension(target: Target, line: &str) -> bool {
             || line.contains("runite::fd")
             || line.contains("runite::net::unix")
             || line.contains("runite::net::Unix")
+            || line.contains("runite::os::unix")
             || line.contains("runite::signal::unix")
             || line.starts_with("pub fn runite::process::ExitStatus::signal")
+            // `CommandExt::pre_exec` is reachable as an inherent-looking method
+            // on `Command`, so it renders without the trait's module path.
+            || line.starts_with("pub unsafe fn runite::process::Command::pre_exec")
     }
 }
 

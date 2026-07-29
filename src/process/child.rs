@@ -39,6 +39,23 @@ pub struct Child {
     pub stderr: Option<ChildStderr>,
 }
 
+/// Reports the process identifier and which standard streams are piped.
+///
+/// Written by hand rather than derived: the platform child and the pipe types
+/// have nothing useful to print, and a derive would force `Debug` onto every
+/// backend internal to say so.
+impl std::fmt::Debug for Child {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Child")
+            .field("id", &self.id())
+            .field("stdin", &self.stdin.as_ref().map(|_| "piped"))
+            .field("stdout", &self.stdout.as_ref().map(|_| "piped"))
+            .field("stderr", &self.stderr.as_ref().map(|_| "piped"))
+            .finish()
+    }
+}
+
 impl Child {
     pub(crate) fn from_inner(
         mut inner: crate::sys::current::process::Child,
@@ -54,6 +71,61 @@ impl Child {
             stdout,
             stderr,
         }
+    }
+
+    /// Adopts an already-running process so its exit can be awaited.
+    ///
+    /// Use this when something other than [`Command`](super::Command) started
+    /// the process — a `std::process::Command` spawned for an API runite does
+    /// not have, or a helper that returns a pid. The returned `Child` has no
+    /// standard-stream pipes; [`wait`](Self::wait), [`try_wait`](Self::try_wait),
+    /// [`id`](Self::id), and [`kill`](Self::kill) all work as usual.
+    ///
+    /// Exit notification is event-driven on every platform: a pidfd on Linux,
+    /// a `kqueue` process filter on macOS, and a registered wait on the process
+    /// handle on Windows. No thread is parked for the process's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no process with this identifier exists, or if the
+    /// caller may not observe it. A process that has already exited **and been
+    /// reaped** no longer exists, so adopting it fails rather than returning a
+    /// `Child` whose `wait` never completes.
+    ///
+    /// # Caveats
+    ///
+    /// - **On Unix the process must be a direct child of this one.** Exit
+    ///   notification works for any process, but reading the exit *status*
+    ///   requires being its parent, so [`wait`](Self::wait) on a non-child
+    ///   fails once the process exits. Windows has no such restriction.
+    /// - **Nothing else may reap the process.** If another `Child`, a
+    ///   `std::process::Child`, or a `SIGCHLD` handler calls `waitpid` for the
+    ///   same pid, whichever gets there first takes the status and the other
+    ///   sees an error.
+    /// - **A pid is not a stable identity.** It can be reused once the process
+    ///   is reaped, so a pid obtained long ago may name a different process by
+    ///   the time it is adopted.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> std::io::Result<()> {
+    /// use runite::process::Child;
+    ///
+    /// // Started elsewhere, for an API runite does not cover.
+    /// let started = std::process::Command::new("sleep").arg("1").spawn()?;
+    ///
+    /// let mut child = Child::from_pid(started.id())?;
+    /// let status = child.wait().await?;
+    /// assert!(status.success());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_pid(pid: u32) -> io::Result<Self> {
+        Ok(Self::from_inner(
+            crate::sys::current::process::from_pid(pid)?,
+            None,
+        ))
     }
 
     /// Returns the OS process identifier, if the child has not been reaped.

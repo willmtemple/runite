@@ -98,6 +98,14 @@ pub struct BlockingJoinHandle<R: Send + 'static> {
     inner: BlockingResultFuture<R>,
 }
 
+impl<R: Send + 'static> std::fmt::Debug for BlockingJoinHandle<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockingJoinHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
     type Output = Result<R, JoinError>;
 
@@ -116,16 +124,74 @@ impl<R: Send + 'static> Future for BlockingJoinHandle<R> {
     }
 }
 
+/// Reports whether a [`spawn_blocking`] refusal is worth retrying.
+///
+/// The pool refuses work for two reasons that want opposite responses, and a
+/// caller treating them alike either abandons work it could have run or retries
+/// forever against a pool that is gone. This encodes which is which, so callers
+/// do not have to carry that mapping themselves:
+///
+/// - `true` for [`WouldBlock`](io::ErrorKind::WouldBlock) — the bounded queue
+///   is momentarily full. The pool is healthy; the same call may succeed once a
+///   worker drains one. Back off rather than spinning.
+/// - `false` for everything else — the pool has stopped
+///   ([`BrokenPipe`](io::ErrorKind::BrokenPipe)) or could not be created. No
+///   later call will succeed.
+///
+/// Deliberately takes `io::Error` rather than introducing a dedicated error
+/// type: the error kinds already carry the distinction, and keeping
+/// `spawn_blocking` in `io::Result` lets it compose with the rest of the crate
+/// without a conversion at every seam.
+///
+/// # Examples
+///
+/// ```
+/// # fn example() {
+/// let outcome = runite::spawn_blocking(|| 1 + 1);
+/// if let Err(error) = outcome {
+///     if runite::task::is_retryable(&error) {
+///         // Try again after a short back-off.
+///     } else {
+///         // Give up: the pool will not accept later work either.
+///     }
+/// }
+/// # }
+/// ```
+pub fn is_retryable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+}
+
 /// Runs `f` on the shared blocking worker pool.
 ///
-/// The returned future resolves with the closure's return value. If the pool's
-/// bounded queue is full, returns [`io::ErrorKind::WouldBlock`] synchronously.
-/// Once accepted, the job keeps the submitting runtime alive through terminal
-/// result publication, even if its [`BlockingJoinHandle`] is dropped.
+/// The returned future resolves with the closure's return value. Once accepted,
+/// the job keeps the submitting runtime alive through terminal result
+/// publication, even if its [`BlockingJoinHandle`] is dropped.
 ///
 /// `f` runs on a real OS thread; it may call blocking syscalls freely. Avoid
 /// touching any per-runtime-thread state from inside `f` — this is a pool
 /// thread, not a runtime thread.
+///
+/// # Errors
+///
+/// Submission is refused synchronously, and the [`kind`](io::Error::kind) says
+/// whether retrying can help. The distinction matters: the two failures want
+/// opposite responses, and a caller that treats them alike either gives up work
+/// it could have run or retries forever against a pool that is gone.
+///
+/// - [`WouldBlock`](io::ErrorKind::WouldBlock) — the bounded queue is full.
+///   **Retryable.** The pool is healthy and saturated; the same call may
+///   succeed once a worker drains one. Back off rather than spinning.
+/// - [`BrokenPipe`](io::ErrorKind::BrokenPipe) — the pool has stopped.
+///   **Terminal.** No later call will succeed.
+/// - Anything else — the pool could not be created, and the error is the one
+///   the operating system gave for starting its threads. **Terminal** in
+///   practice.
+///
+/// Both refusals are also reported as `tracing` warnings on the
+/// `runite::runtime` target, so a caller that discards the error still leaves
+/// evidence. Discarding it is a real temptation — there is often nothing to do
+/// with a refusal in a context that cannot await — but the downstream symptom
+/// is work that silently stops happening, which is hard to trace back here.
 ///
 /// # Examples
 ///
@@ -327,5 +393,23 @@ mod tests {
         }
 
         assert_eq!(*result.lock().unwrap(), "hello blocking world");
+    }
+
+    /// The retryable/terminal split is the whole point of the helper, so pin
+    /// both sides and the fallback for an unmapped kind.
+    #[test]
+    fn is_retryable_separates_a_full_queue_from_a_stopped_pool() {
+        assert!(
+            super::is_retryable(&io::Error::new(io::ErrorKind::WouldBlock, "queue full")),
+            "a momentarily full queue should be retried"
+        );
+        assert!(
+            !super::is_retryable(&io::Error::new(io::ErrorKind::BrokenPipe, "pool stopped")),
+            "a stopped pool will not accept later work"
+        );
+        assert!(
+            !super::is_retryable(&io::Error::other("pool threads could not start")),
+            "an unmapped failure is terminal rather than optimistically retried"
+        );
     }
 }

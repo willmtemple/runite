@@ -71,6 +71,12 @@ pub struct OnceCell<T> {
     value: UnsafeCell<Option<T>>,
 }
 
+impl<T> std::fmt::Debug for OnceCell<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("OnceCell").finish_non_exhaustive()
+    }
+}
+
 impl<T> OnceCell<T> {
     /// Creates an empty cell.
     pub fn new() -> Self {

@@ -19,6 +19,39 @@
 //! and [`queue_macrotask`] work run as macrotasks after the microtask queue has
 //! drained.
 //!
+//! # The scheduling guarantee
+//!
+//! One property of that ordering is worth stating as a contract, because
+//! layers built on this runtime batch on it:
+//!
+//! > **A microtask queued during a turn runs before the next macrotask.**
+//!
+//! A turn drains driver events, remote tasks and completed workers, then runs
+//! every microtask to quiescence, then runs at most one macrotask. Because the
+//! macrotask is the *last* phase, a microtask queued from inside one drains in
+//! the following turn's checkpoint — a different turn, and still before that
+//! turn's macrotask. The guarantee is about ordering, not about staying within
+//! a single turn, which matters if you are also reading [`current_turn`].
+//!
+//! This is what makes coalescing possible. A reactive layer that schedules one
+//! flush microtask when a value changes can rely on that flush happening before
+//! anything else macro-scheduled observes the graph, so consecutive writes
+//! collapse into one effect run and no one sees a half-propagated state.
+//!
+//! [`yield_now`] participates in the same rule: it is a microtask, so a task
+//! that yields resumes before a pending macrotask rather than behind it. A loop
+//! that processes a large input in chunks and yields between them therefore
+//! gives the loop a turn without surrendering its place to unrelated work.
+//!
+//! The runtime does **not** impose a scheduling budget. Nothing preempts a
+//! microtask, and nothing defers one past a macrotask to be fair. A microtask
+//! chain that never yields will starve macrotasks by design — the same way
+//! recursive `Promise.resolve().then` starves a browser — and a warning is
+//! emitted when a checkpoint crosses a large number of microtasks while a
+//! macrotask is waiting. That warning counts queue *length*, not time: a single
+//! long-running microtask is invisible to it, and to everything else. Cooperative
+//! yielding is the only mechanism.
+//!
 //! # Getting started
 //!
 //! The usual entry point is the [`#[runite::main]`](macro@main) attribute, which
@@ -176,6 +209,7 @@ pub mod fs;
 #[cfg(feature = "hyper")]
 pub mod hyper_rt;
 pub mod io;
+pub mod metrics;
 pub mod net;
 pub(crate) mod op;
 pub mod os;
@@ -222,8 +256,8 @@ mod runtime_api {
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
     pub use crate::platform::current::runtime::{
-        AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-        WorkerHandle, YieldNow, yield_now,
+        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle,
+        TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, yield_now,
     };
     pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
 
@@ -472,6 +506,61 @@ mod runtime_api {
         imp::block_on(future)
     }
 
+    /// Drives `future` to completion, reporting startup failure instead of
+    /// panicking on it.
+    ///
+    /// Identical to [`block_on`] once the runtime is running.
+    /// The difference is only at the boundary: creating this thread's platform
+    /// driver can fail, and `block_on` treats that as unrecoverable.
+    ///
+    /// Use this when an application needs to say something useful about not
+    /// starting. Driver creation fails for reasons that are about the machine
+    /// rather than the program, and none of them are the application's fault:
+    ///
+    /// - `io_uring` is disabled by a container or hardening policy, so there is
+    ///   no I/O backend at all (`ErrorKind::Unsupported`).
+    /// - The locked-memory budget is exhausted, commonly because a profiler in
+    ///   the same process charges its sample buffers to it
+    ///   (`ErrorKind::QuotaExceeded`).
+    ///
+    /// A panic in those situations gives the user a backtrace through the
+    /// runtime and no way to act. An error lets the program explain itself, or
+    /// fall back to a synchronous path, and exit with a status of its choosing.
+    ///
+    /// Only startup is fallible here. An error produced *by* the future is the
+    /// future's own and is returned inside `Ok`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the driver returns an unexpected error while running, or if
+    /// called from within a task already running on this thread (the event loop
+    /// cannot be re-entered). Neither is a startup condition.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> std::process::ExitCode {
+    /// use std::process::ExitCode;
+    ///
+    /// match runite::try_block_on(async { 6 * 7 }) {
+    ///     Ok(answer) => {
+    ///         assert_eq!(answer, 42);
+    ///         ExitCode::SUCCESS
+    ///     }
+    ///     Err(error) => {
+    ///         eprintln!("could not start the runtime: {error}");
+    ///         ExitCode::FAILURE
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn try_block_on<F>(future: F) -> std::io::Result<F::Output>
+    where
+        F: core::future::Future,
+    {
+        imp::try_block_on(future)
+    }
+
     /// Drives the event loop until it would next block waiting on the I/O driver.
     ///
     /// Runs all currently ready tasks, microtasks, and expired timers, then
@@ -485,6 +574,70 @@ mod runtime_api {
     /// called while this thread is already driving the runtime.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
+    }
+
+    /// Returns the identifier of the event-loop turn currently being driven.
+    ///
+    /// A **turn** is one iteration of the loop: drain driver events, drain
+    /// remote tasks, flush completed workers, run every microtask to
+    /// quiescence, then run at most one macrotask. [`TurnId`] is a stable,
+    /// process-wide, monotonically increasing key for that iteration. It is
+    /// never reused.
+    ///
+    /// This exists so a consumer with its own diagnostics can join its records
+    /// against the runtime's: stamp your record with the turn it happened in
+    /// and match on equality afterwards. A reactive layer that flushes during
+    /// the microtask checkpoint, for example, can tag that flush and know
+    /// exactly which turn drove it — rather than guessing from wall-clock
+    /// order across two separate captures.
+    ///
+    /// Returns `None` when the calling thread is not inside a turn: outside
+    /// the loop entirely, or on a thread that is not a runtime thread.
+    /// Every entry point that drives the loop produces turns —
+    /// [`run`], [`block_on`], [`run_until_stalled`], and
+    /// [`run_ready_tasks`] — so a host embedding the
+    /// runtime sees them too.
+    ///
+    /// The value carries no information about what the turn did; it is only a
+    /// key.
+    ///
+    /// # Stamp at the moment the work happens
+    ///
+    /// Call this from inside the callback that observes the work, not
+    /// afterwards. A layer whose own diagnostics are delivered synchronously
+    /// gets the right answer for free — a callback fired while a value is
+    /// written stamps the writing turn, a callback fired when work is drained
+    /// stamps the draining turn — and those are legitimately different turns.
+    ///
+    /// A microtask queued by a macrotask runs in the *next* turn, because the
+    /// macrotask is the last phase of its own. The ordering guarantee is
+    /// unaffected — the microtask still precedes the next macrotask — but the
+    /// two carry different identifiers, so code that expects a piece of work
+    /// and the work that scheduled it to share a turn will misread it.
+    ///
+    /// It follows that an **aggregate covering a span of work may cover more
+    /// than one turn**, and attributing it to a single turn would be wrong in a
+    /// way that looks right. Stamp individual events for attribution; report
+    /// aggregates as volume, without a turn.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    ///
+    /// assert!(runite::current_turn().is_none(), "not in a turn yet");
+    ///
+    /// let seen = Rc::new(Cell::new(None));
+    /// let recorder = Rc::clone(&seen);
+    /// runite::queue_microtask(move || recorder.set(runite::current_turn()));
+    /// runite::run();
+    ///
+    /// assert!(seen.get().is_some(), "a microtask runs inside a turn");
+    /// assert!(runite::current_turn().is_none(), "and the turn ends with the loop");
+    /// ```
+    pub fn current_turn() -> Option<TurnId> {
+        imp::current_turn()
     }
 
     /// Runs only the tasks and microtasks that are ready right now, then returns.

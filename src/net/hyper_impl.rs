@@ -118,6 +118,7 @@ fn send_all_future(
 
 #[cfg(test)]
 mod tests {
+    use crate::io::AsyncReadExt as _;
     use core::future::Future;
     use core::pin::Pin;
     use core::task::{Context, Poll};

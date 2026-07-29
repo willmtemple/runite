@@ -89,6 +89,12 @@ fn unix_signal_kinds_install_in_an_isolated_process() {
     run_helper("unix-kinds-install", 64);
 }
 
+#[cfg(unix)]
+#[test]
+fn unix_multi_kind_stream_reports_which_signal_arrived() {
+    run_helper("unix-multi-kind", 64);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_ctrl_c_bypasses_saturated_remote_queue() {
@@ -119,6 +125,7 @@ fn signal_subprocess_entry() {
         "unix-coalescing" => unix_coalescing(),
         "unix-receiver-drop" => unix_receiver_drop(),
         "unix-kinds-install" => unix_kinds_install(),
+        "unix-multi-kind" => unix_multi_kind(),
         _ => panic!("unknown Unix signal test helper mode {mode:?}"),
     }
 
@@ -260,15 +267,82 @@ fn unix_kinds_install() {
     runite::run();
 }
 
+/// One stream serving several kinds reports which one arrived, and registering
+/// the same kind twice registers it once.
+#[cfg(unix)]
+fn unix_multi_kind() {
+    use std::sync::{Arc, Mutex};
+
+    use runite::signal::unix::{SignalKind, signals};
+
+    assert!(
+        signals(&[]).is_err(),
+        "an empty kind set should be rejected rather than never ready"
+    );
+
+    let deduplicated =
+        signals(&[SignalKind::Hangup, SignalKind::Hangup]).expect("duplicate kinds should install");
+    assert_eq!(
+        deduplicated.kinds().len(),
+        1,
+        "a repeated kind should register once"
+    );
+    drop(deduplicated);
+
+    let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_task = Arc::clone(&observed);
+    let mut stream = signals(&[SignalKind::User1, SignalKind::User2])
+        .expect("SIGUSR1/SIGUSR2 streams should install");
+
+    runite::spawn(async move {
+        for _ in 0..2 {
+            let Ok(Some(kind)) = runite::time::timeout(Duration::from_secs(2), stream.recv()).await
+            else {
+                break;
+            };
+            observed_task
+                .lock()
+                .expect("observation mutex poisoned")
+                .push(format!("{kind:?}"));
+        }
+    });
+    runite::run_until_stalled();
+
+    send_unix_signal(libc::SIGUSR1);
+    thread::sleep(Duration::from_millis(150));
+    send_unix_signal(libc::SIGUSR2);
+    thread::sleep(Duration::from_millis(150));
+
+    runite::run();
+
+    let observed = observed.lock().expect("observation mutex poisoned").clone();
+    assert_eq!(
+        observed,
+        vec!["User1".to_string(), "User2".to_string()],
+        "each event should name the kind that produced it"
+    );
+}
+
 #[cfg(windows)]
 fn prepare_private_console() {
-    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole};
+    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleCtrlHandler};
 
     // SAFETY: this helper runs in an isolated subprocess. It detaches any
     // inherited console and allocates one owned only by that subprocess.
     unsafe {
         let _ = FreeConsole();
         assert_ne!(AllocConsole(), 0, "private test console should allocate");
+        // Ctrl-C *ignoring* is a per-process disposition that a child inherits
+        // and that allocating a fresh console does not clear. A parent that set
+        // it — an OpenSSH session host does — would otherwise make
+        // `CTRL_C_EVENT` land on a process that discards it, while
+        // `CTRL_BREAK_EVENT` still arrives, which is a confusing way to fail.
+        // Passing a null handler with `FALSE` removes the inherited ignore.
+        assert_ne!(
+            SetConsoleCtrlHandler(None, 0),
+            0,
+            "Ctrl-C handling should be re-enabled for the test subprocess"
+        );
     }
 }
 

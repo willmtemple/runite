@@ -6,12 +6,22 @@ use std::collections::VecDeque;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::io::IoFuture;
 use crate::platform::current::runtime::{ThreadHandle, try_current_thread_handle};
 use crate::sys::handle::OwnedFile;
 
 pub(super) const BUFFER_CAPACITY: usize = 64 * 1024;
+/// How long `Command::spawn` will block its runtime thread waiting for the
+/// stdin reader to release the terminal to a child.
+///
+/// The healthy path is microseconds — the interrupt releases a reader parked in
+/// `poll`. This bound exists for the path the interrupt cannot reach: a reader
+/// already inside `read(2)`, which on an interactive terminal returns only when
+/// the user types. One second is far beyond any legitimate handoff and short
+/// enough that a stalled event loop is a visible error rather than a hang.
+const HANDOFF_WAIT_LIMIT: Duration = Duration::from_secs(1);
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
 static NEXT_WAITER_ID: AtomicU64 = AtomicU64::new(1);
@@ -465,12 +475,33 @@ impl Shared {
             self.signal_interrupt();
         }
 
+        // Bounded, because this runs on the caller's runtime thread and an
+        // unbounded wait here stalls its whole event loop. The interrupt above
+        // normally releases the reader in microseconds, but it cannot un-issue
+        // a `read(2)` the reader has already entered — and on an interactive
+        // terminal with nothing typed, that read returns only when the user
+        // types something. Waiting forever for that would turn "spawn a child"
+        // into "hang until the user presses a key".
+        let deadline = std::time::Instant::now() + HANDOFF_WAIT_LIMIT;
         let mut state = self.lock();
         while state.io_active && !state.thread_exited && state.terminal.is_running() {
-            state = self
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                // Undo this handoff before reporting failure, or the reader
+                // stays paused for a child that never started.
+                state.handoffs = state.handoffs.saturating_sub(1);
+                drop(state);
+                self.space_available.notify_all();
+                self.changed.notify_all();
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "timed out waiting for the stdin reader to release the terminal for a child",
+                ));
+            };
+            let (guard, _timeout) = self
                 .changed
-                .wait(state)
+                .wait_timeout(state, remaining)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = guard;
         }
         Ok(())
     }

@@ -7,6 +7,7 @@
 //! Run it: `cargo run --example async_fs_showcase`
 
 use runite::fs::{self, File};
+use runite::io::AsyncReadExt as _;
 use std::path::PathBuf;
 
 fn preview(bytes: &[u8]) -> String {

@@ -75,6 +75,12 @@ impl FutureTask {
         if self.queued.replace(true) {
             return;
         }
+        // Counted here rather than in the waker: a wake that coalesces into an
+        // already-queued poll did not cause new work, and counting it would
+        // make a coalescing runtime look busier than a non-coalescing one.
+        with_installed_thread(|state| {
+            super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
+        });
 
         let task = Rc::clone(self);
         with_installed_thread(|state| {
@@ -94,6 +100,9 @@ impl FutureTask {
             return;
         };
 
+        with_installed_thread(|state| {
+            super::state::RuntimeCounters::bump(&state.shared.counters.task_polls);
+        });
         let mut context = Context::from_waker(&self.waker);
         // Isolate task panics: a future that unwinds must not tear down the
         // event loop that is polling it. Catch the unwind here, report it, and

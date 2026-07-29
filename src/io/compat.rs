@@ -88,6 +88,12 @@ pub struct Compat<T> {
     write: CompatWriteState,
 }
 
+impl<T> std::fmt::Debug for Compat<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Compat").finish_non_exhaustive()
+    }
+}
+
 impl<T> Compat<T> {
     /// Wraps `inner` for use through `futures_io` traits.
     pub fn new(inner: T) -> Self {
@@ -372,6 +378,14 @@ pub struct FuturesCompat<T> {
     inner: T,
 }
 
+impl<T> std::fmt::Debug for FuturesCompat<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FuturesCompat")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> FuturesCompat<T> {
     /// Wraps `inner` for use through runite's async I/O traits.
     pub fn new(inner: T) -> Self {
@@ -428,18 +442,6 @@ impl<T: futures_io::AsyncWrite + Unpin> AsyncWrite for FuturesCompat<T> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        if bufs.iter().all(|buf| buf.is_empty()) {
-            return Poll::Ready(Ok(0));
-        }
-        futures_io::AsyncWrite::poll_write_vectored(Pin::new(&mut self.inner), cx, bufs)
-    }
-
-    fn poll_write_vectored_operation(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-        _generation: u64,
     ) -> Poll<io::Result<usize>> {
         if bufs.iter().all(|buf| buf.is_empty()) {
             return Poll::Ready(Ok(0));

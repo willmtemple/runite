@@ -54,6 +54,14 @@ pub struct ThreadHandle {
     pub(crate) shared: Arc<ThreadShared>,
 }
 
+impl std::fmt::Debug for ThreadHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThreadHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 /// A handle to a worker runtime thread spawned with
 /// [`spawn_worker`](crate::spawn_worker).
 ///
@@ -68,6 +76,14 @@ pub struct WorkerHandle {
     pub(crate) completion: Arc<WorkerCompletion>,
 }
 
+impl std::fmt::Debug for WorkerHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Future returned by [`WorkerHandle::join`].
 ///
 /// Dropping this future before the worker exits unregisters its waker. It does
@@ -80,6 +96,12 @@ pub struct WorkerJoin {
     waiter_id: Option<u64>,
     waiter_active: Option<Arc<AtomicBool>>,
     liveness: Vec<WorkerJoinLiveness>,
+}
+
+impl std::fmt::Debug for WorkerJoin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WorkerJoin").finish_non_exhaustive()
+    }
 }
 
 struct WorkerJoinLiveness {
@@ -153,6 +175,14 @@ pub struct TimeoutHandle {
     pub(crate) generation: u64,
 }
 
+impl std::fmt::Debug for TimeoutHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TimeoutHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl TimeoutHandle {
     /// Cancels the pending timeout.
     ///
@@ -165,6 +195,14 @@ impl TimeoutHandle {
     /// stop the callback from firing.
     pub fn cancel(&self) {
         super::scheduler::cancel_timeout(self);
+    }
+
+    /// Wraps this token in a guard that cancels the timeout when dropped.
+    ///
+    /// For a timeout whose lifetime belongs to a scope rather than to the
+    /// program. See [`CancelOnDrop`].
+    pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
+        CancelOnDrop { handle: self }
     }
 }
 
@@ -179,6 +217,14 @@ pub struct IntervalHandle {
     pub(crate) generation: u64,
 }
 
+impl std::fmt::Debug for IntervalHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IntervalHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl IntervalHandle {
     /// Cancels the repeating timer, preventing any further callback
     /// invocations. Cancelling an already-cancelled interval is a no-op.
@@ -188,6 +234,104 @@ impl IntervalHandle {
     /// to stop the repeating callback (and to let the runtime exit).
     pub fn cancel(&self) {
         super::scheduler::cancel_interval(self);
+    }
+
+    /// Wraps this token in a guard that cancels the interval when dropped.
+    ///
+    /// Particularly relevant for intervals: an uncancelled interval keeps the
+    /// runtime alive, so a leaked one prevents `run()` from ever returning.
+    /// See [`CancelOnDrop`].
+    pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
+        CancelOnDrop { handle: self }
+    }
+}
+
+/// A timer handle that cancels when it is dropped.
+///
+/// Created by [`TimeoutHandle::cancel_on_drop`] or
+/// [`IntervalHandle::cancel_on_drop`]. The plain handles are cloneable
+/// cancellation *tokens* — dropping one leaves the timer running, matching
+/// JavaScript's `setInterval`/`clearInterval` and this crate's own
+/// [`JoinHandle`], which detaches on drop. That is the right default for a
+/// timer whose lifetime is not tied to any particular value, and the wrong one
+/// for a timer that belongs to a scope.
+///
+/// This wrapper is the second case: hold it for as long as the timer should
+/// run, and let it fall out of scope to stop. It is deliberately **not**
+/// `Clone` — two owners of a cancel-on-drop guard would mean the first drop
+/// wins, which is not a useful contract.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// runite::spawn(async {
+///     let ticker = runite::time::set_interval(Duration::from_millis(1), || {})
+///         .cancel_on_drop();
+///     // ... work that the ticker accompanies ...
+///     drop(ticker); // stops here, rather than outliving the scope
+/// });
+/// runite::run();
+/// ```
+#[derive(Debug)]
+#[must_use = "the timer is cancelled as soon as this guard is dropped"]
+pub struct CancelOnDrop<H: TimerCancel> {
+    handle: H,
+}
+
+impl<H: TimerCancel> CancelOnDrop<H> {
+    /// Returns the underlying token without cancelling.
+    ///
+    /// Use this to hand the timer back to a longer-lived owner: the guard is
+    /// consumed, so nothing cancels, and the returned token behaves as it did
+    /// before it was wrapped.
+    pub fn into_inner(self) -> H {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is not dropped, so `handle` is moved out exactly once
+        // and the `Drop` impl below never runs for it.
+        unsafe { std::ptr::read(&this.handle) }
+    }
+
+    /// Cancels the timer now rather than at the end of the scope.
+    pub fn cancel(self) {
+        drop(self);
+    }
+}
+
+impl<H: TimerCancel> std::ops::Deref for CancelOnDrop<H> {
+    type Target = H;
+
+    fn deref(&self) -> &H {
+        &self.handle
+    }
+}
+
+impl<H: TimerCancel> Drop for CancelOnDrop<H> {
+    fn drop(&mut self) {
+        self.handle.cancel_timer();
+    }
+}
+
+/// Timer tokens that a [`CancelOnDrop`] guard can stop.
+///
+/// Sealed in practice: implemented only for [`TimeoutHandle`] and
+/// [`IntervalHandle`], whose `cancel` is idempotent and thread-safe by way of
+/// the generation check.
+pub trait TimerCancel {
+    /// Cancels the timer this token identifies.
+    fn cancel_timer(&self);
+}
+
+impl TimerCancel for TimeoutHandle {
+    fn cancel_timer(&self) {
+        self.cancel();
+    }
+}
+
+impl TimerCancel for IntervalHandle {
+    fn cancel_timer(&self) {
+        self.cancel();
     }
 }
 
@@ -206,6 +350,12 @@ impl IntervalHandle {
 /// cancel explicitly.
 pub struct JoinHandle<T> {
     pub(crate) state: Rc<JoinState<T>>,
+}
+
+impl<T> std::fmt::Debug for JoinHandle<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("JoinHandle").finish_non_exhaustive()
+    }
 }
 
 impl<T> JoinHandle<T> {
@@ -258,6 +408,14 @@ pub struct AbortHandle {
     shared: Rc<TaskShared>,
 }
 
+impl std::fmt::Debug for AbortHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AbortHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl AbortHandle {
     /// Aborts the associated task. See [`JoinHandle::abort`].
     pub fn abort(&self) {
@@ -280,8 +438,15 @@ impl AbortHandle {
 /// messages). To yield to macrotasks, you must allow the flow of execution
 /// to return to the runtime event loop and flush the full microtask queue,
 /// for example by awaiting a timer.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct YieldNow {
     pub(crate) yielded: bool,
+}
+
+impl std::fmt::Debug for YieldNow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("YieldNow").finish_non_exhaustive()
+    }
 }
 
 impl Future for YieldNow {
@@ -365,7 +530,6 @@ impl ThreadHandle {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn begin_async_operation(&self) {
         self.shared.pending_ops.fetch_add(1, Ordering::AcqRel);
     }

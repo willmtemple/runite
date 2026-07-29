@@ -21,8 +21,8 @@ use super::driver::{self, Driver, FdReadinessToken, ProcessExitToken};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
-    YieldNow, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
@@ -48,7 +48,6 @@ pub(crate) fn try_current_thread_handle() -> Option<ThreadHandle> {
     shared::try_current_thread_handle()
 }
 
-#[allow(dead_code)]
 pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
     shared::with_current_driver_any::<MacosRuntime, Driver, T>(f)
 }
@@ -121,6 +120,13 @@ where
     F: Future,
 {
     shared::block_on::<MacosRuntime, F>(future)
+}
+
+pub fn try_block_on<F>(future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    shared::try_block_on::<MacosRuntime, F>(future)
 }
 
 pub fn run_until_stalled() {

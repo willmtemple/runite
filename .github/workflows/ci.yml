@@ -52,6 +52,14 @@ jobs:
       # on a feature-gated item.
       - name: Check default features
         run: cargo check --workspace --all-targets
+      # Each optional feature on its own. `--all-features` hides a break that
+      # only appears when the *other* feature is absent, and `tests/io_compat.rs`
+      # is gated on `futures-compat`, so it never compiled without `hyper`
+      # alongside it.
+      - name: Check each feature alone
+        run: |
+          cargo check --workspace --all-targets --no-default-features --features futures-compat
+          cargo check --workspace --all-targets --no-default-features --features hyper
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Docs
@@ -402,6 +410,14 @@ jobs:
             aarch64-apple-darwin x86_64-pc-windows-msvc
       - name: Check all target and feature API surfaces
         run: mise run api-report-check
+      # `docsrs` turns on `doc_auto_cfg`, and `Cargo.toml`'s `rustdoc-args`
+      # passes it only on docs.rs. Nothing else builds with it, so a nightly
+      # change to `doc_cfg` would first appear after publishing. This job
+      # already has the pinned nightly, so it is the cheapest place to check.
+      - name: Docs with the docs.rs configuration
+        run: mise exec -- cargo +nightly-2026-07-01 doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
 
   publish-dry-run:
     name: Package artifacts & publish dry-run

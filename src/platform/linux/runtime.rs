@@ -11,7 +11,6 @@
 //!     fixed, so callers continue to write `runite::queue_macrotask(..)`
 //!     without turbofish.
 
-use std::any::Any;
 use std::future::Future;
 use std::io;
 use std::time::Duration;
@@ -20,8 +19,8 @@ use super::driver::{self, Driver};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    AbortHandle, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle, WorkerHandle,
-    YieldNow, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
+    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
@@ -51,13 +50,9 @@ pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
     shared::with_current_driver_any::<LinuxRuntime, Driver, T>(f)
 }
 
-pub(crate) fn cancel_operation_on_owner(
-    owner: ThreadHandle,
-    token: u64,
-    guard: Option<Box<dyn Any + Send + 'static>>,
-) {
+pub(crate) fn cancel_operation_on_owner(owner: ThreadHandle, token: u64) {
     let cancel = move || {
-        let _ = with_current_driver(|driver| driver.cancel_operation_with_guard(token, guard));
+        let _ = with_current_driver(|driver| driver.cancel_operation(token));
     };
 
     if owner.is_current() {
@@ -120,6 +115,13 @@ where
     F: Future,
 {
     shared::block_on::<LinuxRuntime, F>(future)
+}
+
+pub fn try_block_on<F>(future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    shared::try_block_on::<LinuxRuntime, F>(future)
 }
 
 pub fn run_until_stalled() {

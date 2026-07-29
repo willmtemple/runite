@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use runite::io::AsyncRead;
+use runite::io::{AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OVERLAPPED, SetFileCompletionNotificationModes,

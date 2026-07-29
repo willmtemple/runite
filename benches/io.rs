@@ -5,6 +5,7 @@ mod common;
 
 use common::time_on_runtime;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use runite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use runite::net::{TcpListener, TcpStream};
 
 const TCP_PAYLOAD: usize = 16 * 1024;

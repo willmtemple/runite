@@ -59,13 +59,26 @@ pub struct Mutex<T: ?Sized> {
     value: UnsafeCell<T>,
 }
 
+impl<T: ?Sized> std::fmt::Debug for Mutex<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Mutex").finish_non_exhaustive()
+    }
+}
+
 /// Guard returned by [`Mutex::lock`] and [`Mutex::try_lock`].
 ///
 /// The guard dereferences to the protected value and releases the mutex when it
 /// is dropped.
+#[must_use = "the guard releases the lock when dropped, so dropping it immediately releases at once"]
 pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
     _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl<'a, T: ?Sized> std::fmt::Debug for MutexGuard<'a, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("MutexGuard").finish_non_exhaustive()
+    }
 }
 
 impl<T> Mutex<T> {

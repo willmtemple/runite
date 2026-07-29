@@ -39,9 +39,19 @@ pub(crate) fn spawn(spec: &CommandSpec) -> io::Result<Child> {
     if let Some(dir) = &spec.current_dir {
         command.current_dir(dir);
     }
-    command.stdin(stdio(spec.stdin));
-    command.stdout(stdio(spec.stdout));
-    command.stderr(stdio(spec.stderr));
+    command.stdin(stdio(&spec.stdin)?);
+    command.stdout(stdio(&spec.stdout)?);
+    command.stderr(stdio(&spec.stderr)?);
+    if let Some(hook) = &spec.pre_exec {
+        let hook = hook.clone();
+        // SAFETY: the contract is forwarded from
+        // `os::unix::process::CommandExt::pre_exec`, whose caller promised the
+        // hook is async-signal-safe. Cloning the `Arc` happens here in the
+        // parent, before the fork.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, move || (hook.0)());
+        }
+    }
 
     let mut child = command.spawn()?;
     let pid = child.id() as libc::pid_t;
@@ -77,6 +87,30 @@ pub(crate) fn spawn(spec: &CommandSpec) -> io::Result<Child> {
         stdin,
         stdout,
         stderr,
+    })
+}
+
+/// Adopts an already-running direct child for exit notification.
+pub(crate) fn from_pid(pid: u32) -> io::Result<Child> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid is out of range"))?;
+    if pid <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pid must be a positive process identifier",
+        ));
+    }
+    // `pidfd_open` fails with ESRCH for a pid that no longer exists, so an
+    // already-reaped or never-existent process is rejected here rather than
+    // surfacing later as a wait that never completes.
+    let pidfd = pidfd_open(pid)?;
+    Ok(Child {
+        pid: Some(pid),
+        pidfd,
+        status: None,
+        stdin: None,
+        stdout: None,
+        stderr: None,
     })
 }
 
@@ -200,12 +234,15 @@ async fn write_pipe(fd: RawFd, data: Vec<u8>) -> io::Result<usize> {
     }
 }
 
-fn stdio(kind: StdioKind) -> std::process::Stdio {
-    match kind {
+fn stdio(kind: &StdioKind) -> io::Result<std::process::Stdio> {
+    Ok(match kind {
         StdioKind::Inherit => std::process::Stdio::inherit(),
         StdioKind::Null => std::process::Stdio::null(),
         StdioKind::Piped => std::process::Stdio::piped(),
-    }
+        // Duplicated rather than consumed, so the same `Command` can be spawned
+        // again and the caller's descriptor stays theirs.
+        StdioKind::Raw(handle) => std::process::Stdio::from(handle.try_clone()?),
+    })
 }
 
 fn pipe_from_raw_fd(fd: RawFd) -> io::Result<Pipe> {

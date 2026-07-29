@@ -67,7 +67,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, CursorState, Stream, WriteOperation};
+use crate::io::{
+    AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, CursorState, Stream,
+    WriteOperation,
+};
 use crate::op::fs::{
     FileType as RawFileType, FsOp, MetadataTarget, OpenOptions as OpOpenOptions,
     RawDirEntry as OpDirEntry, RawMetadata,
@@ -99,6 +102,12 @@ pub struct File {
     inner: Arc<FileInner>,
 }
 
+impl std::fmt::Debug for File {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("File").finish_non_exhaustive()
+    }
+}
+
 /// Builder used to configure how a [`File`] is opened.
 ///
 /// Options mirror [`std::fs::OpenOptions`]: callers opt in to read, write,
@@ -106,6 +115,14 @@ pub struct File {
 /// [`open`](Self::open).
 pub struct OpenOptions {
     inner: OpOpenOptions,
+}
+
+impl std::fmt::Debug for OpenOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenOptions")
+            .finish_non_exhaustive()
+    }
 }
 
 /// File metadata returned by [`metadata`] or [`File::metadata`].
@@ -134,6 +151,12 @@ pub struct Metadata {
 /// the OS may finish before the blocking job observes the drop.
 pub struct ReadDir {
     inner: sys_fs::ReadDirStream,
+}
+
+impl std::fmt::Debug for ReadDir {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ReadDir").finish_non_exhaustive()
+    }
 }
 
 /// Directory entry yielded by [`ReadDir::next_entry`].
@@ -572,6 +595,8 @@ impl File {
     /// # Examples
     ///
     /// ```no_run
+    /// use runite::io::AsyncReadExt;
+    ///
     /// runite::spawn(async {
     ///     let mut file = runite::fs::File::open("input.txt").await.unwrap();
     ///     let mut contents = String::new();
@@ -593,107 +618,6 @@ impl File {
             .truncate(true)
             .open(path)
             .await
-    }
-
-    /// Reads bytes from the file's current cursor position.
-    ///
-    /// Returns the number of bytes copied into `buf`. A return value of `0`
-    /// indicates EOF when `buf` is not empty.
-    ///
-    /// # Cancel safety
-    ///
-    /// Cancel-safe: bytes an in-flight read already received are retained on the
-    /// file and returned by the next read if this future is dropped.
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Delegate to the AsyncRead path so the in-flight read is stashed on the
-        // file: dropping this future retains the operation (cancel-safe — a
-        // completed-but-unclaimed read is served next via the overflow buffer)
-        // and it cannot race a concurrent trait-based read. Positional
-        // [`read_at`](Self::read_at) keeps using `read_impl`.
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_read(cx, buf)).await
-    }
-
-    /// Reads exactly `buf.len()` bytes from the current cursor position.
-    pub async fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            let read = self.read(buf).await?;
-            if read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                ));
-            }
-            buf = &mut buf[read..];
-        }
-        Ok(())
-    }
-
-    /// Reads all remaining bytes from the current cursor position and appends
-    /// them to `buf`.
-    pub async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let start_len = buf.len();
-        let mut chunk = vec![0; 8192];
-        loop {
-            let read = self.read(&mut chunk).await?;
-            if read == 0 {
-                return Ok(buf.len() - start_len);
-            }
-            buf.extend_from_slice(&chunk[..read]);
-        }
-    }
-
-    /// Reads all remaining UTF-8 bytes and appends them to `buf`.
-    ///
-    /// Returns [`io::ErrorKind::InvalidData`] if the remaining bytes are not
-    /// valid UTF-8.
-    pub async fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        let mut bytes = Vec::new();
-        let read = self.read_to_end(&mut bytes).await?;
-        let text = String::from_utf8(bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        buf.push_str(&text);
-        Ok(read)
-    }
-
-    /// Writes bytes at the file's current cursor position.
-    ///
-    /// The operation may write fewer bytes than `buf.len()`; use
-    /// [`write_all`](Self::write_all) to keep writing until the full buffer is
-    /// sent.
-    ///
-    /// # Cancel safety
-    ///
-    /// **Not** cancel-safe: a completion-based write dropped mid-flight may have
-    /// already committed bytes without reporting the count. Each write owns a
-    /// distinct operation identity, so another clone may drive its completion
-    /// without consuming the result or causing this future to resubmit. Drive
-    /// writes to completion when the reported count matters.
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        crate::io::AsyncWriteExt::write(self, buf).await
-    }
-
-    /// Writes the entire buffer at the file's current cursor position.
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            let written = self.write(buf).await?;
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            buf = &buf[written..];
-        }
-        Ok(())
-    }
-
-    /// Flushes any userspace buffering associated with this handle.
-    ///
-    /// runite does not add userspace buffering for [`File`], so this is a
-    /// no-op. It does not call `fsync` or make data durable; use
-    /// [`sync_all`](Self::sync_all) or [`sync_data`](Self::sync_data) for that.
-    pub async fn flush(&mut self) -> io::Result<()> {
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_flush(cx)).await
     }
 
     /// Synchronizes file contents and metadata to stable storage.
@@ -774,23 +698,6 @@ impl File {
             len,
         })
         .await
-    }
-
-    /// Seeks the file's cursor and returns the new position from the start.
-    ///
-    /// This repositions the kernel file cursor shared by this handle (and any
-    /// [`try_clone`](Self::try_clone)d handles), so it affects the sequential
-    /// [`read`](Self::read)/[`write`](Self::write) methods, not the positioned
-    /// [`read_at`](Self::read_at)/[`write_at`](Self::write_at) methods. Mirrors
-    /// [`std::io::Seek::seek`].
-    ///
-    /// # Cancel safety
-    ///
-    /// Cancel-safe: an accepted sequential read or write is reconciled before
-    /// the synchronous cursor move. If this future is dropped while waiting,
-    /// no seek has occurred and the accepted operation remains on the file.
-    pub async fn seek(&mut self, pos: std::io::SeekFrom) -> io::Result<u64> {
-        core::future::poll_fn(|cx| Pin::new(&mut *self).poll_seek(cx, pos)).await
     }
 
     /// Duplicates the underlying file description.
@@ -1465,7 +1372,7 @@ mod tests {
         OpenOptions, create_dir_all, metadata, read, read_dir, read_to_string, remove_dir,
         remove_file, rename, write,
     };
-    use crate::io::StreamExt;
+    use crate::io::{AsyncReadExt as _, StreamExt};
     use crate::spawn;
     use crate::{queue_macrotask, run};
     use std::collections::BTreeSet;
