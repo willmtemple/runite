@@ -475,7 +475,7 @@ mod runtime_api {
     /// Drives `future` to completion, reporting startup failure instead of
     /// panicking on it.
     ///
-    /// Identical to [`block_on`](Self::block_on) once the runtime is running.
+    /// Identical to [`block_on`] once the runtime is running.
     /// The difference is only at the boundary: creating this thread's platform
     /// driver can fail, and `block_on` treats that as unrecoverable.
     ///
@@ -560,9 +560,8 @@ mod runtime_api {
     /// Returns `None` when the calling thread is not inside a turn: outside
     /// the loop entirely, or on a thread that is not a runtime thread.
     /// Every entry point that drives the loop produces turns —
-    /// [`run`](Self::run), [`block_on`](Self::block_on),
-    /// [`run_until_stalled`](Self::run_until_stalled), and
-    /// [`run_ready_tasks`](Self::run_ready_tasks) — so a host embedding the
+    /// [`run`], [`block_on`], [`run_until_stalled`], and
+    /// [`run_ready_tasks`] — so a host embedding the
     /// runtime sees them too.
     ///
     /// The value carries no information about what the turn did; it is only a

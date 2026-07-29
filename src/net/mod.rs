@@ -105,8 +105,10 @@ struct SocketTimeouts {
 ///
 /// `TcpStream` owns a connected stream socket and provides async byte-oriented
 /// reads, writes, shutdown, socket option access, and owned split halves. Reads
-/// and writes may complete partially; use [`read_exact`](Self::read_exact) or
-/// [`write_all`](Self::write_all) when a protocol needs a full buffer.
+/// and writes may complete partially; use
+/// [`read_exact`](crate::io::AsyncReadExt::read_exact) or
+/// [`write_all`](crate::io::AsyncWriteExt::write_all) when a protocol needs a
+/// full buffer.
 ///
 /// Pending operations are stored in the stream and are tied to the current
 /// runite event loop. Cancelling a public read or write future leaves its

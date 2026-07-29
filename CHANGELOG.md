@@ -151,6 +151,9 @@ changes.
 
 ### Changed
 
+- Fixed two intra-doc links on `TcpStream` that pointed at inherent
+  `read_exact`/`write_all` methods removed in this release; they now name the
+  extension-trait methods.
 - Removed `FuturesCompat`'s `poll_write_vectored_operation` override, which was
   identical to its `poll_write_vectored` and to what the trait default already
   forwards to, plus two `#[allow(dead_code)]` attributes that had gone stale as
