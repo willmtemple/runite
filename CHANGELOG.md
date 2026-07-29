@@ -134,7 +134,10 @@ changes.
 
   `on_chunk` runs for each read as it completes, so delivery-before-parking is
   structural rather than advisory, and returning `ControlFlow::Break` ends the
-  drain. One-shot readiness is deliberately kept rather than replaced by an
+  drain. The returned `fd::Drain` says which of the two ended it: a consumer
+  draining a pseudoterminal keys its teardown on end of input — that is how it
+  learns the child exited — and must be able to tell that from its own byte
+  budget running out. One-shot readiness is deliberately kept rather than replaced by an
   `AsyncRead` for descriptors: a consumer sharing its thread with a frame clock
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
