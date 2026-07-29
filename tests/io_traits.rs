@@ -698,3 +698,138 @@ fn cloned_file_direct_poll_writes_have_distinct_owners() {
         fs::remove_file(&path).await.expect("remove fixture");
     });
 }
+
+/// `AsyncRead`/`AsyncWrite`/`AsyncSeek`/`AsyncBufRead` forward through `&mut T`,
+/// `Box<T>`, and `Pin<Box<T>>`.
+///
+/// Without these, wrapping a *borrowed* reader was impossible — `BufReader::new`
+/// takes ownership, so code that only had a `&mut File` had to give up the file
+/// or restructure. Several tests and examples in this repository took ownership
+/// purely to work around it.
+#[runite::test]
+async fn async_io_traits_forward_through_pointers() {
+    let path = temp_path("pointer-forwarding");
+    std::fs::write(&path, b"forwarded through a pointer").expect("seed file");
+
+    let mut file = runite::fs::File::open(&path).await.expect("open");
+
+    // `&mut File` as an `AsyncRead`: the borrow is enough, the file is not moved.
+    {
+        let mut buffered = BufReader::new(&mut file);
+        let mut first = String::new();
+        buffered
+            .read_line(&mut first)
+            .await
+            .expect("read through &mut");
+        assert_eq!(first, "forwarded through a pointer");
+    }
+
+    // `file` is still ours, and a `&mut` to it satisfies `AsyncSeek` on its own.
+    // Routed through a generic so the bound is what is being tested, rather
+    // than method resolution picking an inherent method.
+    async fn rewind<S: AsyncSeek + Unpin>(mut seeker: S) -> io::Result<u64> {
+        seeker.seek(SeekFrom::Start(0)).await
+    }
+    let position = rewind(&mut file).await.expect("seek through &mut");
+    assert_eq!(position, 0);
+
+    // `Box<T>` and `Pin<Box<T>>` forward too.
+    let mut boxed: Box<runite::fs::File> = Box::new(file);
+    let mut via_box = Vec::new();
+    boxed.read_to_end(&mut via_box).await.expect("read via Box");
+    assert_eq!(via_box, b"forwarded through a pointer");
+
+    let mut pinned = Box::pin(boxed);
+    pinned
+        .seek(SeekFrom::Start(10))
+        .await
+        .expect("seek via Pin");
+    let mut via_pin = Vec::new();
+    pinned
+        .read_to_end(&mut via_pin)
+        .await
+        .expect("read via Pin<Box<_>>");
+    assert_eq!(via_pin, b"through a pointer");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The forwarding impls must not lose an override. A writer that counts
+/// vectored writes and cancellation generations sees the same calls through a
+/// `&mut` as it does directly — if the macro had let a default implementation
+/// stand in, a runtime-backed writer would quietly lose cancellation safety.
+#[test]
+fn forwarding_preserves_overridden_write_hooks() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct Counts {
+        vectored: Cell<usize>,
+        generations: Cell<u64>,
+    }
+
+    struct Recorder(Rc<Counts>);
+
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            self.0.vectored.set(self.0.vectored.get() + 1);
+            Poll::Ready(Ok(bufs.iter().map(|slice| slice.len()).sum()))
+        }
+
+        fn poll_write_operation(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+            generation: u64,
+        ) -> Poll<io::Result<usize>> {
+            self.0.generations.set(generation);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let counts = Rc::new(Counts::default());
+    let mut recorder = Recorder(Rc::clone(&counts));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    let mut borrowed = &mut recorder;
+    let slices = [IoSlice::new(b"ab"), IoSlice::new(b"cd")];
+    let written = Pin::new(&mut borrowed).poll_write_vectored(&mut cx, &slices);
+    assert!(
+        matches!(written, Poll::Ready(Ok(4))),
+        "vectored override should run, got {written:?}"
+    );
+    assert_eq!(
+        counts.vectored.get(),
+        1,
+        "the override must not be replaced by the trait default"
+    );
+
+    let written = Pin::new(&mut borrowed).poll_write_operation(&mut cx, b"xyz", 42);
+    assert!(matches!(written, Poll::Ready(Ok(3))), "got {written:?}");
+    assert_eq!(
+        counts.generations.get(),
+        42,
+        "the cancellation generation must survive the forward"
+    );
+}

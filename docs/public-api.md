@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 957 | 977 | 996 | 1016 | 171 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 957 | 977 | 996 | 1016 | 171 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 957 | 977 | 996 | 1016 | 171 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 854 | 868 | 893 | 907 | 68 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 996 | 1016 | 1035 | 1055 | 171 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 996 | 1016 | 1035 | 1055 | 171 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 996 | 1016 | 1035 | 1055 | 171 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 893 | 907 | 932 | 946 | 68 |
 
-Portable default items: **786**
+Portable default items: **825**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **786**
 
 ## Portable default surface
 
-Items: **786**
+Items: **825**
 
 ### `runite`
 
@@ -40,6 +40,33 @@ impl core::fmt::Display for runite::JoinError
 impl runite::JoinError
 pub fn &mut S::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn &mut S::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn &mut T::consume(core::pin::Pin<&mut Self>, usize)
+pub fn &mut T::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn &mut T::poll_fill_buf(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<&[u8]>>
+pub fn &mut T::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn &mut T::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn &mut T::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn &mut T::poll_seek(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, std::io::SeekFrom) -> core::task::poll::Poll<core::io::error::Result<u64>>
+pub fn &mut T::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn &mut T::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn alloc::boxed::Box<T>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn alloc::boxed::Box<T>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn alloc::boxed::Box<T>::poll_fill_buf(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<&[u8]>>
+pub fn alloc::boxed::Box<T>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn alloc::boxed::Box<T>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn alloc::boxed::Box<T>::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn alloc::boxed::Box<T>::poll_seek(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, std::io::SeekFrom) -> core::task::poll::Poll<core::io::error::Result<u64>>
+pub fn alloc::boxed::Box<T>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn alloc::boxed::Box<T>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn core::pin::Pin<P>::consume(core::pin::Pin<&mut Self>, usize)
+pub fn core::pin::Pin<P>::poll_close(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn core::pin::Pin<P>::poll_fill_buf(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<&[u8]>>
+pub fn core::pin::Pin<P>::poll_flush(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::io::error::Result<()>>
+pub fn core::pin::Pin<P>::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn core::pin::Pin<P>::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn core::pin::Pin<P>::poll_seek(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, std::io::SeekFrom) -> core::task::poll::Poll<core::io::error::Result<u64>>
+pub fn core::pin::Pin<P>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn core::pin::Pin<P>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::JoinError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::JoinError::is_aborted(&self) -> bool
 pub fn runite::JoinError::is_cancelled(&self) -> bool
@@ -347,6 +374,10 @@ impl runite::io::AsyncWrite for runite::stdio::Stdout
 impl runite::io::Stream for runite::fs::ReadDir
 impl runite::io::Stream for runite::net::Incoming
 impl<A, B> core::future::future::Future for runite::io::CopyBidirectional<'_, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
+impl<P> runite::io::AsyncBufRead for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncBufRead
+impl<P> runite::io::AsyncRead for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncRead
+impl<P> runite::io::AsyncSeek for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncSeek
+impl<P> runite::io::AsyncWrite for core::pin::Pin<P> where P: core::ops::deref::DerefMut + core::marker::Unpin, <P as core::ops::deref::Deref>::Target: runite::io::AsyncWrite
 impl<R, W> core::future::future::Future for runite::io::Copy<'_, R, W> where R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized, W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
 impl<R: runite::io::AsyncRead + ?core::marker::Sized> runite::io::AsyncReadExt for R
 impl<R: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Read<'_, R>
@@ -379,6 +410,14 @@ impl<S> core::marker::Unpin for runite::io::Take<S>
 impl<S> runite::io::Stream for runite::io::Skip<S> where S: runite::io::Stream + core::marker::Unpin
 impl<S> runite::io::Stream for runite::io::Take<S> where S: runite::io::Stream + core::marker::Unpin
 impl<T: core::marker::Send + 'static> runite::io::Stream for runite::channel::mpsc::Receiver<T>
+impl<T: runite::io::AsyncBufRead + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncBufRead for &mut T
+impl<T: runite::io::AsyncBufRead + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncBufRead for alloc::boxed::Box<T>
+impl<T: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncRead for &mut T
+impl<T: runite::io::AsyncRead + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncRead for alloc::boxed::Box<T>
+impl<T: runite::io::AsyncSeek + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncSeek for &mut T
+impl<T: runite::io::AsyncSeek + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncSeek for alloc::boxed::Box<T>
+impl<T: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncWrite for &mut T
+impl<T: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> runite::io::AsyncWrite for alloc::boxed::Box<T>
 impl<W: runite::io::AsyncWrite + ?core::marker::Sized> runite::io::AsyncWriteExt for W
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Close<'_, W>
 impl<W: runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized> core::future::future::Future for runite::io::Flush<'_, W>

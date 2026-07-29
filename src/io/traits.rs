@@ -357,3 +357,208 @@ pub trait AsyncSeek {
         position: SeekFrom,
     ) -> Poll<io::Result<u64>>;
 }
+
+/// Forwards every method of the four async I/O traits through a pointer type.
+///
+/// Written as a macro over `&mut T` and `Box<T>` because both deref to `T` and
+/// the bodies are identical. Every method is forwarded explicitly, including
+/// the vectored methods and the hidden `*_operation` hooks: a defaulted method
+/// here would silently discard an implementation's override, which for the
+/// `_operation` hooks means losing the generation a runtime-backed writer uses
+/// to tell a re-poll from a later future after cancellation. Wrapping a
+/// `TcpStream` in `&mut` must not quietly make its writes cancellation-unsafe.
+macro_rules! forward_async_io {
+    ($pointer:ty) => {
+        impl<T: AsyncRead + Unpin + ?Sized> AsyncRead for $pointer {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut [u8],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_read(cx, buf)
+            }
+
+            fn poll_read_vectored(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &mut [IoSliceMut<'_>],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_read_vectored(cx, bufs)
+            }
+        }
+
+        impl<T: AsyncBufRead + Unpin + ?Sized> AsyncBufRead for $pointer {
+            fn poll_fill_buf(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<io::Result<&[u8]>> {
+                Pin::new(&mut **self.get_mut()).poll_fill_buf(cx)
+            }
+
+            fn consume(mut self: Pin<&mut Self>, amount: usize) {
+                Pin::new(&mut **self).consume(amount);
+            }
+        }
+
+        impl<T: AsyncWrite + Unpin + ?Sized> AsyncWrite for $pointer {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write(cx, buf)
+            }
+
+            fn poll_write_vectored(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &[IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write_vectored(cx, bufs)
+            }
+
+            fn poll_write_operation(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+                generation: u64,
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write_operation(cx, buf, generation)
+            }
+
+            fn poll_write_vectored_operation(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bufs: &[IoSlice<'_>],
+                generation: u64,
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut **self).poll_write_vectored_operation(cx, bufs, generation)
+            }
+
+            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Pin::new(&mut **self).poll_flush(cx)
+            }
+
+            fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Pin::new(&mut **self).poll_close(cx)
+            }
+        }
+
+        impl<T: AsyncSeek + Unpin + ?Sized> AsyncSeek for $pointer {
+            fn poll_seek(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                position: SeekFrom,
+            ) -> Poll<io::Result<u64>> {
+                Pin::new(&mut **self).poll_seek(cx, position)
+            }
+        }
+    };
+}
+
+forward_async_io!(&mut T);
+forward_async_io!(Box<T>);
+
+// `Pin<P>` is separate: it is already pinned, so the target needs no `Unpin`
+// bound and forwarding goes through `as_mut` rather than a fresh `Pin::new`.
+impl<P> AsyncRead for Pin<P>
+where
+    P: core::ops::DerefMut + Unpin,
+    P::Target: AsyncRead,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().as_mut().poll_read(cx, buf)
+    }
+
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().as_mut().poll_read_vectored(cx, bufs)
+    }
+}
+
+impl<P> AsyncBufRead for Pin<P>
+where
+    P: core::ops::DerefMut + Unpin,
+    P::Target: AsyncBufRead,
+{
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        self.get_mut().as_mut().poll_fill_buf(cx)
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        self.get_mut().as_mut().consume(amount);
+    }
+}
+
+impl<P> AsyncWrite for Pin<P>
+where
+    P: core::ops::DerefMut + Unpin,
+    P::Target: AsyncWrite,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().as_mut().poll_write_vectored(cx, bufs)
+    }
+
+    fn poll_write_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .as_mut()
+            .poll_write_operation(cx, buf, generation)
+    }
+
+    fn poll_write_vectored_operation(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+        generation: u64,
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .as_mut()
+            .poll_write_vectored_operation(cx, bufs, generation)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().as_mut().poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().as_mut().poll_close(cx)
+    }
+}
+
+impl<P> AsyncSeek for Pin<P>
+where
+    P: core::ops::DerefMut + Unpin,
+    P::Target: AsyncSeek,
+{
+    fn poll_seek(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        position: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        self.get_mut().as_mut().poll_seek(cx, position)
+    }
+}

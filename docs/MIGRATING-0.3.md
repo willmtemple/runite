@@ -140,6 +140,22 @@ runite::spawn(async move {
 `Signals` also implements `io::Stream`. Duplicate kinds register once; an empty
 slice is an error rather than a stream that never fires.
 
+### The I/O traits work through pointers
+
+`AsyncRead`, `AsyncBufRead`, `AsyncWrite` and `AsyncSeek` are now implemented
+for `&mut T`, `Box<T>` and `Pin<P>`, so a borrowed reader can be wrapped:
+
+```rust
+// 0.2 — `BufReader::new` needs ownership, so this did not compile
+let mut buffered = BufReader::new(&mut file);
+
+// 0.2 workaround — give up the file, or restructure around it
+let mut buffered = BufReader::new(file);
+
+// 0.3 — the borrow is enough, and `file` is still yours afterwards
+let mut buffered = BufReader::new(&mut file);
+```
+
 ### Adopting a process runite did not spawn
 
 `Child::from_pid` takes an already-running process and lets its exit be awaited

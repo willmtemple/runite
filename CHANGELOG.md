@@ -56,6 +56,15 @@ changes.
   frequent signal cannot starve the others.
   ([#45](https://github.com/willmtemple/runite/issues/45))
 
+- `AsyncRead`, `AsyncBufRead`, `AsyncWrite`, and `AsyncSeek` are implemented for
+  `&mut T`, `Box<T>`, and `Pin<P>`. Only `Stream` had these before, so wrapping
+  a borrowed reader did not work — `BufReader::new(&mut file)` failed to
+  compile, and code that only held a `&mut` had to give up ownership or
+  restructure. Every method is forwarded explicitly, including the vectored
+  methods and the internal cancellation-generation hooks, so wrapping a
+  runtime-backed writer in a pointer cannot silently make its writes
+  cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
+
 ### Breaking
 
 - `net::unix::Incoming` no longer borrows its listener. It was `Incoming<'a>`
