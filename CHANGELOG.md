@@ -89,6 +89,18 @@ changes.
   runtime-backed writer in a pointer cannot silently make its writes
   cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
 
+### Fixed
+
+- `watch::Sender::send` could report success with no receivers. It checked the
+  receiver count under the book lock, released it, then wrote the value, so the
+  last `Receiver` dropping in that window left `send` consuming the value,
+  advancing the version, and returning `Ok(())` — contradicting its documented
+  contract. The check and the write now happen under one book lock. The
+  previous value is moved out rather than assigned over, so `T::drop` runs
+  after both locks are released: dropping it in place would run user code under
+  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
+  ([#26](https://github.com/willmtemple/runite/issues/26))
+
 ### Changed
 
 - `io_uring` setup failing with `ENOMEM` now says what actually went wrong. The

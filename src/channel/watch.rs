@@ -273,13 +273,36 @@ impl<T: Send + 'static> Sender<T> {
     /// runite::run();
     /// ```
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        {
+        // The receiver-count check and the write have to be atomic with respect
+        // to the book lock. `Receiver::drop` takes only that lock, so releasing
+        // it between the two lets the last receiver disappear after the check
+        // and leaves `send` reporting success with nobody listening —
+        // contradicting the documented contract.
+        //
+        // Holding the book lock across a plain assignment is what the 0.2
+        // lock-order fix removed, because assigning drops the previous value
+        // and `T::drop` is user code that may re-enter this channel and take
+        // the book lock again. Moving the previous value out instead keeps the
+        // critical section free of user code and defers the drop to after both
+        // locks are released.
+        let (previous, version) = {
             let book = self.shared.lock_book();
             if book.receiver_count == 0 {
                 return Err(SendError(value));
             }
-        }
-        let version = self.shared.write_value(|slot| *slot = value);
+            let mut slot = self
+                .shared
+                .value
+                .write()
+                .expect("watch state should not be poisoned");
+            let previous = std::mem::replace(&mut *slot, value);
+            // Bump under the value write lock: readers cannot observe the new
+            // value with the old version, or vice versa.
+            let version = self.shared.version.fetch_add(1, Ordering::Release) + 1;
+            (previous, version)
+        };
+        drop(previous);
+
         let waiters = self.shared.lock_book().wake_changed(version);
         self.complete_changed(waiters);
         Ok(())
@@ -730,5 +753,82 @@ mod tests {
         run();
 
         assert_eq!(*observed.lock().unwrap(), Some(42));
+    }
+
+    /// `send` must not report success once the last receiver is gone, and a
+    /// refusal must leave the channel untouched.
+    #[test]
+    fn send_with_no_receivers_fails_without_publishing() {
+        let (sender, receiver) = super::channel(1u32);
+        drop(receiver);
+
+        let before = *sender.borrow();
+        let error = sender
+            .send(2)
+            .expect_err("send with no receivers should fail");
+        assert_eq!(error.0, 2, "the value should be handed back to the caller");
+        assert_eq!(
+            *sender.borrow(),
+            before,
+            "a refused send must not publish the value"
+        );
+
+        // A late receiver sees the original value, so the version did not move
+        // either.
+        let late = sender.subscribe();
+        assert_eq!(*late.borrow(), 1);
+    }
+
+    /// The previous value is dropped with no channel lock held.
+    ///
+    /// `send` has to check the receiver count and write under the same book
+    /// lock, or the last receiver can vanish in between. But the previous value
+    /// is user code on drop, and re-entering the channel from it while that
+    /// lock is held is a self-deadlock — which is why the value is moved out
+    /// and dropped afterwards rather than assigned over.
+    ///
+    /// This test deadlocks rather than failing if that is ever undone, so it
+    /// runs on a worker thread with a deadline.
+    #[test]
+    fn the_replaced_value_is_dropped_without_holding_the_channel_lock() {
+        use std::cell::RefCell;
+        use std::sync::mpsc;
+
+        thread_local! {
+            static REENTRY: RefCell<Option<super::Sender<Droppy>>> =
+                const { RefCell::new(None) };
+        }
+
+        #[derive(Debug)]
+        struct Droppy;
+
+        impl Drop for Droppy {
+            fn drop(&mut self) {
+                // Take the sender out so this runs once and cannot recurse.
+                let sender = REENTRY.with(|slot| slot.borrow_mut().take());
+                if let Some(sender) = sender {
+                    // Takes the book lock. Reached from inside `send` while
+                    // that lock was held, this would deadlock.
+                    let _ = sender.receiver_count();
+                }
+            }
+        }
+
+        let (done, finished) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (sender, _receiver) = super::channel(Droppy);
+            REENTRY.with(|slot| *slot.borrow_mut() = Some(sender.clone()));
+            assert!(
+                sender.send(Droppy).is_ok(),
+                "send with a live receiver should succeed"
+            );
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "dropping the replaced value must not deadlock against the channel lock"
+        );
+        worker.join().expect("worker should not panic");
     }
 }
