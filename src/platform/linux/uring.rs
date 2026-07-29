@@ -572,7 +572,7 @@ impl IoUring {
         let nodrop = params.features & IORING_FEAT_NODROP != 0;
         if !nodrop {
             tracing::warn!(
-                target: "runite::driver",
+                target: crate::trace_targets::DRIVER,
                 event = "cq_nodrop_unsupported",
                 "this kernel lacks IORING_FEAT_NODROP (needs Linux 5.5+); completions may \
                  be dropped on completion-queue overflow",
@@ -713,7 +713,7 @@ impl IoUring {
             ring.drain_completions(|cqe| {
                 if cqe.res < 0 {
                     tracing::warn!(
-                        target: "runite::driver",
+                        target: crate::trace_targets::DRIVER,
                         event = "fallback_submitter_op_failed",
                         errno = -cqe.res,
                         "an io_uring op on the global fallback submitter failed \
@@ -860,7 +860,7 @@ impl IoUring {
                 "this kernel lacks FEAT_NODROP"
             };
             tracing::error!(
-                target: "runite::driver",
+                target: crate::trace_targets::DRIVER,
                 event = "cq_overflow_dropped",
                 overflow,
                 nodrop = self.nodrop,
@@ -1369,7 +1369,7 @@ fn setup_ring(entries: u32, profile: SetupProfile) -> io::Result<(RawFd, IoUring
                 };
                 let _ = cache.set(flags);
                 tracing::debug!(
-                    target: "runite::driver",
+                    target: crate::trace_targets::DRIVER,
                     event = "io_uring_setup_flags",
                     flags,
                     entries,

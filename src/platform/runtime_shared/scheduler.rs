@@ -105,7 +105,6 @@ pub fn queue_task<R: Runtime, F>(task: F)
 where
     F: FnOnce() + 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::SCHEDULER,
         event = "queue_task",
@@ -127,7 +126,6 @@ pub fn queue_microtask<R: Runtime, F>(task: F)
 where
     F: FnOnce() + 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::SCHEDULER,
         event = "queue_microtask",
@@ -153,7 +151,6 @@ where
 {
     let id = allocate_timer_id::<R>();
     let deadline = deadline_from_now::<R>(delay);
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "timeout",
@@ -179,7 +176,6 @@ where
 /// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
 pub fn cancel_timeout(handle: &TimeoutHandle) {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "cancel_timeout",
@@ -202,7 +198,6 @@ where
 {
     let id = allocate_timer_id::<R>();
 
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "interval",
@@ -232,7 +227,6 @@ where
         schedule_interval_macrotask::<R>(id, scheduled);
     } else {
         let deadline = deadline_from_now::<R>(delay);
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::TIMER,
             event = "interval_deadline",
@@ -253,7 +247,6 @@ where
 /// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
 pub fn cancel_interval(handle: &IntervalHandle) {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "cancel_interval",
@@ -281,7 +274,6 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::ASYNC,
         event = "queue_future",
@@ -518,7 +510,6 @@ pub fn run<R: Runtime>() {
 
         if busy {
             with_installed_thread(|state| {
-                #[cfg(debug_assertions)]
                 tracing::trace!(
                     target: trace_targets::RUNTIME,
                     event = "run_wait",
@@ -981,7 +972,6 @@ fn drain_driver_events<R: Runtime>() {
         };
 
         if ready.wake {
-            #[cfg(debug_assertions)]
             tracing::trace!(
                 target: trace_targets::DRIVER,
                 event = "drain_wake",
@@ -992,7 +982,6 @@ fn drain_driver_events<R: Runtime>() {
             });
         }
         if ready.timer {
-            #[cfg(debug_assertions)]
             tracing::trace!(
                 target: trace_targets::TIMER,
                 event = "drain_timer",
@@ -1069,10 +1058,8 @@ fn pop_macrotask<R: Runtime>() -> Option<LocalTask> {
     with_installed_thread(|state| {
         RuntimeCounters::bump(&state.shared.counters.macrotasks_run);
     });
-    #[cfg(debug_assertions)]
-    {
-        let now = deadline_from_now::<R>(Duration::ZERO);
-        let wait = now.saturating_sub(entry.queued_at);
+    if let Some(queued_at) = entry.queued_at {
+        let wait = deadline_from_now::<R>(Duration::ZERO).saturating_sub(queued_at);
         tracing::trace!(
             target: trace_targets::SCHEDULER,
             event = "macrotask_dequeued",
@@ -1097,9 +1084,20 @@ fn make_macro_task<R: Runtime>(task: LocalTask) -> MacroTask {
     let _phantom: core::marker::PhantomData<R> = core::marker::PhantomData;
     MacroTask {
         task,
-        #[cfg(debug_assertions)]
-        queued_at: deadline_from_now::<R>(Duration::ZERO),
+        queued_at: queue_timestamp::<R>(),
     }
+}
+
+/// Reads the monotonic clock, but only if a subscriber is collecting the
+/// scheduler traces that would report it.
+///
+/// `tracing::enabled!` is the same check the trace macros make before
+/// evaluating their fields — a relaxed load of a shared static and a compare —
+/// so with no subscriber installed this costs a not-taken branch and no
+/// syscall.
+fn queue_timestamp<R: Runtime>() -> Option<Duration> {
+    tracing::enabled!(target: trace_targets::SCHEDULER, tracing::Level::TRACE)
+        .then(|| deadline_from_now::<R>(Duration::ZERO))
 }
 
 fn has_ready_work() -> bool {

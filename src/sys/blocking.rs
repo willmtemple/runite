@@ -359,7 +359,7 @@ fn worker_loop(receiver: Arc<Mutex<mpsc::Receiver<BlockingTask>>>) {
                         "Box<dyn Any>"
                     };
                     tracing::error!(
-                        target: "runite::runtime",
+                        target: crate::trace_targets::RUNTIME,
                         event = "blocking_task_panicked",
                         panic = message,
                         "blocking task panicked; worker kept alive",

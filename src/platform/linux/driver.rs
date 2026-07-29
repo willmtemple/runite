@@ -68,7 +68,6 @@ impl NotifierInner {
     }
 
     fn notify(&self) -> io::Result<()> {
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::DRIVER,
             event = "notify",
@@ -410,7 +409,6 @@ impl Driver {
             .ring()
             .drain_completions(|cqe| self.process_cqe(cqe, &mut ready));
         let saw_any = had_durable_ready || saw_submission || saw_completion;
-        #[cfg(debug_assertions)]
         if saw_any {
             tracing::trace!(
                 target: trace_targets::DRIVER,
@@ -425,7 +423,6 @@ impl Driver {
 
     /// Blocks until at least one completion is available.
     pub fn wait(&self) -> io::Result<()> {
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::DRIVER,
             event = "wait",
@@ -440,7 +437,6 @@ impl Driver {
     ///
     /// Passing `None` removes any active timer.
     pub fn rearm_timer(&self, deadline: Option<Duration>) -> io::Result<()> {
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::TIMER,
             event = "rearm_timer",
@@ -553,7 +549,6 @@ impl Driver {
         self.validate_opcode(prepared.opcode)?;
 
         let token = self.next_token(CompletionKind::Operation);
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "submit_operation",
@@ -601,7 +596,6 @@ impl Driver {
 
         let main_token = self.next_token(CompletionKind::Operation);
         let timeout_token = self.next_token(CompletionKind::LinkedTimeout);
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "submit_operation_with_linked_timeout",
@@ -630,7 +624,6 @@ impl Driver {
     }
 
     pub(crate) fn cancel_operation(&self, token: u64) -> io::Result<()> {
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "cancel_operation",
@@ -680,7 +673,6 @@ impl Driver {
     }
 
     fn process_cqe(&self, cqe: IoUringCqe, ready: &mut ReadyEvents) {
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::DRIVER,
             event = "process_cqe",

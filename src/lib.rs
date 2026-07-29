@@ -200,6 +200,11 @@ pub(crate) mod trace_targets {
     // "compiles under dev, breaks under `cargo bench`/release" trap.
     pub const TIMER: &str = "runite::timer";
     pub const ASYNC: &str = "runite::async";
+
+    /// Signal delivery. Emitted only on Windows today, where the console
+    /// control handler runs on a thread the runtime does not own.
+    #[cfg(windows)]
+    pub const SIGNAL: &str = "runite::signal";
 }
 
 pub mod channel;

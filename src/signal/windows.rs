@@ -252,9 +252,12 @@ fn uninstall_handler(lifecycle: &mut HandlerLifecycle) {
     if removed != 0 {
         lifecycle.installed = false;
     } else {
+        let error = io::Error::last_os_error();
         tracing::error!(
-            target: "runite::signal",
-            error = ?io::Error::last_os_error(),
+            target: crate::trace_targets::SIGNAL,
+            event = "uninstall_handler_failed",
+            code = error.raw_os_error().unwrap_or(0),
+            %error,
             "failed to uninstall console control handler"
         );
     }

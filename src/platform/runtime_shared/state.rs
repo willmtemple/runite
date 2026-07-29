@@ -127,10 +127,19 @@ pub(crate) fn thread_teardown_guard() -> ThreadTeardownGuard {
 
 pub(crate) struct MacroTask {
     pub(crate) task: LocalTask,
-    /// Wall time at which this task entered the local queue. Populated only
-    /// in debug builds; used to emit a trace event reporting queue-wait time.
-    #[cfg(debug_assertions)]
-    pub(crate) queued_at: Duration,
+    /// Monotonic time at which this task entered the local queue, used to
+    /// report queue-wait time when the task is dequeued.
+    ///
+    /// `None` unless a subscriber was actually collecting scheduler traces at
+    /// the moment of the push. Reading the clock is a real syscall — around
+    /// 20-30ns on every backend — and this is per macrotask, so it must not
+    /// happen just because the build has tracing linked in. The check that
+    /// produces this is the same not-taken branch every other trace site pays.
+    ///
+    /// The consequence is that queue-wait timing begins once a subscriber is
+    /// installed rather than retroactively: tasks already queued at that
+    /// moment are dequeued without it.
+    pub(crate) queued_at: Option<Duration>,
 }
 
 pub(crate) struct IntervalEntry {

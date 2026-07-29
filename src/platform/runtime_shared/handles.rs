@@ -14,7 +14,6 @@ use std::task::{Context, Poll};
 
 use super::future_task::{JoinState, TaskShared};
 use super::state::{ThreadShared, WorkerCompletion};
-#[cfg(debug_assertions)]
 use crate::trace_targets;
 
 /// Returned by [`ThreadHandle::queue_macrotask`] when the target runtime has
@@ -478,7 +477,6 @@ impl ThreadHandle {
         F: FnOnce() + Send + 'static,
     {
         let result = self.shared.enqueue_macro(Box::new(task));
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::SCHEDULER,
             event = "queue_remote_task",

@@ -243,8 +243,26 @@ latency investigation with any `tracing` subscriber:
 | `runite::driver`    | io_uring / kqueue / IOCP submission and completions |
 | `runite::runtime`   | runtime and worker lifecycle                        |
 | `runite::scheduler` | task scheduling and cross-thread queueing           |
-| `runite::timer`     | timer arming/firing (debug builds)                  |
-| `runite::async`     | future polling and cancellation (debug builds)      |
+| `runite::timer`     | timer arming/firing                                 |
+| `runite::async`     | future polling and cancellation                     |
+| `runite::signal`    | signal delivery (Windows only)                      |
+
+Every event is emitted in release builds as well as debug. Steady-state events used to be
+compiled out of release entirely, which meant the builds you would actually profile were the
+ones with nothing to see. With no subscriber installed, a `tracing` event costs a relaxed load
+of a shared static and a not-taken branch — field expressions are never evaluated — so the
+events are present without being paid for.
+
+Two consequences worth knowing:
+
+- **Queue-wait timing starts when you start collecting.** `macrotask_dequeued` carries
+  `wait_ns`, which requires stamping the clock on every macrotask push. That stamp is taken
+  only while a subscriber is accepting `runite::scheduler` at `TRACE`, so tasks already queued
+  when the subscriber is installed are dequeued without it.
+- **Installing a subscriber is not free for the runtime.** Once anything sets a global default,
+  each event site consults its interest cache; if your filter yields "sometimes" rather than a
+  definite no, hot sites like `queue_microtask` pay a thread-local read and a virtual call per
+  emission. Filter runite's targets off explicitly if you are collecting something else.
 
 For CPU profiling, build with `--release` and use `perf` / `cargo flamegraph` against an
 example or benchmark binary.
