@@ -61,6 +61,11 @@ impl TimerHeap {
         self.nodes.is_empty()
     }
 
+    /// Number of armed timers. `O(1)`: a snapshot must not walk the heap.
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub(crate) fn peek_deadline(&self) -> Option<Duration> {
         self.nodes.first().map(|node| node.deadline)
     }

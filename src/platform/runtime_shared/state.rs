@@ -246,6 +246,11 @@ impl ThreadState {
         self.shared.pending_ops.load(Ordering::Acquire) != 0
     }
 
+    /// Driver operations submitted and not yet terminally completed.
+    pub(crate) fn outstanding_operations(&self) -> usize {
+        self.shared.pending_ops.load(Ordering::Acquire)
+    }
+
     pub(crate) fn try_begin_idle_probe(&self) -> bool {
         self.shared
             .closing
@@ -502,6 +507,14 @@ impl ThreadShared {
                 return;
             }
         }
+    }
+
+    /// Depth of the cross-thread macrotask queue.
+    ///
+    /// Takes the queue lock briefly; there is no cheaper honest answer, and a
+    /// snapshot is not on a hot path.
+    pub(crate) fn remote_queue_depth(&self) -> usize {
+        lock_queue(&self.remote_macrotasks).len()
     }
 
     fn close(&self) -> VecDeque<SendTask> {

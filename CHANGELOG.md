@@ -123,6 +123,22 @@ changes.
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `metrics::snapshot()` and `metrics::Gauges`, the first slice of runtime
+  introspection: live tasks, microtask and macrotask queue depths, remote queue
+  depth, armed timers, and outstanding driver operations. Reading it walks
+  nothing — every field is a counter that already existed — because the act of
+  measuring an idle runtime must not itself be work. A thread with no runtime
+  installed reads zeroes rather than panicking or installing one, so a test
+  harness or benchmark that drives application logic without a reactor can
+  still call it.
+
+  Everything here is a **gauge**. Cumulative counters (polls, wakes,
+  completions) and high-water marks are deliberately separate types still to
+  come, not extra fields: a consumer that cannot tell a running total from a
+  level will misreport it. A snapshot is also not attributable to one turn and
+  carries no `TurnId` — stamp events for attribution, use snapshots for volume.
+  ([#43](https://github.com/willmtemple/runite/issues/43))
+
 - `sync::CancellationToken`: cloneable, hierarchical cooperative cancellation
   that `!Send` tasks can await. It complements `AbortHandle` rather than
   replacing it — an abort is done *to* a task at its next suspension point, a

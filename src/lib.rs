@@ -209,6 +209,7 @@ pub mod fs;
 #[cfg(feature = "hyper")]
 pub mod hyper_rt;
 pub mod io;
+pub mod metrics;
 pub mod net;
 pub(crate) mod op;
 pub mod os;

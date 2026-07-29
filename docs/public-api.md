@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1113 | 1133 | 1156 | 1176 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1113 | 1133 | 1156 | 1176 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1113 | 1133 | 1156 | 1176 | 168 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1017 | 1031 | 1060 | 1074 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1122 | 1142 | 1165 | 1185 | 168 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1122 | 1142 | 1165 | 1185 | 168 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1122 | 1142 | 1165 | 1185 | 168 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1026 | 1040 | 1069 | 1083 | 72 |
 
-Portable default items: **945**
+Portable default items: **954**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **945**
 
 ## Portable default surface
 
-Items: **945**
+Items: **954**
 
 ### `runite`
 
@@ -657,6 +657,20 @@ pub type runite::io::Write<'_, W>::Output = core::result::Result<usize, core::io
 pub type runite::io::WriteAll<'_, W>::Output = core::result::Result<(), core::io::error::Error>
 pub type runite::io::WriteVectored<'_, '_, W>::Output = core::result::Result<usize, core::io::error::Error>
 pub use runite::io::SeekFrom
+```
+
+### `runite::metrics`
+
+```rust
+#[non_exhaustive] pub struct runite::metrics::Gauges
+pub fn runite::metrics::snapshot() -> runite::metrics::Gauges
+pub mod runite::metrics
+pub runite::metrics::Gauges::armed_timers: usize
+pub runite::metrics::Gauges::live_tasks: usize
+pub runite::metrics::Gauges::local_macrotask_queue_depth: usize
+pub runite::metrics::Gauges::microtask_queue_depth: usize
+pub runite::metrics::Gauges::outstanding_operations: usize
+pub runite::metrics::Gauges::remote_macrotask_queue_depth: usize
 ```
 
 ### `runite::net`
