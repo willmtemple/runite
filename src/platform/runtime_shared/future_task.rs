@@ -73,13 +73,19 @@ impl FutureTask {
     /// wakes that arrive while the task is already pending.
     pub(crate) fn schedule(self: &Rc<Self>) {
         if self.queued.replace(true) {
+            // A wake arriving while a poll is already queued caused no new
+            // work. Counted separately rather than folded into `task_wakes`,
+            // so neither number lies: `task_wakes` stays a count of scheduled
+            // polls, and the coalescing a consumer asked to see is visible
+            // instead of being silently absent.
+            with_installed_thread(|state| {
+                super::state::RuntimeCounters::bump(&state.shared.counters.coalesced_wakes);
+            });
             return;
         }
-        // Counted here rather than in the waker: a wake that coalesces into an
-        // already-queued poll did not cause new work, and counting it would
-        // make a coalescing runtime look busier than a non-coalescing one.
         with_installed_thread(|state| {
             super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
+            state.shared.ready_tasks.fetch_add(1, Ordering::AcqRel);
         });
 
         let task = Rc::clone(self);
@@ -93,6 +99,9 @@ impl FutureTask {
 
     fn poll(self: Rc<Self>) {
         self.queued.set(false);
+        with_installed_thread(|state| {
+            state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
+        });
 
         // An abort that landed while this task sat in the microtask queue has
         // already taken the future; nothing left to poll.
@@ -170,7 +179,11 @@ pub(crate) fn cancel_tasks_for_shutdown(mut tasks: Vec<Rc<FutureTask>>) {
         .into_iter()
         .filter_map(|task| {
             let join_waker = task.shared.mark_cancelled()?;
-            task.queued.set(false);
+            if task.queued.replace(false) {
+                with_installed_thread(|state| {
+                    state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
             let future = task.future.borrow_mut().take();
             Some(ShutdownCancellation {
                 task_id: task.id,
@@ -418,6 +431,11 @@ impl TaskShared {
         let Some(join_waker) = self.mark_terminal(TaskState::Aborted) else {
             return;
         };
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                super::state::RuntimeCounters::bump(&state.shared.counters.tasks_cancelled);
+            }
+        });
 
         // Dropping the future cancels any in-flight driver operations it is
         // parked on via their `Drop` impls. If the task is mid-poll (self

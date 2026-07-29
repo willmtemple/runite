@@ -143,11 +143,12 @@ changes.
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
 
 - `metrics::snapshot()`, returning a `Snapshot` of `Gauges` and `Counters`.
-  Gauges are levels read at an instant — live tasks, microtask and macrotask
-  queue depths, remote queue depth, armed timers, outstanding driver
+  Gauges are levels read at an instant — live tasks, ready tasks, microtask and
+  macrotask queue depths, remote queue depth, armed timers, outstanding driver
   operations. Counters are monotonic totals — turns, task polls, task wakes,
-  microtasks and macrotasks run, remote tasks rejected — whose useful quantity
-  is the difference between two snapshots.
+  coalesced wakes, microtasks and macrotasks run, operations completed, tasks
+  cancelled, remote tasks rejected — whose useful quantity is the difference
+  between two snapshots.
 
   They are two types rather than one flat struct on purpose: a flat struct
   invites subtracting a gauge or reading a counter as a level, and a consumer
@@ -162,10 +163,12 @@ changes.
   harness that drives application logic without a reactor can still call it.
 
   `task_wakes` counts only wakes that actually schedule a poll; one coalescing
-  into an already-queued poll is not counted, since it caused no new work.
-  Comparing it against `task_polls` is how a spurious-wake problem surfaces. A
-  snapshot spans whatever interval the reader chooses, so it carries no
-  `TurnId`. ([#43](https://github.com/willmtemple/runite/issues/43))
+  into an already-queued poll lands in `coalesced_wakes` instead, so neither
+  number misleads and the work coalescing avoids stays visible. Comparing
+  `task_wakes` against `task_polls` is how a spurious-wake problem surfaces,
+  and `operations_completed` against the `outstanding_operations` gauge is how
+  a leaked operation does. A snapshot spans whatever interval the reader
+  chooses, so it carries no `TurnId`. ([#43](https://github.com/willmtemple/runite/issues/43))
 
 - `sync::CancellationToken`: cloneable, hierarchical cooperative cancellation
   that `!Send` tasks can await. It complements `AbortHandle` rather than

@@ -160,6 +160,9 @@ impl RemoteQueue {
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCounters {
     pub(crate) turns: AtomicU64,
+    pub(crate) operations_completed: AtomicU64,
+    pub(crate) tasks_cancelled: AtomicU64,
+    pub(crate) coalesced_wakes: AtomicU64,
     pub(crate) task_polls: AtomicU64,
     pub(crate) task_wakes: AtomicU64,
     pub(crate) microtasks_run: AtomicU64,
@@ -268,6 +271,11 @@ impl ThreadState {
         self.shared.pending_ops.load(Ordering::Acquire)
     }
 
+    /// Tasks queued for polling but not yet polled.
+    pub(crate) fn ready_tasks(&self) -> usize {
+        self.shared.ready_tasks.load(Ordering::Acquire)
+    }
+
     pub(crate) fn try_begin_idle_probe(&self) -> bool {
         self.shared
             .closing
@@ -288,6 +296,12 @@ pub(crate) struct ThreadShared {
     /// these are for attribution, never for synchronization, and a reader that
     /// observes a count one behind has still learned what it needed.
     pub(crate) counters: RuntimeCounters,
+    /// Tasks currently sitting in the microtask queue waiting to be polled.
+    ///
+    /// Maintained rather than derived: counting them would mean walking the
+    /// task registry, and a snapshot that walks is work that distorts the idle
+    /// measurement it exists to take.
+    pub(crate) ready_tasks: AtomicUsize,
     pub(crate) closing: AtomicBool,
     pub(crate) closed: AtomicBool,
     notification_requested: AtomicU64,
@@ -311,6 +325,7 @@ impl ThreadShared {
             remote_macrotasks: RemoteQueue::new(capacity),
             pending_ops: AtomicUsize::new(0),
             counters: RuntimeCounters::default(),
+            ready_tasks: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             notification_requested: AtomicU64::new(0),

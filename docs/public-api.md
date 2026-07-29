@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1138 | 1158 | 1181 | 1201 | 174 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1138 | 1158 | 1181 | 1201 | 174 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1138 | 1158 | 1181 | 1201 | 174 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1036 | 1050 | 1079 | 1093 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1142 | 1162 | 1185 | 1205 | 174 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1142 | 1162 | 1185 | 1205 | 174 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1142 | 1162 | 1185 | 1205 | 174 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1040 | 1054 | 1083 | 1097 | 72 |
 
-Portable default items: **964**
+Portable default items: **968**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **964**
 
 ## Portable default surface
 
-Items: **964**
+Items: **968**
 
 ### `runite`
 
@@ -667,17 +667,21 @@ pub use runite::io::SeekFrom
 #[non_exhaustive] pub struct runite::metrics::Snapshot
 pub fn runite::metrics::snapshot() -> runite::metrics::Snapshot
 pub mod runite::metrics
+pub runite::metrics::Counters::coalesced_wakes: u64
 pub runite::metrics::Counters::macrotasks_run: u64
 pub runite::metrics::Counters::microtasks_run: u64
+pub runite::metrics::Counters::operations_completed: u64
 pub runite::metrics::Counters::remote_tasks_rejected: u64
 pub runite::metrics::Counters::task_polls: u64
 pub runite::metrics::Counters::task_wakes: u64
+pub runite::metrics::Counters::tasks_cancelled: u64
 pub runite::metrics::Counters::turns: u64
 pub runite::metrics::Gauges::armed_timers: usize
 pub runite::metrics::Gauges::live_tasks: usize
 pub runite::metrics::Gauges::local_macrotask_queue_depth: usize
 pub runite::metrics::Gauges::microtask_queue_depth: usize
 pub runite::metrics::Gauges::outstanding_operations: usize
+pub runite::metrics::Gauges::ready_tasks: usize
 pub runite::metrics::Gauges::remote_macrotask_queue_depth: usize
 pub runite::metrics::Snapshot::counters: runite::metrics::Counters
 pub runite::metrics::Snapshot::gauges: runite::metrics::Gauges

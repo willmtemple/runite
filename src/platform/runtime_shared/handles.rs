@@ -535,6 +535,7 @@ impl ThreadHandle {
     }
 
     pub(crate) fn finish_async_operation(&self) {
+        super::state::RuntimeCounters::bump(&self.shared.counters.operations_completed);
         let previous = self.shared.pending_ops.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "async operation count underflow");
         // The notification exists to make a *parked* thread re-evaluate
