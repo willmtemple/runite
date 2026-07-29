@@ -77,6 +77,11 @@ impl std::fmt::Debug for UnixStream {
 /// socket path on Unix platforms.
 #[derive(Debug)]
 pub struct UnixListener {
+    inner: Arc<UnixListenerInner>,
+}
+
+#[derive(Debug)]
+struct UnixListenerInner {
     fd: OwnedFd,
 }
 
@@ -516,7 +521,9 @@ impl UnixListener {
         let addr = RawUnixSocketAddr::from_path(path.as_ref())?;
         bind_sync(fd.as_raw_fd(), &addr)?;
         listen_sync(fd.as_raw_fd(), 1024)?;
-        Ok(Self { fd })
+        Ok(Self {
+            inner: Arc::new(UnixListenerInner { fd }),
+        })
     }
 
     /// Accepts an incoming connection.
@@ -538,12 +545,12 @@ impl UnixListener {
 
     /// Returns a [`Stream`] that yields inbound connections as they arrive.
     ///
-    /// The stream is infinite: it never yields `None`. Borrows the listener for
-    /// the lifetime of the stream, so use [`accept`](Self::accept) directly when
-    /// a borrowed stream adapter is not convenient.
-    pub fn incoming(&self) -> Incoming<'_> {
+    /// The stream is infinite: it never yields `None`. Each item is the result
+    /// of an accept, so transient errors surface as `Some(Err(_))` without
+    /// ending iteration.
+    pub fn incoming(&self) -> Incoming {
         Incoming {
-            listener: self,
+            listener: self.share(),
             pending: None,
         }
     }
@@ -559,29 +566,41 @@ impl UnixListener {
     }
 
     fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        self.inner.fd.as_raw_fd()
+    }
+
+    /// Internal fd-sharing clone (reference-counts the same socket). Not public:
+    /// callers who want an independent listener use `try_clone`-style
+    /// duplication, mirroring `TcpListener`.
+    fn share(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
 /// Stream of inbound Unix domain connections.
 ///
-/// Created by [`UnixListener::incoming`], this borrowed stream repeatedly
-/// accepts new connections from its listener. It yields `Some(Err(_))` for
-/// accept errors and does not terminate on its own.
-pub struct Incoming<'a> {
-    listener: &'a UnixListener,
-    pending: Option<Pin<Box<dyn Future<Output = io::Result<UnixStream>> + 'a>>>,
+/// Created by [`UnixListener::incoming`], this stream repeatedly accepts new
+/// connections from its listener. It yields `Some(Err(_))` for accept errors
+/// and does not terminate on its own.
+///
+/// The stream owns a reference-counted handle to the listener rather than
+/// borrowing it, so it can be moved into a spawned task.
+pub struct Incoming {
+    listener: UnixListener,
+    pending: Option<Pin<Box<dyn Future<Output = io::Result<UnixStream>>>>>,
 }
 
-impl std::fmt::Debug for Incoming<'_> {
+impl std::fmt::Debug for Incoming {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Incoming")
-            .field("listener", self.listener)
+            .field("listener", &self.listener)
             .finish_non_exhaustive()
     }
 }
 
-impl Stream for Incoming<'_> {
+impl Stream for Incoming {
     type Item = io::Result<UnixStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1031,13 +1050,13 @@ impl UnixStream {
 
 impl AsFd for UnixListener {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
+        self.inner.fd.as_fd()
     }
 }
 
 impl AsRawFd for UnixListener {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        self.inner.fd.as_raw_fd()
     }
 }
 
@@ -1062,7 +1081,9 @@ impl UnixListener {
     /// and is not handed back to the caller.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         crate::sys::current::net::set_nonblocking(fd.as_raw_fd())?;
-        Ok(Self { fd })
+        Ok(Self {
+            inner: Arc::new(UnixListenerInner { fd }),
+        })
     }
 
     /// Adopts a blocking [`std::os::unix::net::UnixListener`] and switches it to

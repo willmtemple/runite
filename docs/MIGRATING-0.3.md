@@ -18,6 +18,24 @@ runite = "0.3"
 
 This section covers changes the compiler will force you to make.
 
+### `net::unix::Incoming` lost its lifetime parameter
+
+`UnixListener::incoming()` used to borrow the listener, while the TCP
+equivalent returned an owned stream. The two are now the same shape, so drop
+the lifetime wherever the type is named:
+
+```rust
+// 0.2
+fn serve(incoming: runite::net::unix::Incoming<'_>) { /* ... */ }
+
+// 0.3
+fn serve(incoming: runite::net::unix::Incoming) { /* ... */ }
+```
+
+This is mostly a fix rather than a cost: an owned `Incoming` can be built in
+one place and moved into a spawned task, which the borrowed form could not
+express, and code generic over both listener kinds can now be written once.
+
 ### `Stdio` and `Command` are no longer `Clone`
 
 `process::Stdio` loses `Clone`, `Copy`, `PartialEq` and `Eq`; `process::Command`

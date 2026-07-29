@@ -928,7 +928,7 @@ impl runite::io::AsyncRead for runite::net::unix::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
-impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::net::unix::Incoming
 impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
@@ -975,7 +975,7 @@ impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
-impl core::fmt::Debug for runite::net::unix::Incoming<'_>
+impl core::fmt::Debug for runite::net::unix::Incoming
 impl core::fmt::Debug for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::UnixStream
 impl core::fmt::Display for runite::net::unix::ReuniteError
@@ -1002,9 +1002,9 @@ pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
-pub fn runite::net::unix::Incoming<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::Incoming<'_>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub fn runite::net::unix::Incoming<'_>::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::reunite(self, runite::net::unix::OwnedWriteHalf) -> core::result::Result<runite::net::unix::UnixStream, runite::net::unix::ReuniteError>
@@ -1027,7 +1027,7 @@ pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::Ra
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
+pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
 pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
@@ -1048,14 +1048,14 @@ pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Se
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
 pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
-pub struct runite::net::unix::Incoming<'a>
+pub struct runite::net::unix::Incoming
 pub struct runite::net::unix::OwnedReadHalf
 pub struct runite::net::unix::OwnedWriteHalf
 pub struct runite::net::unix::ReuniteError(pub runite::net::unix::OwnedReadHalf, pub runite::net::unix::OwnedWriteHalf)
 pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
-pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::Incoming::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
 pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
 pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
@@ -1148,7 +1148,7 @@ impl runite::io::AsyncRead for runite::net::unix::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
-impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::net::unix::Incoming
 impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
@@ -1195,7 +1195,7 @@ impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
-impl core::fmt::Debug for runite::net::unix::Incoming<'_>
+impl core::fmt::Debug for runite::net::unix::Incoming
 impl core::fmt::Debug for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::UnixStream
 impl core::fmt::Display for runite::net::unix::ReuniteError
@@ -1222,9 +1222,9 @@ pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
-pub fn runite::net::unix::Incoming<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::Incoming<'_>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub fn runite::net::unix::Incoming<'_>::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::reunite(self, runite::net::unix::OwnedWriteHalf) -> core::result::Result<runite::net::unix::UnixStream, runite::net::unix::ReuniteError>
@@ -1247,7 +1247,7 @@ pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::Ra
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
+pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
 pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
@@ -1268,14 +1268,14 @@ pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Se
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
 pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
-pub struct runite::net::unix::Incoming<'a>
+pub struct runite::net::unix::Incoming
 pub struct runite::net::unix::OwnedReadHalf
 pub struct runite::net::unix::OwnedWriteHalf
 pub struct runite::net::unix::ReuniteError(pub runite::net::unix::OwnedReadHalf, pub runite::net::unix::OwnedWriteHalf)
 pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
-pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::Incoming::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
 pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
 pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
@@ -1368,7 +1368,7 @@ impl runite::io::AsyncRead for runite::net::unix::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::unix::UnixStream
 impl runite::io::AsyncWrite for runite::net::unix::OwnedWriteHalf
 impl runite::io::AsyncWrite for runite::net::unix::UnixStream
-impl runite::io::Stream for runite::net::unix::Incoming<'_>
+impl runite::io::Stream for runite::net::unix::Incoming
 impl runite::io::Stream for runite::signal::unix::Signals
 ```
 
@@ -1415,7 +1415,7 @@ impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixListener
 impl core::convert::TryFrom<std::os::fd::owned::OwnedFd> for runite::net::unix::UnixStream
 impl core::error::Error for runite::net::unix::ReuniteError
-impl core::fmt::Debug for runite::net::unix::Incoming<'_>
+impl core::fmt::Debug for runite::net::unix::Incoming
 impl core::fmt::Debug for runite::net::unix::ReuniteError
 impl core::fmt::Debug for runite::net::unix::UnixStream
 impl core::fmt::Display for runite::net::unix::ReuniteError
@@ -1442,9 +1442,9 @@ pub async fn runite::net::unix::UnixStream::read(&mut self, &mut [u8]) -> core::
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixStream::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixStream::write_all(&mut self, &[u8]) -> core::io::error::Result<()>
-pub fn runite::net::unix::Incoming<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn runite::net::unix::Incoming<'_>::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
-pub fn runite::net::unix::Incoming<'_>::size_hint(&self) -> (usize, core::option::Option<usize>)
+pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::net::unix::Incoming::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
+pub fn runite::net::unix::Incoming::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn runite::net::unix::OwnedReadHalf::poll_read(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::poll_read_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &mut [core::io::io_slice::IoSliceMut<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn runite::net::unix::OwnedReadHalf::reunite(self, runite::net::unix::OwnedWriteHalf) -> core::result::Result<runite::net::unix::UnixStream, runite::net::unix::ReuniteError>
@@ -1467,7 +1467,7 @@ pub fn runite::net::unix::UnixListener::as_raw_fd(&self) -> std::os::fd::raw::Ra
 pub fn runite::net::unix::UnixListener::bind(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_owned(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixListener::from_std(std::os::unix::net::listener::UnixListener) -> core::io::error::Result<Self>
-pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming<'_>
+pub fn runite::net::unix::UnixListener::incoming(&self) -> runite::net::unix::Incoming
 pub fn runite::net::unix::UnixListener::local_addr(&self) -> core::io::error::Result<std::os::unix::net::addr::SocketAddr>
 pub fn runite::net::unix::UnixListener::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub fn runite::net::unix::UnixStream::as_fd(&self) -> std::os::fd::owned::BorrowedFd<'_>
@@ -1488,14 +1488,14 @@ pub fn runite::net::unix::UnixStream::poll_write_vectored(core::pin::Pin<&mut Se
 pub fn runite::net::unix::UnixStream::reunite(runite::net::unix::OwnedReadHalf, runite::net::unix::OwnedWriteHalf) -> core::result::Result<Self, runite::net::unix::ReuniteError>
 pub fn runite::net::unix::UnixStream::try_from(std::os::fd::owned::OwnedFd) -> core::io::error::Result<Self>
 pub mod runite::net::unix
-pub struct runite::net::unix::Incoming<'a>
+pub struct runite::net::unix::Incoming
 pub struct runite::net::unix::OwnedReadHalf
 pub struct runite::net::unix::OwnedWriteHalf
 pub struct runite::net::unix::ReuniteError(pub runite::net::unix::OwnedReadHalf, pub runite::net::unix::OwnedWriteHalf)
 pub struct runite::net::unix::UnixDatagram
 pub struct runite::net::unix::UnixListener
 pub struct runite::net::unix::UnixStream
-pub type runite::net::unix::Incoming<'_>::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
+pub type runite::net::unix::Incoming::Item = core::result::Result<runite::net::unix::UnixStream, core::io::error::Error>
 pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
 pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error

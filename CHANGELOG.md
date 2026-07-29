@@ -58,6 +58,16 @@ changes.
 
 ### Breaking
 
+- `net::unix::Incoming` no longer borrows its listener. It was `Incoming<'a>`
+  holding `&'a UnixListener` while the TCP `net::Incoming` held an owned
+  listener, so the same method name produced a movable stream for TCP and a
+  borrowed one for Unix — `spawn(async move { listener.incoming()... })`
+  compiled for one and not the other, and generic code over both could not be
+  written once. `UnixListener` now reference-counts its descriptor internally,
+  exactly as `TcpListener` already did, and `incoming()` returns an owned
+  `Incoming`. Code that named the lifetime (`Incoming<'_>`, `Incoming<'a>`)
+  drops it. ([#35](https://github.com/willmtemple/runite/issues/35))
+
 - `Stdio` is no longer `Clone`, `Copy`, `PartialEq`, or `Eq`, and `Command` is
   no longer `Clone`. A `Stdio` can now own a descriptor, and neither copying one
   implicitly nor comparing one for equality is meaningful; `std::process::Stdio`
