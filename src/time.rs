@@ -48,6 +48,7 @@ use crate::platform::current::runtime as imp;
 /// Future returned by [`sleep`] that completes after a runtime timer fires.
 ///
 /// Dropping the future before it completes cancels the timer registration.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct Sleep {
     delay: Option<Duration>,
     state: Option<Rc<SleepState>>,

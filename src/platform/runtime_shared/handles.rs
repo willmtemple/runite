@@ -280,6 +280,7 @@ impl AbortHandle {
 /// messages). To yield to macrotasks, you must allow the flow of execution
 /// to return to the runtime event loop and flush the full microtask queue,
 /// for example by awaiting a timer.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct YieldNow {
     pub(crate) yielded: bool,
 }

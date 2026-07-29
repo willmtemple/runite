@@ -103,6 +103,7 @@ pub struct Receiver<T: Send + 'static> {
 /// a [`Sender::send`] (or any mutation) on the *same thread* will deadlock,
 /// because the send needs the write lock; keep borrows short and never hold one
 /// across `.await`.
+#[must_use = "the borrow holds a read lock on the value until dropped"]
 pub struct Ref<'a, T: Send + 'static> {
     guard: RwLockReadGuard<'a, T>,
 }

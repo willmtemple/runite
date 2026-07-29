@@ -63,6 +63,7 @@ pub struct Mutex<T: ?Sized> {
 ///
 /// The guard dereferences to the protected value and releases the mutex when it
 /// is dropped.
+#[must_use = "the guard releases the lock when dropped, so dropping it immediately releases at once"]
 pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
     _not_send_sync: PhantomData<Rc<()>>,

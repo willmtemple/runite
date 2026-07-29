@@ -74,6 +74,7 @@ pub struct Semaphore {
 ///
 /// Dropping a permit releases it back to the semaphore or hands it directly to
 /// the next queued waiter.
+#[must_use = "the permit is released when dropped, so dropping it immediately releases it at once"]
 pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     _not_send_sync: PhantomData<Rc<()>>,

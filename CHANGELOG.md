@@ -111,6 +111,19 @@ changes.
   the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
   ([#26](https://github.com/willmtemple/runite/issues/26))
 
+- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
+  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
+  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
+  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
+  compiled without a warning.
+
+  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
+  Dropping a join handle detaches the task, which is a documented and intended
+  operation rather than a mistake — unlike an unawaited future, which does
+  nothing at all. Marking them flagged 141 call sites across this repository's
+  own tests and examples, essentially all of them correct.
+  ([#30](https://github.com/willmtemple/runite/issues/30))
+
 ### Documented
 
 - `ChildStdin`'s close can deadlock against a child waiting for end of input,

@@ -77,6 +77,7 @@ pub struct RwLock<T: ?Sized> {
 ///
 /// The guard dereferences to the protected value and releases its reader slot
 /// when it is dropped.
+#[must_use = "the guard releases the lock when dropped, so dropping it immediately releases at once"]
 pub struct RwLockReadGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -86,6 +87,7 @@ pub struct RwLockReadGuard<'a, T: ?Sized> {
 ///
 /// The guard dereferences mutably to the protected value and releases exclusive
 /// access when it is dropped.
+#[must_use = "the guard releases the lock when dropped, so dropping it immediately releases at once"]
 pub struct RwLockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -96,6 +98,7 @@ pub struct RwLockWriteGuard<'a, T: ?Sized> {
 /// Resolves to an [`RwLockReadGuard`]. Dropping it while queued cancels the
 /// request; dropping it after selection but before completion releases that
 /// reader slot.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct RwLockReadFuture<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     waiter: Option<(usize, Rc<Cell<bool>>)>,
@@ -107,6 +110,7 @@ pub struct RwLockReadFuture<'a, T: ?Sized> {
 /// Resolves to an [`RwLockWriteGuard`]. Dropping it while queued cancels the
 /// request; dropping it after selection but before completion releases
 /// exclusive access to the next waiter.
+#[must_use = "futures do nothing unless awaited or polled"]
 pub struct RwLockWriteFuture<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
     waiter: Option<(usize, Rc<Cell<bool>>)>,
