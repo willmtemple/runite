@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1179 | 1199 | 1222 | 1242 | 201 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1179 | 1199 | 1222 | 1242 | 201 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1152 | 1172 | 1195 | 1215 | 174 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1050 | 1064 | 1093 | 1107 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1189 | 1209 | 1232 | 1252 | 204 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1189 | 1209 | 1232 | 1252 | 204 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1162 | 1182 | 1205 | 1225 | 177 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1057 | 1071 | 1100 | 1114 | 72 |
 
-Portable default items: **978**
+Portable default items: **985**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **978**
 
 ## Portable default surface
 
-Items: **978**
+Items: **985**
 
 ### `runite`
 
@@ -316,6 +316,7 @@ impl runite::fs::Metadata
 impl runite::fs::OpenOptions
 impl runite::fs::ReadDir
 pub async fn runite::fs::DirEntry::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
+pub async fn runite::fs::File::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::fs::File::create(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::fs::File::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
 pub async fn runite::fs::File::open(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
@@ -382,6 +383,7 @@ pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, 
 ### `runite::io`
 
 ```rust
+#[non_exhaustive] pub enum runite::io::CloseOutcome
 impl runite::io::AsyncRead for runite::fs::File
 impl runite::io::AsyncRead for runite::net::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::TcpStream
@@ -602,6 +604,8 @@ pub fn runite::io::WriteVectored<'a, 'buf, W>::fmt(&self, &mut core::fmt::Format
 pub fn runite::io::copy<'a, R, W>(&'a mut R, &'a mut W) -> runite::io::Copy<'a, R, W> where R: runite::io::AsyncRead + ?core::marker::Sized, W: runite::io::AsyncWrite + ?core::marker::Sized
 pub fn runite::io::copy_bidirectional<'a, A, B>(&'a mut A, &'a mut B) -> runite::io::CopyBidirectional<'a, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
 pub mod runite::io
+pub runite::io::CloseOutcome::Closed
+pub runite::io::CloseOutcome::StillShared
 pub struct runite::io::BufReader<R>
 pub struct runite::io::BufWriter<W>
 pub struct runite::io::Close<'a, W: ?core::marker::Sized>
@@ -714,12 +718,15 @@ impl runite::net::UdpSocket
 pub async fn runite::net::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
 pub async fn runite::net::TcpListener::accept(&self) -> core::io::error::Result<(runite::net::TcpStream, core::net::socket_addr::SocketAddr)>
 pub async fn runite::net::TcpListener::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub async fn runite::net::TcpListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::TcpSocket::connect(self, core::net::socket_addr::SocketAddr) -> core::io::error::Result<runite::net::TcpStream>
+pub async fn runite::net::TcpStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::TcpStream::connect<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::TcpStream::connect_timeout(&core::net::socket_addr::SocketAddr, core::time::Duration) -> core::io::error::Result<Self>
 pub async fn runite::net::TcpStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::TcpStream::try_clone(&self) -> core::io::error::Result<Self>
 pub async fn runite::net::UdpSocket::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
+pub async fn runite::net::UdpSocket::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::UdpSocket::connect<A>(&self, A) -> core::io::error::Result<()> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::UdpSocket::peek(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::UdpSocket::peek_from(&self, &mut [u8]) -> core::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
@@ -1096,7 +1103,7 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **201**
+Items: **204**
 
 ### `runite::fd`
 
@@ -1226,12 +1233,15 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
+pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
+pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
+pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1351,7 +1361,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **201**
+Items: **204**
 
 ### `runite::fd`
 
@@ -1481,12 +1491,15 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
+pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
+pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
+pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1606,7 +1619,7 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **174**
+Items: **177**
 
 ### `runite::fd`
 
@@ -1704,12 +1717,15 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
+pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
+pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
+pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result

@@ -167,8 +167,8 @@ fn split_and_reunite_preserve_pending_directional_state() {
             })
             .await;
             let (read, write) = client.into_split();
-            let mut client = TcpStream::reunite(read, write).expect("reunite shutdown");
-            client.close().await.expect("finish shutdown");
+            let client = TcpStream::reunite(read, write).expect("reunite shutdown");
+            client.close_descriptor().await.expect("finish shutdown");
             drop(peer);
             *preserved_for_task.lock().unwrap() = true;
         });

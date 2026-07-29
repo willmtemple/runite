@@ -142,6 +142,33 @@ changes.
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
 
+- `close_descriptor` on `File`, `TcpStream`, `TcpListener`, `UdpSocket`,
+  `UnixStream`, `UnixListener` and `UnixDatagram`, returning
+  `io::Result<io::CloseOutcome>` where the outcome is `Closed` or `StillShared`.
+
+  The point is ordering, not error reporting. On Linux the close goes through
+  the ring as `IORING_OP_CLOSE`, sequenced behind operations already submitted
+  against the same descriptor; a `close(2)` from `Drop` is not, and while the
+  kernel keeps the underlying file alive until those finish, it frees the
+  descriptor *number* immediately, so a racing `open` elsewhere can be handed
+  it. macOS and Windows have no asynchronous close and gain only the outcome.
+
+  `StillShared` is not an error: a split half, a listener's `Incoming`, or an
+  in-flight operation on Windows can hold the descriptor, and nothing leaks
+  because the last holder still closes it. Following glommio, which solved the
+  same problem, the shared case sits on the `Ok` side.
+
+  Named `close_descriptor` rather than `close` because `AsyncWriteExt::close`
+  already exists and means something else — flush and close the *writer* — and
+  an inherent `close` would shadow it, giving two identical-looking calls with
+  different effects. That is the collision issue #35 spent this milestone
+  removing.
+
+  Do not use it to catch close errors: Rust's libs team declined `File::close`
+  for the standard library because `close(2)` error reporting is too unreliable
+  to build portable APIs on, and that reasoning applies here too.
+  ([#7](https://github.com/willmtemple/runite/issues/7))
+
 - `fs::watch`, filesystem change notification, **Linux only for now** — the
   macOS and Windows backends are in progress, and the module is absent on those
   targets rather than present and failing. The inotify descriptor is driven by

@@ -14,9 +14,9 @@ use crate::platform::linux::runtime::{
     cancel_operation_on_owner, current_thread_handle, with_current_driver,
 };
 use crate::platform::linux::uring::{
-    IORING_FSYNC_DATASYNC, IORING_OP_FSYNC, IORING_OP_FTRUNCATE, IORING_OP_MKDIRAT,
-    IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX, IORING_OP_UNLINKAT,
-    IORING_OP_WRITE, IoUringCqe, is_unsupported_operation,
+    IORING_FSYNC_DATASYNC, IORING_OP_CLOSE, IORING_OP_FSYNC, IORING_OP_FTRUNCATE,
+    IORING_OP_MKDIRAT, IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_RENAMEAT, IORING_OP_STATX,
+    IORING_OP_UNLINKAT, IORING_OP_WRITE, IoUringCqe, is_unsupported_operation,
 };
 
 const STATX_BASIC_MASK: u32 =
@@ -349,6 +349,52 @@ pub(crate) fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
     };
 
     ReadDirStream::new(path)
+}
+
+/// Closes `fd` through the ring, so the close is ordered behind operations
+/// already submitted against it.
+///
+/// That ordering is the entire reason this exists. A `close(2)` from `Drop` is
+/// unordered with respect to in-flight SQEs on the same descriptor: the kernel
+/// keeps the underlying file alive until those complete, but the *descriptor
+/// number* is free for reuse immediately, so a racing `open` elsewhere can be
+/// handed it while this file's operations still name it.
+///
+/// Takes the descriptor by value and forgets it once the ring has accepted the
+/// close, because the ring owns it from that point — letting `OwnedFd::drop`
+/// also run would close a descriptor number the kernel may already have
+/// reissued to someone else.
+pub(crate) async fn close(fd: OwnedFd) -> io::Result<()> {
+    let raw = fd.as_raw_fd();
+    let result = submit_uring::<(), _>(
+        move |sqe| {
+            sqe.opcode = IORING_OP_CLOSE;
+            sqe.fd = raw;
+        },
+        |cqe| cqe_to_result(cqe).map(|_| ()),
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            // The ring closed it; do not close it again.
+            std::mem::forget(fd);
+            Ok(())
+        }
+        Err(error) if is_unsupported_operation(&error) => {
+            // Pre-5.6 kernel, or a probe that rejects the opcode. Fall back to
+            // the synchronous close that `OwnedFd::drop` performs. The ordering
+            // guarantee is lost; correctness is not.
+            drop(fd);
+            Ok(())
+        }
+        Err(error) => {
+            // The ring never took ownership, so dropping closes it, and the
+            // error is still worth reporting.
+            drop(fd);
+            Err(error)
+        }
+    }
 }
 
 async fn submit_sync(fd: RawFd, flags: u32) -> io::Result<()> {

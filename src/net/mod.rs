@@ -409,6 +409,34 @@ impl TcpSocket {
 }
 
 impl TcpStream {
+    /// Closes the descriptor, ordering the close behind operations already
+    /// submitted against it.
+    ///
+    /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
+    /// dropping the handle, and why it is not a way to catch close errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the close itself was submitted and failed.
+    /// [`CloseOutcome::StillShared`](crate::io::CloseOutcome::StillShared) is
+    /// **not** an error.
+    pub async fn close_descriptor(self) -> io::Result<crate::io::CloseOutcome> {
+        let Self {
+            read_state,
+            write_state,
+            inner,
+        } = self;
+        drop(read_state);
+        drop(write_state);
+        match Arc::try_unwrap(inner) {
+            Err(_) => Ok(crate::io::CloseOutcome::StillShared),
+            Ok(inner) => {
+                crate::sys::current::net::close(inner.fd).await?;
+                Ok(crate::io::CloseOutcome::Closed)
+            }
+        }
+    }
+
     /// Connects to the first resolved address that succeeds.
     ///
     /// The address is resolved with [`ToSocketAddrs`]. If resolution returns
@@ -923,6 +951,28 @@ impl std::fmt::Display for ReuniteError {
 impl std::error::Error for ReuniteError {}
 
 impl TcpListener {
+    /// Closes the descriptor, ordering the close behind operations already
+    /// submitted against it.
+    ///
+    /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
+    /// dropping the handle, and why it is not a way to catch close errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the close itself was submitted and failed.
+    /// [`CloseOutcome::StillShared`](crate::io::CloseOutcome::StillShared) is
+    /// **not** an error.
+    pub async fn close_descriptor(self) -> io::Result<crate::io::CloseOutcome> {
+        let Self { inner } = self;
+        match Arc::try_unwrap(inner) {
+            Err(_) => Ok(crate::io::CloseOutcome::StillShared),
+            Ok(inner) => {
+                crate::sys::current::net::close(inner.fd).await?;
+                Ok(crate::io::CloseOutcome::Closed)
+            }
+        }
+    }
+
     /// Binds a TCP listener to the first resolved address that succeeds.
     ///
     /// Binding to port `0` asks the OS to assign an available port, which can be
@@ -1086,6 +1136,28 @@ impl Stream for Incoming {
 }
 
 impl UdpSocket {
+    /// Closes the descriptor, ordering the close behind operations already
+    /// submitted against it.
+    ///
+    /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
+    /// dropping the handle, and why it is not a way to catch close errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the close itself was submitted and failed.
+    /// [`CloseOutcome::StillShared`](crate::io::CloseOutcome::StillShared) is
+    /// **not** an error.
+    pub async fn close_descriptor(self) -> io::Result<crate::io::CloseOutcome> {
+        let Self { inner } = self;
+        match Arc::try_unwrap(inner) {
+            Err(_) => Ok(crate::io::CloseOutcome::StillShared),
+            Ok(inner) => {
+                crate::sys::current::net::close(inner.fd).await?;
+                Ok(crate::io::CloseOutcome::Closed)
+            }
+        }
+    }
+
     /// Binds a UDP socket to the first resolved address that succeeds.
     ///
     /// Binding to port `0` asks the OS to choose an available local port.

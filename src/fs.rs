@@ -592,6 +592,52 @@ impl<T> ReadDirObserver<T> {
 }
 
 impl File {
+    /// Closes the descriptor, ordering the close behind operations already
+    /// submitted against it.
+    ///
+    /// Dropping a handle closes its descriptor too, and for most code that is
+    /// the right thing. This exists for the case dropping cannot serve: on
+    /// Linux the close goes through the ring, so it is sequenced behind
+    /// in-flight operations on the same descriptor. A plain `close(2)` from
+    /// `Drop` is not — the kernel keeps the underlying file alive until those
+    /// operations finish, but frees the descriptor *number* immediately, so a
+    /// racing `open` elsewhere can be handed it while this handle's operations
+    /// still name it. macOS and Windows have no asynchronous close and gain
+    /// only the outcome reporting.
+    ///
+    /// Named `close_descriptor` rather than `close` because
+    /// [`crate::io::AsyncWriteExt::close`] already exists
+    /// and means something else — it flushes and closes the *writer*, leaving
+    /// the descriptor alive. An inherent `close` would shadow it, so the two
+    /// would look identical at the call site and do different things.
+    ///
+    /// Do not reach for this to catch close errors. Rust's libs team declined
+    /// to add `File::close` to the standard library on the grounds that
+    /// `close(2)` error reporting is too unreliable to build portable APIs on,
+    /// and that reasoning applies here: use `sync_all` if durability matters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the close itself was submitted and failed.
+    /// [`CloseOutcome::StillShared`](crate::io::CloseOutcome::StillShared) is
+    /// **not** an error — see that type.
+    pub async fn close_descriptor(self) -> io::Result<crate::io::CloseOutcome> {
+        let Self {
+            state,
+            direct_write,
+            inner,
+        } = self;
+        drop(state);
+        drop(direct_write);
+        match std::sync::Arc::try_unwrap(inner) {
+            Err(_) => Ok(crate::io::CloseOutcome::StillShared),
+            Ok(inner) => {
+                sys_fs::close(inner.fd).await?;
+                Ok(crate::io::CloseOutcome::Closed)
+            }
+        }
+    }
+
     /// Opens an existing file for reading.
     ///
     /// This is a convenience wrapper for `OpenOptions::new().read(true)`.

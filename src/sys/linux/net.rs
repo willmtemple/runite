@@ -53,6 +53,14 @@ impl OwnedAcceptedSocket {
 /// Peek flag for `recv`-family operations, re-exported for the public layer.
 pub const MSG_PEEK: i32 = libc::MSG_PEEK;
 
+/// Closes an owned socket through the ring; see `fs::close`.
+///
+/// On Unix a socket and a file are the same kind of descriptor, so this
+/// delegates. Windows separates them, which is why the seam exists at all.
+pub(crate) async fn close(sock: crate::sys::handle::OwnedSock) -> io::Result<()> {
+    super::fs::close(sock).await
+}
+
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
