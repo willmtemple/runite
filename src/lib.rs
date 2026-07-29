@@ -19,6 +19,39 @@
 //! and [`queue_macrotask`] work run as macrotasks after the microtask queue has
 //! drained.
 //!
+//! # The scheduling guarantee
+//!
+//! One property of that ordering is worth stating as a contract, because
+//! layers built on this runtime batch on it:
+//!
+//! > **A microtask queued during a turn runs before the next macrotask.**
+//!
+//! A turn drains driver events, remote tasks and completed workers, then runs
+//! every microtask to quiescence, then runs at most one macrotask. Because the
+//! macrotask is the *last* phase, a microtask queued from inside one drains in
+//! the following turn's checkpoint — a different turn, and still before that
+//! turn's macrotask. The guarantee is about ordering, not about staying within
+//! a single turn, which matters if you are also reading [`current_turn`].
+//!
+//! This is what makes coalescing possible. A reactive layer that schedules one
+//! flush microtask when a value changes can rely on that flush happening before
+//! anything else macro-scheduled observes the graph, so consecutive writes
+//! collapse into one effect run and no one sees a half-propagated state.
+//!
+//! [`yield_now`] participates in the same rule: it is a microtask, so a task
+//! that yields resumes before a pending macrotask rather than behind it. A loop
+//! that processes a large input in chunks and yields between them therefore
+//! gives the loop a turn without surrendering its place to unrelated work.
+//!
+//! The runtime does **not** impose a scheduling budget. Nothing preempts a
+//! microtask, and nothing defers one past a macrotask to be fair. A microtask
+//! chain that never yields will starve macrotasks by design — the same way
+//! recursive `Promise.resolve().then` starves a browser — and a warning is
+//! emitted when a checkpoint crosses a large number of microtasks while a
+//! macrotask is waiting. That warning counts queue *length*, not time: a single
+//! long-running microtask is invisible to it, and to everything else. Cooperative
+//! yielding is the only mechanism.
+//!
 //! # Getting started
 //!
 //! The usual entry point is the [`#[runite::main]`](macro@main) attribute, which

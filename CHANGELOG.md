@@ -158,6 +158,13 @@ changes.
 
 ### Documented
 
+- The scheduling guarantee that layers built on runite batch on — *a microtask
+  queued during a turn runs before the next macrotask* — is now stated as a
+  contract in the crate documentation, along with the fact that runite imposes
+  no scheduling budget and that cooperative yielding is the only mechanism.
+  Tests pin the guarantee (`tests/event_loop_order.rs`), so it cannot be
+  removed silently. ([#14](https://github.com/willmtemple/runite/issues/14))
+
 - `spawn_blocking`'s refusals now say which are retryable. The two failures
   already carried distinct `io::ErrorKind`s — `WouldBlock` for a full queue,
   `BrokenPipe` for a stopped pool — but nothing said so, so callers discarded
