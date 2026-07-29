@@ -112,10 +112,11 @@ fn stdio_from_fd_puts_the_child_on_a_terminal() {
 
     assert!(status.success(), "`test -t 1` should succeed on a pty");
 
-    // Drop the last user-side descriptor so the controller reports end of
-    // input once the buffered output is drained.
-    drop(user);
+    // Drain before dropping the last user-side descriptor: `read_until` stops
+    // at the needle rather than at end of input, and BSD ptys discard the
+    // pending output queue when the last user-side descriptor closes.
     let output = read_until(controller.as_raw_fd(), "IS_A_TTY");
+    drop(user);
     assert!(
         output.contains("IS_A_TTY"),
         "child stdout should reach the controller, saw {output:?}"
@@ -165,8 +166,10 @@ fn pre_exec_gives_the_child_a_controlling_terminal() {
         "writing to /dev/tty should succeed once the child owns the terminal"
     );
 
-    drop(user);
+    // Drained before the last user-side descriptor closes; see the note in
+    // `stdio_from_fd_puts_the_child_on_a_terminal`.
     let output = read_until(controller.as_raw_fd(), "HAS_CTTY");
+    drop(user);
     assert!(
         output.contains("HAS_CTTY"),
         "the child's /dev/tty write should reach the controller, saw {output:?}"
@@ -226,8 +229,10 @@ fn descriptor_stdio_survives_repeated_spawns() {
         "the caller's descriptor should be untouched by spawning"
     );
 
-    drop(user);
+    // Drained before the last user-side descriptor closes; see the note in
+    // `stdio_from_fd_puts_the_child_on_a_terminal`.
     let output = read_until(controller.as_raw_fd(), "ROUND");
+    drop(user);
     assert!(
         output.contains("ROUND"),
         "each spawn should reach the controller, saw {output:?}"
