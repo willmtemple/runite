@@ -8,9 +8,9 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1132 | 1152 | 1175 | 1195 | 168 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1132 | 1152 | 1175 | 1195 | 168 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1132 | 1152 | 1175 | 1195 | 168 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1133 | 1153 | 1176 | 1196 | 169 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1133 | 1153 | 1176 | 1196 | 169 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1133 | 1153 | 1176 | 1196 | 169 |
 | Windows x86_64 (`x86_64-pc-windows-msvc`) | 1036 | 1050 | 1079 | 1093 | 72 |
 
 Portable default items: **964**
@@ -1082,11 +1082,12 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **168**
+Items: **169**
 
 ### `runite::fd`
 
 ```rust
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub mod runite::fd
@@ -1299,11 +1300,12 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **168**
+Items: **169**
 
 ### `runite::fd`
 
 ```rust
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub mod runite::fd
@@ -1516,11 +1518,12 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **168**
+Items: **169**
 
 ### `runite::fd`
 
 ```rust
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub mod runite::fd

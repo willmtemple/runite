@@ -123,6 +123,22 @@ changes.
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
 
+- `fd::read_chunks`, which encapsulates the readiness loop that `wait_readable`
+  otherwise asks every caller to write. The loop carries three pieces of
+  load-bearing knowledge the raw API does not express, each a bug when missed
+  rather than an inefficiency: chunks must be delivered *before* the loop
+  parks, or a burst ending mid-frame stays invisible until the next write;
+  `Interrupted` must retry rather than wait for readiness already reported; and
+  the caller needs a way to stop, or a descriptor producing faster than it
+  consumes starves everything else sharing the loop.
+
+  `on_chunk` runs for each read as it completes, so delivery-before-parking is
+  structural rather than advisory, and returning `ControlFlow::Break` ends the
+  drain. One-shot readiness is deliberately kept rather than replaced by an
+  `AsyncRead` for descriptors: a consumer sharing its thread with a frame clock
+  needs the yield point that reading to completion inside a single stream call
+  would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
+
 - `metrics::snapshot()`, returning a `Snapshot` of `Gauges` and `Counters`.
   Gauges are levels read at an instant — live tasks, microtask and macrotask
   queue depths, remote queue depth, armed timers, outstanding driver
