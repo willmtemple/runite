@@ -144,6 +144,18 @@ changes.
   own tests and examples, essentially all of them correct.
   ([#30](https://github.com/willmtemple/runite/issues/30))
 
+### Fixed
+
+- `release-verify` no longer passes `--allow-dirty` to `cargo package`
+  unconditionally. That flag writes `"dirty": true` into
+  `.cargo_vcs_info.json`, which changes the bytes of the produced `.crate` and
+  therefore its checksum — while the release workflow's whole idempotency
+  argument rests on that checksum being reproducible, and a mismatch there
+  wedges a version permanently. Verifying from a dirty tree was therefore
+  verifying an artifact the real release could never produce. The flag is now
+  opt-in via `release-verify --allow-dirty`; without it, a dirty packaged file
+  fails loudly instead. ([#29](https://github.com/willmtemple/runite/issues/29))
+
 ### Documented
 
 - `spawn_blocking`'s refusals now say which are retryable. The two failures

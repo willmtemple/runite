@@ -10,7 +10,16 @@ const RELEASE_DIR: &str = "target/xtask-release";
 const MSRV: &str = "1.88.0";
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
-    let flags = parse_flags(args, &["--msrv", "--publish-dry-run"])?;
+    let flags = parse_flags(args, &["--msrv", "--publish-dry-run", "--allow-dirty"])?;
+    // Off by default, and that default is load-bearing. `--allow-dirty` makes
+    // `cargo package` write `"dirty": true` into `.cargo_vcs_info.json`, which
+    // changes the bytes of the produced `.crate` and therefore its checksum.
+    // The release workflow compares crates.io's recorded checksum against a
+    // local repackage, so verifying from a dirty tree would "verify" an
+    // artifact the real release can never reproduce — and a mismatch there
+    // wedges that version permanently. Pass it only when deliberately checking
+    // an uncommitted tree, and do not trust the result for release purposes.
+    let allow_dirty = flags.contains("--allow-dirty");
     let root = workspace_root();
     let runite_version = package_version(&root.join("Cargo.toml"))?;
     let macro_version = package_version(&root.join("proc_macros/Cargo.toml"))?;
@@ -29,8 +38,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     fs::create_dir_all(&release_dir)
         .map_err(|error| format!("failed to create {}: {error}", release_dir.display()))?;
 
-    let main_list = package_list(&root, "runite")?;
-    let macro_list = package_list(&root, "runite-proc-macros")?;
+    let main_list = package_list(&root, "runite", allow_dirty)?;
+    let macro_list = package_list(&root, "runite-proc-macros", allow_dirty)?;
     verify_package_entries(
         "runite package list",
         &main_list,
@@ -59,7 +68,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     )?;
 
     let package_target = release_dir.join("package");
-    package_workspace(&root, &package_target)?;
+    package_workspace(&root, &package_target, allow_dirty)?;
 
     let artifacts = package_target.join("package");
     let main_artifact = artifacts.join(format!("runite-{runite_version}.crate"));
@@ -133,16 +142,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
     if flags.contains("--publish-dry-run") {
         let mut command = Command::new("cargo");
+        command.current_dir(&root).args(["publish", "--dry-run"]);
+        if allow_dirty {
+            command.arg("--allow-dirty");
+        }
         command
-            .current_dir(&root)
-            .args([
-                "publish",
-                "--dry-run",
-                "--allow-dirty",
-                "--package",
-                "runite-proc-macros",
-                "--target-dir",
-            ])
+            .args(["--package", "runite-proc-macros", "--target-dir"])
             .arg(release_dir.join("publish-dry-run"));
         run_status(&mut command, "runite-proc-macros publish dry-run")?;
     }
@@ -202,11 +207,13 @@ fn parse_package_version(manifest: &str) -> Option<String> {
     None
 }
 
-fn package_list(root: &Path, package: &str) -> Result<BTreeSet<String>, String> {
+fn package_list(root: &Path, package: &str, allow_dirty: bool) -> Result<BTreeSet<String>, String> {
     let mut command = Command::new("cargo");
-    command
-        .current_dir(root)
-        .args(["package", "--list", "--allow-dirty", "--package", package]);
+    command.current_dir(root).args(["package", "--list"]);
+    if allow_dirty {
+        command.arg("--allow-dirty");
+    }
+    command.args(["--package", package]);
     let output = run_output(&mut command, &format!("cargo package --list {package}"))?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("package list for {package} was not UTF-8: {error}"))?;
@@ -217,19 +224,14 @@ fn package_list(root: &Path, package: &str) -> Result<BTreeSet<String>, String> 
         .collect())
 }
 
-fn package_workspace(root: &Path, target: &Path) -> Result<(), String> {
+fn package_workspace(root: &Path, target: &Path, allow_dirty: bool) -> Result<(), String> {
     let mut command = Command::new("cargo");
+    command.current_dir(root).args(["package", "--no-verify"]);
+    if allow_dirty {
+        command.arg("--allow-dirty");
+    }
     command
-        .current_dir(root)
-        .args([
-            "package",
-            "--no-verify",
-            "--allow-dirty",
-            "--workspace",
-            "--exclude",
-            "xtask",
-            "--target-dir",
-        ])
+        .args(["--workspace", "--exclude", "xtask", "--target-dir"])
         .arg(target);
     run_status(&mut command, "package release workspace")
 }
