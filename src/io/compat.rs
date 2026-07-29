@@ -449,18 +449,6 @@ impl<T: futures_io::AsyncWrite + Unpin> AsyncWrite for FuturesCompat<T> {
         futures_io::AsyncWrite::poll_write_vectored(Pin::new(&mut self.inner), cx, bufs)
     }
 
-    fn poll_write_vectored_operation(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-        _generation: u64,
-    ) -> Poll<io::Result<usize>> {
-        if bufs.iter().all(|buf| buf.is_empty()) {
-            return Poll::Ready(Ok(0));
-        }
-        futures_io::AsyncWrite::poll_write_vectored(Pin::new(&mut self.inner), cx, bufs)
-    }
-
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         futures_io::AsyncWrite::poll_flush(Pin::new(&mut self.inner), cx)
     }

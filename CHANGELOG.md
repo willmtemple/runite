@@ -151,6 +151,11 @@ changes.
 
 ### Changed
 
+- Removed `FuturesCompat`'s `poll_write_vectored_operation` override, which was
+  identical to its `poll_write_vectored` and to what the trait default already
+  forwards to, plus two `#[allow(dead_code)]` attributes that had gone stale as
+  their targets became unconditionally used.
+  ([#32](https://github.com/willmtemple/runite/issues/32))
 - Removed the Linux driver's `pending_cancel_buffers` map, the `CancelGuard`
   type, and the guard parameter threaded down to four call sites that all
   passed `None`. It was a second, always-empty home for the staging buffers

@@ -424,7 +424,6 @@ impl ThreadHandle {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn begin_async_operation(&self) {
         self.shared.pending_ops.fetch_add(1, Ordering::AcqRel);
     }

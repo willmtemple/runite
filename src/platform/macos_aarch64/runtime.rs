@@ -48,7 +48,6 @@ pub(crate) fn try_current_thread_handle() -> Option<ThreadHandle> {
     shared::try_current_thread_handle()
 }
 
-#[allow(dead_code)]
 pub(crate) fn with_current_driver<T>(f: impl FnOnce(&Driver) -> T) -> T {
     shared::with_current_driver_any::<MacosRuntime, Driver, T>(f)
 }
