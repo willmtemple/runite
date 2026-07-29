@@ -386,12 +386,22 @@ terminal CQE. Instead, the runtime uses a conservative staging model:
   and copy the completed bytes into the caller's slice before returning.
 - Write operations copy the caller's slice into an internal owned buffer before submission so the
   kernel can keep reading from it after the user-visible future is dropped.
-- On normal completion, the operation callback drops the internal buffer after mapping the CQE.
-- On Drop before completion, the cancel callback submits `IORING_OP_ASYNC_CANCEL` and detaches a
-  guard into the Linux driver's `pending_cancel_buffers` map, keyed by the original operation token.
-  `pending_cancel_tokens` maps the cancel SQE token back to that original token. A cancel CQE alone
-  never releases kernel-visible storage; the driver drops the guard only after the original
-  operation's terminal CQE.
+- The internal buffer is **moved into the operation's completion callback**, and the Linux driver
+  holds that callback in its `completions` map keyed by the operation token. Buffer liveness is
+  therefore a consequence of callback retention: the allocation lives exactly as long as the entry.
+- On normal completion, the callback maps the CQE and is then dropped, which drops the buffer.
+- On Drop before completion, the cancel callback submits `IORING_OP_ASYNC_CANCEL` but does **not**
+  touch `completions`. The entry — and so the buffer — survives the cancel.
+- A cancel CQE alone never releases kernel-visible storage. `IORING_OP_ASYNC_CANCEL` can report
+  `-EALREADY`, meaning the target operation was already executing, could not be stopped, and may
+  still write into the buffer. The driver therefore releases the entry only on the *original*
+  operation's terminal CQE (`CompletionKind::Operation`), never on the cancel's own
+  (`CompletionKind::OperationCancel`). `pending_cancel_tokens` exists to map the cancel SQE's token
+  back to the original for bookkeeping, not for storage release.
+
+  The driver also carries a `pending_cancel_buffers` map intended as a second home for these
+  guards. Every call site passes `None`, so it is always empty and contributes nothing to the
+  invariant above; issue #32 tracks removing it.
 
 On top of the staging model, the concrete I/O types make **reads cancel-safe** by stashing the
 in-flight operation on the object rather than in the transient future: `TcpStream`, `UnixStream`,
