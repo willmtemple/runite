@@ -179,6 +179,16 @@ changes.
   typically reaches for `std::process::exit`, which skips every destructor in
   the process. ([#45](https://github.com/willmtemple/runite/issues/45))
 
+- `shutdown()`, tearing this thread's runtime down on the caller's own stack:
+  hooks run, spawned tasks are cancelled, the driver is destroyed. On Windows
+  it is the only way a hook on an application-owned thread runs at all —
+  teardown at thread exit happens under the loader lock, where executing
+  arbitrary user code or closing a completion port can deadlock process
+  shutdown, so runite deliberately does neither. Worth preferring on Unix as
+  well, where TLS destructor order would otherwise decide when hooks run
+  relative to the rest of the thread's state. A no-op with no runtime
+  installed, and the thread may initialize a fresh one afterwards.
+
 - `metrics::snapshot()`, returning a `Snapshot` of `Gauges`, `Counters` and
   `Peaks`.
   Gauges are levels read at an instant — live tasks, ready tasks, microtask and
