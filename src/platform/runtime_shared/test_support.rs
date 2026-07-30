@@ -1625,9 +1625,11 @@ pub fn zero_interval_fires_once_per_turn_without_spinning<R: Runtime>() {
 /// Answers `enabled` and nothing else, so a workload can be run with the turn
 /// record either wanted or declined.
 ///
-/// `register_callsite` is deliberately left at its default (`sometimes`): an
-/// `always`/`never` answer would be cached per callsite and outlive the scoped
-/// dispatcher, so the second workload would inherit the first one's interest.
+/// Only `enabled` is implemented, and `register_callsite` is deliberately not.
+/// Interest is cached per callsite and can outlive a scoped dispatcher, so a
+/// subscriber that answered definitively for a callsite could leave the second
+/// workload in this file inheriting the first one's answer. Consulting
+/// `enabled` per event is slower and is the point.
 struct TurnInterest {
     collect: bool,
 }

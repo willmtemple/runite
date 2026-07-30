@@ -188,8 +188,14 @@ cumulative counters the runtime already maintains, so nothing new happens per ta
 only the quantities no counter covers — timers dispatched, cross-thread tasks adopted, worker exits,
 wake notifications — are accumulated per turn, and only by the sites that did the work. Everything
 that costs something at turn boundaries (sampling queue depths, locking the cross-thread queue,
-timing the driver park) sits behind one `tracing::enabled!` check taken when the turn opens, so an
-uninstrumented loop pays that check plus the reset of the per-turn activity cells and nothing else.
+timing the driver park) sits behind one `tracing::enabled!` check taken when the turn opens.
+
+What an uninstrumented loop still pays per turn, stated exactly rather than as "nothing": that
+`enabled!` check, a relaxed increment of the turn counter, two thread-local accesses to set the
+current turn id, the reset of the per-turn activity cells, and one more thread-local take of the
+parked flag. The last is deliberately outside the gate — a park timed while a subscriber was
+installed must not be attributed to a much later turn if the subscriber goes away in between.
+All of it is thread-local reads and writes with no syscall, no allocation and no lock.
 
 That last property is the one worth defending, because the cross-thread queue depth is read under
 the very mutex `enqueue_macro` contends on. Under `cfg(test)` the gated sites count themselves, and
