@@ -203,9 +203,9 @@ matrix_command python3 .github/scripts/ci_test_selector.py \
 # no socket, touches no file, and starts no second runtime thread would run
 # identical code in both passes.
 constrained=(
-  channel close concurrency event_loop_order fd_interop fs fs_metadata
-  hyper_rt io_compat io_copy io_traits net net_extra unix_stream worker
-  write_identity
+  builder channel close concurrency event_loop_order fd_interop fs fs_metadata
+  hyper_rt io_compat io_copy io_traits net net_extra runtime_identity tls
+  trace_turn_record unix_stream worker write_identity
 )
 # Pure logic, pipes, ptys, signals, or compile-fail fixtures: nothing here
 # issues a maskable opcode, and several are the slowest and flakiest binaries

@@ -284,7 +284,8 @@ fn a_turn_that_never_parked_is_not_reported_as_a_wake() {
 #[test]
 fn a_blocking_pool_completion_is_not_reported_as_an_io_wake() {
     const JOBS: u32 = 32;
-    const CHURN: Duration = Duration::from_millis(150);
+    /// Generous upper bound on a pool that is working, not a target.
+    const CHURN: Duration = Duration::from_secs(30);
 
     let records = records_from(true, || {
         // Installs this thread's runtime, so `spawn_blocking` has an owner to
@@ -305,15 +306,27 @@ fn a_blocking_pool_completion_is_not_reported_as_an_io_wake() {
             })
             .collect::<Vec<_>>();
 
+        // Spin the host loop until every job has reported in. Deliberately not
+        // a fixed time budget: the blocking pool is bounded at 2..=32 workers,
+        // so the wall time to retire `JOBS` staggered sleeps depends on how
+        // many cores the machine has. A budget wide enough for a two-worker
+        // machine is mostly idle everywhere else, and one tuned on a developer
+        // box fails in CI — which is exactly what happened on macOS, where 19
+        // of 32 had finished when a 150ms budget expired.
         let deadline = std::time::Instant::now() + CHURN;
-        while std::time::Instant::now() < deadline {
+        while finished.load(std::sync::atomic::Ordering::Acquire) < JOBS {
+            runite::run_ready_tasks();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "blocking jobs did not retire within {CHURN:?}; the pool is stuck, \
+                 not merely slow"
+            );
+        }
+        // Keep taking turns after the last completion, so the window in which a
+        // counter could be misattributed is covered on both sides.
+        for _ in 0..64 {
             runite::run_ready_tasks();
         }
-        assert_eq!(
-            finished.load(std::sync::atomic::Ordering::Acquire),
-            JOBS,
-            "every blocking job should have finished inside the host loop"
-        );
         drop(jobs);
     });
 

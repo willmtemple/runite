@@ -493,6 +493,24 @@ fn verify_unpacked_packages(
         false,
     )?;
 
+    // Cross-target checks are `--lib`, not `--all-targets`, and that is a
+    // deliberate narrowing rather than an oversight.
+    //
+    // Anything beyond the library — tests, benches, even examples — puts
+    // dev-dependencies into the build graph, and the TLS tests depend on
+    // `ring`, whose build script compiles C. Cross-compiling that to
+    // `aarch64-apple-darwin` or `x86_64-pc-windows-msvc` from a Linux runner
+    // needs a C toolchain for those platforms, which is not something CI or a
+    // developer machine can reasonably be expected to have. It is not a matter
+    // of installing one package.
+    //
+    // What is being verified here is the promise the published crate makes: the
+    // *library* builds for every supported target, its docs build, and it
+    // builds on the MSRV. A consumer depending on runite from crates.io never
+    // builds our tests, so cross-compiling them proved nothing about what we
+    // ship. Examples, tests and benches are still built and run for the host
+    // above, and the per-platform CI jobs build `--all-targets` natively on
+    // macOS and Windows, which is where that coverage actually belongs.
     for release_target in SUPPORTED_TARGETS {
         cargo_manifest(
             root,
@@ -502,7 +520,7 @@ fn verify_unpacked_packages(
                 "check",
                 "--target",
                 release_target.triple,
-                "--all-targets",
+                "--lib",
                 "--locked",
             ],
             &format!("check unpacked runite default ({})", release_target.triple),
@@ -516,7 +534,7 @@ fn verify_unpacked_packages(
                 "check",
                 "--target",
                 release_target.triple,
-                "--all-targets",
+                "--lib",
                 "--all-features",
                 "--locked",
             ],
