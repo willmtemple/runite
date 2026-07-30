@@ -302,6 +302,10 @@ impl From<Arc<ServerConfig>> for TlsAcceptor {
 /// - Plaintext is handed to rustls only once the previously staged ciphertext
 ///   has been written. A write future abandoned mid-record therefore leaves no
 ///   truncated record behind, and the next writer resumes the same byte stream.
+/// - A write that accepted plaintext reports the count even if the transport
+///   then failed, because rustls has already encrypted those bytes and writing
+///   them again would duplicate them in the stream. The transport error is
+///   reported by the next write, flush, or close.
 pub struct TlsStream<S> {
     io: S,
     conn: Connection,
@@ -631,11 +635,13 @@ where
             )));
         }
 
-        // Best effort: get the record moving now. Ciphertext the transport will
-        // not take yet stays staged, and `poll_flush` is what waits for it.
-        if let Poll::Ready(Err(error)) = self.poll_send(cx) {
-            return Poll::Ready(Err(error));
-        }
+        // Best effort: get the record moving now. The count has to be reported
+        // whatever happens, because rustls has already taken those bytes and
+        // will not take them back — an error here would tell the caller nothing
+        // was written and invite a retry that puts the same plaintext on the
+        // wire twice. Ciphertext the transport will not take stays staged, and
+        // the failure resurfaces on the next write, flush, or close.
+        let _ = self.poll_send(cx);
         Poll::Ready(Ok(accepted))
     }
 }
@@ -644,6 +650,16 @@ impl<S> AsyncRead for TlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Decrypts into `buf`, driving the transport as far as it takes.
+    ///
+    /// An [`io::ErrorKind::InvalidData`] here ends the session: rustls has
+    /// rejected a record, queued a fatal alert, and will not process another
+    /// record on this connection. The stream does not latch that, because the
+    /// rustls state machine is the thing that knows it — polling for more
+    /// plaintext afterwards waits forever for input rustls can no longer take,
+    /// and writing still encrypts. Stop using the stream when this happens:
+    /// [`close`](crate::io::AsyncWriteExt::close) it to give the alert a last
+    /// chance at the peer, or drop it.
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

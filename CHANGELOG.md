@@ -185,7 +185,12 @@ changes.
   `ring` has build, licensing, and certification consequences that are not a
   runtime's to decide. An application that enables neither gets rustls's panic
   about being unable to determine the process-level `CryptoProvider` when it
-  builds a config; the `tls` module documentation says so and how to fix it.
+  builds a config. Fix it with a direct dependency that turns exactly one
+  provider on —
+  `rustls = { version = "0.23", default-features = false, features = ["ring"] }`
+  — where `default-features = false` is what keeps rustls's own default
+  `aws-lc-rs` from being unioned back in and leaving rustls with two providers
+  and no way to choose. The `tls` module documentation has the details.
   Trust anchors are left alone for the same reason: the module takes a finished
   `ClientConfig` or `ServerConfig`. Note that neither provider is the option
   that avoids a C toolchain — both compile C in a build script; `ring` needs a C
@@ -206,6 +211,12 @@ changes.
   And `poll_close` sends `close_notify` before closing the transport's write
   direction, which is what lets a peer tell the end of a message from a
   truncation — a plain transport shutdown does not.
+
+  A write that reaches rustls reports its count even if the transport then
+  fails, because rustls has already encrypted those bytes and will not hand
+  them back; answering with an error would invite a retry that puts the same
+  plaintext in the stream twice. The failure arrives on the next write, flush,
+  or close.
 
 ### Fixed
 
