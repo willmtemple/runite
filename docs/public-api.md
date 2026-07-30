@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1162 | 1182 | 1205 | 1225 | 177 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1162 | 1182 | 1205 | 1225 | 177 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1162 | 1182 | 1205 | 1225 | 177 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1057 | 1071 | 1100 | 1114 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1163 | 1183 | 1206 | 1226 | 177 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1058 | 1072 | 1101 | 1115 | 72 |
 
-Portable default items: **985**
+Portable default items: **986**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **985**
 
 ## Portable default surface
 
-Items: **985**
+Items: **986**
 
 ### `runite`
 
@@ -80,6 +80,7 @@ pub fn runite::queue_microtask<F>(F) where F: core::ops::function::FnOnce() + 's
 pub fn runite::run()
 pub fn runite::run_ready_tasks()
 pub fn runite::run_until_stalled()
+pub fn runite::shutdown()
 pub fn runite::spawn<F>(F) -> JoinHandle<<F as core::future::future::Future>::Output> where F: core::future::future::Future + 'static, <F as core::future::future::Future>::Output: 'static
 pub fn runite::spawn_blocking<F, R>(F) -> core::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn runite::spawn_worker<Init, Exit>(Init, Exit) -> WorkerHandle where Init: core::ops::function::FnOnce() + core::marker::Send + 'static, Exit: core::ops::function::FnOnce() + 'static

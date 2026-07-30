@@ -1033,6 +1033,33 @@ fn install_owned_state(state: Box<ThreadState>) -> *const ThreadState {
     ptr
 }
 
+/// Tears down this thread's runtime now, from the caller's own stack.
+///
+/// Returns `false` if there was nothing installed to tear down.
+pub(crate) fn shutdown_current_thread() -> bool {
+    let installed = try_with_installed_thread(|state| {
+        if let Some(state) = state {
+            assert!(
+                !state.in_event_loop.get(),
+                "runite: cannot shut the runtime down from within a task or \
+                 callback running on it; call `shutdown` after `run` returns",
+            );
+            assert!(
+                !state.tearing_down.get(),
+                "runite: the runtime is already tearing down",
+            );
+            true
+        } else {
+            false
+        }
+    });
+    if !installed {
+        return false;
+    }
+    let _ = teardown_owned_thread(true);
+    true
+}
+
 fn teardown_owned_thread(final_exit: bool) -> Result<(), ThreadTeardownError> {
     let state = THREAD_OWNER.try_with(ThreadOwner::take).ok().flatten();
     if let Some(state) = state {

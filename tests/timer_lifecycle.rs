@@ -132,6 +132,7 @@ fn shutdown_hooks_run_at_thread_teardown() {
 
     let order = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&order);
+    let observed_after_run = Arc::clone(&order);
 
     std::thread::spawn(move || {
         runite::queue_macrotask({
@@ -150,6 +151,11 @@ fn shutdown_hooks_run_at_thread_teardown() {
         });
         runite::run();
         // Still zero here: hooks are keyed to teardown, not to `run` returning.
+        assert_eq!(observed_after_run.load(Ordering::Acquire), 0);
+        // Explicit teardown, rather than relying on the thread exiting. On
+        // Windows nothing else will run these hooks: TLS destructors there
+        // hold the loader lock, where arbitrary user code cannot safely run.
+        runite::shutdown();
         0
     })
     .join()

@@ -856,6 +856,11 @@ pub fn on_shutdown<F: FnOnce() + 'static>(hook: F) {
     });
 }
 
+/// Tears this thread's runtime down now, running shutdown hooks.
+pub fn shutdown() {
+    super::state::shutdown_current_thread();
+}
+
 /// Returns the identifier of the turn currently being driven, if any.
 pub fn current_turn() -> Option<TurnId> {
     CURRENT_TURN.with(std::cell::Cell::get)
