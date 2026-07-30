@@ -56,17 +56,87 @@ pub struct CancellationToken {
 
 struct TokenState {
     cancelled: Cell<bool>,
-    wakers: RefCell<Vec<Waker>>,
+    wakers: RefCell<WakerSlots>,
     /// Children are held weakly: a token that nobody kept must not be pinned
     /// alive by its parent, and cancelling a parent should not resurrect one.
     children: RefCell<Vec<Weak<TokenState>>>,
+}
+
+/// Registered [`CancellationToken::cancelled`] wakers, addressable by slot.
+///
+/// A plain `Vec<Waker>` cannot support deregistration, and without
+/// deregistration a token that is never cancelled grows by one waker for every
+/// `cancelled()` future ever polled — the `select!`-in-a-loop shape the module
+/// documentation recommends. Each retained waker also pins the shared state of
+/// the task that registered it, so finished tasks stay resident. Slots give a
+/// waiter an identity it can surrender on drop; the free list keeps
+/// registration O(1) without leaving holes behind.
+#[derive(Default)]
+struct WakerSlots {
+    slots: Vec<Option<Waker>>,
+    free: Vec<usize>,
+}
+
+impl WakerSlots {
+    fn register(&mut self, waker: Waker) -> usize {
+        match self.free.pop() {
+            Some(slot) => {
+                self.slots[slot] = Some(waker);
+                slot
+            }
+            None => {
+                self.slots.push(Some(waker));
+                self.slots.len() - 1
+            }
+        }
+    }
+
+    fn deregister(&mut self, slot: usize) {
+        // Cancellation takes every slot at once, so a waiter dropped after its
+        // token was cancelled has nothing left to release. It cannot collide
+        // with a later waiter either: a cancelled token never registers again.
+        let Some(entry) = self.slots.get_mut(slot) else {
+            return;
+        };
+        *entry = None;
+        self.free.push(slot);
+        if self.free.len() == self.slots.len() {
+            // No waiters left: release the backing allocations rather than
+            // holding a high-water mark for the life of the token.
+            self.slots = Vec::new();
+            self.free = Vec::new();
+        }
+    }
+
+    fn take_all(&mut self, out: &mut Vec<Waker>) {
+        out.extend(std::mem::take(&mut self.slots).into_iter().flatten());
+        self.free = Vec::new();
+    }
+}
+
+/// Holds a waiter's slot for as long as its `cancelled()` future lives.
+///
+/// The registration has to be undone when the future is dropped rather than
+/// when the token is cancelled, because the common case is a future that is
+/// dropped without the token ever being cancelled.
+struct Registration<'token> {
+    state: &'token Rc<TokenState>,
+    slot: Option<usize>,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot {
+            self.state.wakers.borrow_mut().deregister(slot);
+        }
+    }
 }
 
 impl TokenState {
     fn new() -> Rc<Self> {
         Rc::new(Self {
             cancelled: Cell::new(false),
-            wakers: RefCell::new(Vec::new()),
+            wakers: RefCell::new(WakerSlots::default()),
             children: RefCell::new(Vec::new()),
         })
     }
@@ -81,7 +151,7 @@ impl TokenState {
         if self.cancelled.replace(true) {
             return;
         }
-        wakers.append(&mut self.wakers.borrow_mut());
+        self.wakers.borrow_mut().take_all(wakers);
         let children = std::mem::take(&mut *self.children.borrow_mut());
         for child in children {
             if let Some(child) = child.upgrade() {
@@ -164,7 +234,16 @@ impl CancellationToken {
         if self.state.cancelled.get() {
             child.cancelled.set(true);
         } else {
-            self.state.children.borrow_mut().push(Rc::downgrade(&child));
+            let mut children = self.state.children.borrow_mut();
+            // A dropped child leaves its `Weak` behind, and a `Weak` keeps the
+            // child's allocation reserved — so a long-lived parent handing out
+            // one child per request would grow without bound. Compacting only
+            // when the list is full makes this amortized O(1) and bounds the
+            // list at twice the live child count.
+            if children.len() == children.capacity() {
+                children.retain(|child| child.strong_count() > 0);
+            }
+            children.push(Rc::downgrade(&child));
         }
         Self { state: child }
     }
@@ -172,8 +251,8 @@ impl CancellationToken {
     /// Waits until this token is cancelled.
     ///
     /// Resolves immediately if it already is. Cancel-safe: dropping the
-    /// returned future deregisters nothing that another waiter depends on, and
-    /// a later call observes the same state.
+    /// returned future releases only its own registration, leaving every other
+    /// waiter untouched, and a later call observes the same state.
     ///
     /// # Examples
     ///
@@ -183,14 +262,24 @@ impl CancellationToken {
     /// # }
     /// ```
     pub async fn cancelled(&self) {
-        let mut registered = false;
+        let mut registration = Registration {
+            state: &self.state,
+            slot: None,
+        };
         poll_fn(|context| {
             if self.state.cancelled.get() {
+                // Cancellation already took every slot, so there is nothing
+                // for the guard to release.
+                registration.slot = None;
                 return Poll::Ready(());
             }
-            if !registered {
-                registered = true;
-                self.state.wakers.borrow_mut().push(context.waker().clone());
+            if registration.slot.is_none() {
+                let slot = self
+                    .state
+                    .wakers
+                    .borrow_mut()
+                    .register(context.waker().clone());
+                registration.slot = Some(slot);
             }
             Poll::Pending
         })
@@ -217,8 +306,20 @@ impl std::fmt::Debug for CancellationToken {
 mod tests {
     use super::CancellationToken;
     use crate::{queue_macrotask, run, spawn};
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    /// Polls `token.cancelled()` once and drops the future, as `select!` does
+    /// on every loop iteration whose other branch wins.
+    fn poll_once_and_drop(token: &CancellationToken) -> Poll<()> {
+        let mut future = pin!(token.cancelled());
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+    }
 
     #[test]
     fn cancellation_reaches_clones_and_children_but_not_parents() {
@@ -312,5 +413,105 @@ mod tests {
         }
         run();
         assert!(reached.get());
+    }
+
+    /// The advertised pattern is one long-lived token raced against work in a
+    /// loop, so a registration that outlives its future is an unbounded leak:
+    /// the slot itself, and the task shared state each retained waker pins.
+    #[test]
+    fn dropping_a_waiter_releases_its_registration() {
+        let token = CancellationToken::new();
+
+        for _ in 0..1_000 {
+            assert!(poll_once_and_drop(&token).is_pending());
+        }
+
+        let wakers = token.state.wakers.borrow();
+        assert_eq!(
+            wakers.slots.len(),
+            0,
+            "every dropped waiter should have surrendered its slot"
+        );
+        assert_eq!(wakers.free.len(), 0, "and the free list with it");
+    }
+
+    /// Two live waiters must keep two distinct slots; only the one that is
+    /// dropped may be reclaimed.
+    #[test]
+    fn concurrent_waiters_keep_independent_slots() {
+        let token = CancellationToken::new();
+        let mut context = Context::from_waker(Waker::noop());
+
+        let mut first = Box::pin(token.cancelled());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        {
+            let mut second = pin!(token.cancelled());
+            assert!(second.as_mut().poll(&mut context).is_pending());
+            assert_eq!(token.state.wakers.borrow().slots.len(), 2);
+        }
+        assert_eq!(
+            token.state.wakers.borrow().slots.len(),
+            2,
+            "the surviving waiter still owns its slot"
+        );
+        assert_eq!(token.state.wakers.borrow().free.len(), 1);
+
+        drop(first);
+        assert_eq!(token.state.wakers.borrow().slots.len(), 0);
+    }
+
+    /// Cancelling must release the waker storage, not just its contents: a
+    /// drained `Vec` keeps the high-water-mark allocation for the life of the
+    /// token, which is exactly as long as the leak would have lasted.
+    #[test]
+    fn cancelling_releases_the_waker_storage() {
+        let token = CancellationToken::new();
+        let mut futures = Vec::new();
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..64 {
+            let mut future = Box::pin(token.cancelled());
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            futures.push(future);
+        }
+        assert_eq!(token.state.wakers.borrow().slots.len(), 64);
+
+        token.cancel();
+        assert_eq!(token.state.wakers.borrow().slots.capacity(), 0);
+
+        // Waiters resolve and drop after the drain; that must not panic or
+        // resurrect storage.
+        for mut future in futures {
+            assert!(future.as_mut().poll(&mut context).is_ready());
+        }
+        assert_eq!(token.state.wakers.borrow().slots.capacity(), 0);
+    }
+
+    /// A `Weak` left in the parent keeps the dropped child's allocation
+    /// reserved, so a per-request child token would leak against a
+    /// process-lifetime root.
+    #[test]
+    fn dropped_children_do_not_accumulate_in_the_parent() {
+        let parent = CancellationToken::new();
+        for _ in 0..1_000 {
+            drop(parent.child_token());
+        }
+        let retained = parent.state.children.borrow().len();
+        assert!(
+            retained <= 8,
+            "expected dead children to be compacted away, found {retained}"
+        );
+    }
+
+    /// Compaction must not drop children that are still held.
+    #[test]
+    fn compaction_keeps_live_children() {
+        let parent = CancellationToken::new();
+        let live: Vec<_> = (0..16).map(|_| parent.child_token()).collect();
+        for _ in 0..1_000 {
+            drop(parent.child_token());
+        }
+
+        parent.cancel();
+        assert!(live.iter().all(CancellationToken::is_cancelled));
     }
 }

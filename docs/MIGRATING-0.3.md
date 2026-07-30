@@ -10,10 +10,6 @@ some derived traits to do it.
 runite = "0.3"
 ```
 
-> **This guide is written as 0.3 is developed** and grows with it. Until 0.3 is
-> released, treat it as the running record of what will need changing rather
-> than a finished document.
-
 ## Required source changes
 
 This section covers changes the compiler will force you to make.
@@ -146,13 +142,199 @@ let mut status = git();
 let mut diff = git();
 ```
 
-Note that runite's public API report does not track derived trait impls, so
-this change does not appear in `docs/public-api.md`.
+Derived impls are tracked from 0.3 on, in `docs/public-api-traits.md`; this
+particular removal predates that file, so it shows up in neither report.
 
 ## New capabilities
 
 Nothing here forces a source change; these exist so an application does not
-have to reach outside runite for them.
+have to reach outside runite for them. Each is summarized to the depth an
+upgrade decision needs — the rationale behind every one is in
+[CHANGELOG.md](../CHANGELOG.md), and the signatures are in the rustdoc.
+
+### TLS, behind the `rustls` feature
+
+`runite::tls` drives a [rustls](https://docs.rs/rustls) session over any runite
+transport, so HTTPS no longer needs a second reactor in the process:
+
+```toml
+[dependencies]
+runite = { version = "0.3", features = ["rustls"] }
+```
+
+```rust
+let connector = runite::tls::TlsConnector::new(config);
+let socket = runite::net::TcpStream::connect("example.com:443").await?;
+let mut tls = connector
+    .connect("example.com".try_into().expect("valid DNS name"), socket)
+    .await?;
+```
+
+`TlsStream` is itself an `AsyncRead` + `AsyncWrite`, and with the `hyper`
+feature also enabled it implements hyper's transport traits.
+
+Two things an upgrade has to decide. runite depends on rustls with **no
+provider feature**, so the application picks `ring` or `aws-lc-rs` itself —
+build a `ClientConfig` without one and rustls panics. And the rustls types are
+part of runite's signatures, so write against
+`runite::tls::rustls` rather than a second `rustls` dependency that cargo may
+not unify. The module documentation covers both.
+
+### Reading the loop's own numbers
+
+`runite::metrics::snapshot()` returns levels, monotonic totals, and high-water
+marks for the calling thread's runtime:
+
+```rust
+let before = runite::metrics::snapshot();
+// ... work ...
+let after = runite::metrics::snapshot();
+
+let turns = after.counters.turns - before.counters.turns;
+let live = after.gauges.live_tasks;
+let worst_queue = after.peaks.ready_tasks;
+```
+
+Gauges, counters and peaks are three types rather than one flat struct so that
+subtracting a level or reading a counter as one does not typecheck. Taking a
+snapshot walks nothing — it is a handful of loads off state the runtime already
+maintains — and a thread with no runtime installed reads zeroes instead of
+panicking, so a harness that drives application logic without a reactor can
+still call it.
+
+### Cooperative cancellation
+
+`sync::CancellationToken` is a cloneable, hierarchical signal that `!Send` tasks
+can await. It complements `AbortHandle` rather than replacing it: an abort stops
+a task at its next suspension point whether or not it is ready, while a token is
+something the task chooses to observe, so work that must flush a buffer or
+release a lock before stopping can do so.
+
+```rust
+let root = runite::sync::CancellationToken::new();
+
+runite::spawn({
+    let token = root.child_token();
+    async move {
+        token.cancelled().await;
+        flush().await;
+    }
+});
+
+root.cancel(); // reaches children and clones; never the parent
+```
+
+`child_token` lets a subsystem cancel its own work without touching its
+siblings — cancellation flows down only.
+
+### Timers that stop with their scope
+
+`TimeoutHandle::cancel_on_drop` and `IntervalHandle::cancel_on_drop` wrap a
+timer token in a `CancelOnDrop` guard:
+
+```rust
+let ticker = runite::time::set_interval(period, on_tick).cancel_on_drop();
+// ... the work the ticker accompanies ...
+drop(ticker); // stops here, rather than outliving the scope
+```
+
+The plain handles keep their token semantics — dropping one leaves the timer
+running — so this is opt-in and changes nothing by default. It matters most for
+intervals, where an uncancelled timer keeps the runtime alive and a leaked one
+stops `run()` from ever returning. The guard is `!Send`, because cancelling a
+timer from a foreign thread is a silent no-op and a guard cancels where nobody
+wrote the call; `into_inner` hands the token back if you do need to move it.
+
+### Running code on the way out
+
+`runite::on_shutdown` registers a closure to run when the thread's runtime is
+torn down — before spawned tasks are cancelled and before the driver is
+destroyed, so the hook is handed a runtime that can still do something.
+`runite::shutdown()` performs that teardown on the caller's own stack instead of
+waiting for thread exit.
+
+```rust
+runite::on_shutdown(|| persist_state());
+// ... later, on the same thread ...
+runite::shutdown();
+```
+
+On Windows, calling `shutdown()` is the only way a hook on an
+application-owned thread runs at all: teardown at thread exit happens under the
+loader lock, where running user code or closing a completion port can deadlock
+process shutdown, so runite deliberately does neither. It is worth preferring on
+Unix too, where TLS destructor order would otherwise decide when hooks run. It
+is a no-op with no runtime installed, and the thread may build a fresh one
+afterwards.
+
+### Closing a descriptor in order
+
+`close_descriptor` on `File`, `TcpStream`, `TcpListener`, `UdpSocket`,
+`UnixStream`, `UnixListener` and `UnixDatagram` closes asynchronously and
+reports `io::CloseOutcome`:
+
+```rust
+match file.close_descriptor().await? {
+    runite::io::CloseOutcome::Closed => {}
+    runite::io::CloseOutcome::StillShared => {} // a split half outlived it
+}
+```
+
+The point is ordering rather than error reporting. On Linux the close goes
+through the ring, sequenced behind operations already submitted against the same
+descriptor; a `close(2)` from `Drop` is not, and it frees the descriptor
+*number* immediately, so a racing `open` elsewhere can be handed it. Do not use
+it to catch close errors — `close(2)` reporting is too unreliable for that,
+which is why the standard library has no `File::close`.
+
+### Draining a raw descriptor
+
+`fd::read_chunks` is the readiness loop `fd::wait_readable` otherwise asks every
+caller to write, with the three things that loop has to get right built in:
+chunks are delivered before it parks, `Interrupted` retries instead of waiting
+for readiness already reported, and the caller can stop.
+
+```rust
+let outcome = runite::fd::read_chunks(&fd, &mut buffer, |chunk| {
+    budget = budget.saturating_sub(chunk.len());
+    if budget == 0 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+})
+.await?;
+
+if outcome.is_end_of_input() {
+    // The peer is gone; tear down rather than waiting for more.
+}
+```
+
+The returned `fd::Drain` distinguishes end of input from a self-imposed stop,
+which a consumer draining a pseudoterminal needs: the first means the child
+exited, the second means come back for more.
+
+### Telling a retryable `spawn_blocking` refusal apart
+
+`task::is_retryable` reports whether a `spawn_blocking` error is worth retrying
+— `true` only for a momentarily full queue, `false` for a stopped or
+uncreatable pool:
+
+```rust
+match runite::task::spawn_blocking(work) {
+    Ok(handle) => handle.await,
+    Err(error) if runite::task::is_retryable(&error) => back_off().await,
+    Err(error) => return Err(error),
+}
+```
+
+It takes `io::Error` rather than introducing an error type, so `spawn_blocking`
+still composes with the rest of the crate without a conversion at every seam.
+
+### Missing `#[must_use]` filled in
+
+`time::Sleep`, `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`,
+`MutexGuard`, `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and
+`watch::Ref` are now `#[must_use]`. Nothing breaks, but `sleep(d);` and
+`let _ = semaphore.acquire().await;` — silent no-ops in 0.2 — now warn. Join
+handles are deliberately still unmarked: dropping one detaches the task, which
+is intended rather than a mistake.
 
 ### A child can be started on a descriptor you own
 
@@ -293,6 +475,17 @@ belongs to exactly one turn, and the join is structural rather than
 approximate.
 
 `TurnId` is opaque and comparable; identifiers increase and are never reused.
+
+`runite::current_runtime_id()` is the coarser half of the same join:
+a `RuntimeId` names one thread's event loop for the life of the process, which
+is what separates records from several runtimes in one log. Both render exactly
+as they appear in the `turn_id` and `runtime_id` fields of runite's own trace
+events — that correspondence is the promise, and nothing else about the values
+is specified.
+
+`time::monotonic_now()` reads the clock the runtime schedules its own deadlines
+on, so a measurement taken beside a `time::sleep` is on the same timebase rather
+than on `Instant::now`'s.
 
 ### Watching several signal kinds on one stream
 

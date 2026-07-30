@@ -591,6 +591,100 @@ fn a_payload_larger_than_one_record_survives_the_round_trip() {
     assert_eq!(received, payload);
 }
 
+/// Taking a stream apart has to hand back the ciphertext rustls has already
+/// deframed out of the transport. A read stops as soon as rustls accepts one
+/// batch of records, so on a busy stream that residue is the normal case — and
+/// a caller resuming the session from the returned parts would otherwise start
+/// reading the transport thousands of bytes into a record.
+#[test]
+fn into_parts_returns_the_ciphertext_the_session_has_not_consumed() {
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use std::io::Read as _;
+
+    let (mut client, mut server) = handshake();
+    let payload: Vec<u8> = (0..100_000).map(|index| (index % 251) as u8).collect();
+    now(server.write_all(&payload)).expect("server write");
+    now(server.flush()).expect("server flush");
+
+    let mut first = [0u8; 1];
+    now(client.read_exact(&mut first)).expect("client read");
+    assert_eq!(first[0], payload[0]);
+
+    let parts = client.into_parts();
+    assert!(
+        !parts.buffered_ciphertext.is_empty(),
+        "one plaintext byte cannot have consumed a 16 KiB transport read"
+    );
+
+    // Resume the session by hand, exactly as a caller who wanted the
+    // `Connection` back would have to.
+    let super::TlsParts {
+        mut io,
+        mut connection,
+        buffered_ciphertext,
+        ..
+    } = parts;
+    let mut recovered = vec![first[0]];
+    let mut pending = buffered_ciphertext;
+    while recovered.len() < payload.len() {
+        if pending.is_empty() {
+            let mut chunk = vec![0u8; 16 * 1024];
+            let read = now(io.read(&mut chunk)).expect("transport read");
+            assert_ne!(read, 0, "the transport still holds the rest of the payload");
+            pending.extend_from_slice(&chunk[..read]);
+        }
+        let taken = connection
+            .read_tls(&mut pending.as_slice())
+            .expect("read_tls");
+        assert_ne!(taken, 0, "the resumed session must keep accepting records");
+        pending.drain(..taken);
+        let state = connection
+            .process_new_packets()
+            .expect("the resumed session must still be aligned with the record stream");
+        let ready = state.plaintext_bytes_to_read();
+        let start = recovered.len();
+        recovered.resize(start + ready, 0);
+        connection
+            .reader()
+            .read_exact(&mut recovered[start..])
+            .expect("plaintext rustls said was ready");
+    }
+    assert_eq!(recovered, payload);
+}
+
+/// The other half of the same promise: ciphertext rustls produced but the
+/// transport has not taken is no longer in the session, so it has to come back
+/// too or the peer never sees the record.
+#[test]
+fn into_parts_returns_the_ciphertext_the_transport_has_not_taken() {
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    const MESSAGE: &[u8] = b"a record the transport will not finish taking";
+
+    let (mut client, mut server) = handshake();
+    let outbound = client.get_ref().outbound();
+    outbound.borrow_mut().budget = Some(5);
+    now(client.write_all(MESSAGE)).expect("the plaintext is accepted and the record staged");
+
+    let parts = client.into_parts();
+    assert!(
+        !parts.staged_ciphertext.is_empty(),
+        "the transport took five bytes of the record"
+    );
+
+    let super::TlsParts {
+        mut io,
+        staged_ciphertext,
+        ..
+    } = parts;
+    outbound.borrow_mut().budget = None;
+    now(io.write_all(&staged_ciphertext)).expect("the residue reaches the transport");
+
+    let mut received = vec![0u8; MESSAGE.len()];
+    now(server.read_exact(&mut received)).expect("server read");
+    assert_eq!(received, MESSAGE);
+}
+
 /// Vectored writes exist here to save record overhead, so the slices must
 /// arrive as one contiguous plaintext stream.
 #[test]

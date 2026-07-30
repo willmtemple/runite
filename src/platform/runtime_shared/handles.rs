@@ -6,6 +6,7 @@
 //! `runtime.rs` modules can `pub use` them directly without any aliasing.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -201,7 +202,10 @@ impl TimeoutHandle {
     /// For a timeout whose lifetime belongs to a scope rather than to the
     /// program. See [`CancelOnDrop`].
     pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
-        CancelOnDrop { handle: self }
+        CancelOnDrop {
+            handle: self,
+            thread_affine: PhantomData,
+        }
     }
 }
 
@@ -241,7 +245,10 @@ impl IntervalHandle {
     /// runtime alive, so a leaked one prevents `run()` from ever returning.
     /// See [`CancelOnDrop`].
     pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
-        CancelOnDrop { handle: self }
+        CancelOnDrop {
+            handle: self,
+            thread_affine: PhantomData,
+        }
     }
 }
 
@@ -260,6 +267,14 @@ impl IntervalHandle {
 /// `Clone` — two owners of a cancel-on-drop guard would mean the first drop
 /// wins, which is not a useful contract.
 ///
+/// It is also **not** `Send`, unlike the tokens it wraps. Cancelling a timer
+/// from a thread other than the one that armed it is a documented no-op, which
+/// a caller who spelled out `handle.cancel()` can reason about — but a guard
+/// exists precisely so nobody spells the cancellation out. A guard moved to
+/// another thread would drop there, cancel nothing, and leave an interval
+/// keeping the original runtime alive forever. Use [`into_inner`](Self::into_inner)
+/// to get the `Send` token back if a token really is what you want to move.
+///
 /// # Examples
 ///
 /// ```
@@ -277,6 +292,8 @@ impl IntervalHandle {
 #[must_use = "the timer is cancelled as soon as this guard is dropped"]
 pub struct CancelOnDrop<H: TimerCancel> {
     handle: H,
+    /// Binds the guard to the thread that created it; see the type docs.
+    thread_affine: PhantomData<Rc<()>>,
 }
 
 impl<H: TimerCancel> CancelOnDrop<H> {

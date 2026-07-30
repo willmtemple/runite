@@ -8,15 +8,30 @@ use crate::targets::{SUPPORTED_TARGETS, Target};
 
 const CRATE: &str = "runite";
 const OUTPUT: &str = "docs/public-api.md";
+/// Auto-trait and derived impls, split into their own report.
+///
+/// `cargo public-api` synthesizes five to seven of these lines for every public
+/// type, which is why [`OMIT`] drops them: mixed into [`OUTPUT`] they bury the
+/// items a reviewer is actually reading. Dropping them entirely was worse —
+/// losing `Send` on a guard or `Clone` on a config is a semver break the drift
+/// gate could not see, and the omission had already been narrated by hand in
+/// two shipping documents. A second file keeps both properties: the surface
+/// stays readable, and the breaks still fail `--check`.
+const OUTPUT_TRAITS: &str = "docs/public-api-traits.md";
 /// Exact nightly used for rustdoc-JSON generation. The rendered item listing
 /// varies across rustdoc versions, so bump this deliberately and regenerate
 /// the report in the same change.
 const RUSTDOC_TOOLCHAIN: &str = "nightly-2026-07-01";
 const OMIT: &str = "blanket-impls,auto-trait-impls,auto-derived-impls";
+/// What the second pass keeps. Blanket impls stay omitted in both: they are a
+/// property of the foreign trait, not of runite's types, so a change in one is
+/// not a change to this crate's surface.
+const OMIT_TRAITS: &str = "blanket-impls";
 
 struct ApiSurface {
     target: Target,
     feature_sets: BTreeMap<ApiFeatureSet, BTreeSet<String>>,
+    trait_sets: BTreeMap<ApiFeatureSet, BTreeSet<String>>,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -62,6 +77,12 @@ impl ApiSurface {
             .get(&feature_set)
             .expect("every API feature set must be collected")
     }
+
+    fn traits(&self, feature_set: ApiFeatureSet) -> &BTreeSet<String> {
+        self.trait_sets
+            .get(&feature_set)
+            .expect("every API feature set must be collected")
+    }
 }
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
@@ -70,13 +91,22 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
     for target in SUPPORTED_TARGETS {
         let mut feature_sets = BTreeMap::new();
+        let mut trait_sets = BTreeMap::new();
         for feature_set in API_FEATURE_SETS {
             println!(
                 "xtask: collecting {} API for {}",
                 feature_set.label(),
                 target.triple
             );
-            feature_sets.insert(feature_set, run_public_api(target, feature_set)?);
+            let items = run_public_api(target, feature_set, OMIT)?;
+            // The second pass reuses the rustdoc JSON the first one built, so
+            // it costs a parse rather than a documentation run.
+            let with_traits = run_public_api(target, feature_set, OMIT_TRAITS)?;
+            trait_sets.insert(
+                feature_set,
+                with_traits.difference(&items).cloned().collect(),
+            );
+            feature_sets.insert(feature_set, items);
             check_api_probe(target, feature_set)?;
         }
 
@@ -124,29 +154,38 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         surfaces.push(ApiSurface {
             target,
             feature_sets,
+            trait_sets,
         });
     }
     validate_portability(&surfaces)?;
 
-    let rendered = render(&surfaces);
-    let output = workspace_root().join(OUTPUT);
-    if check.contains("--check") {
-        let current = fs::read_to_string(&output).unwrap_or_default();
-        if current != rendered {
-            return Err(format!(
-                "{OUTPUT} is out of date; run `mise run api-report` and commit the result"
-            ));
+    let outputs = [
+        (OUTPUT, render(&surfaces)),
+        (OUTPUT_TRAITS, render_traits(&surfaces)),
+    ];
+    for (path, rendered) in outputs {
+        let output = workspace_root().join(path);
+        if check.contains("--check") {
+            let current = fs::read_to_string(&output).unwrap_or_default();
+            if current != rendered {
+                return Err(format!(
+                    "{path} is out of date; run `mise run api-report` and commit the result"
+                ));
+            }
+            println!("xtask: {path} is up to date");
+            continue;
         }
-        println!("xtask: {OUTPUT} is up to date");
-        return Ok(());
+        fs::write(&output, rendered).map_err(|error| format!("failed to write {path}: {error}"))?;
+        println!("xtask: wrote {path}");
     }
-
-    fs::write(&output, rendered).map_err(|error| format!("failed to write {OUTPUT}: {error}"))?;
-    println!("xtask: wrote {OUTPUT}");
     Ok(())
 }
 
-fn run_public_api(target: Target, feature_set: ApiFeatureSet) -> Result<BTreeSet<String>, String> {
+fn run_public_api(
+    target: Target,
+    feature_set: ApiFeatureSet,
+    omit: &str,
+) -> Result<BTreeSet<String>, String> {
     let root = workspace_root();
     let mut command = Command::new("cargo");
     command.current_dir(root).args([
@@ -157,7 +196,7 @@ fn run_public_api(target: Target, feature_set: ApiFeatureSet) -> Result<BTreeSet
         "--target",
         target.triple,
         "--omit",
-        OMIT,
+        omit,
         "--color",
         "never",
     ]);
@@ -475,13 +514,21 @@ const API_PROBE: &str = r#"
 #![deny(warnings)]
 #![allow(dead_code)]
 
+use core::fmt::{Debug, Display};
 use core::future::Future;
+use core::hash::Hash;
 use runite::{
-    AbortHandle, IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, WorkerJoin,
-    WorkerJoinError,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinError, JoinHandle, QueueError, RuntimeId,
+    ThreadHandle, TimeoutHandle, TimerCancel, TurnId, WorkerHandle, WorkerJoin, WorkerJoinError,
+    YieldNow,
 };
 
 fn assert_worker_join_future<F: Future<Output = Result<(), WorkerJoinError>>>() {}
+fn assert_join_future<F: Future<Output = Result<u32, JoinError>>>() {}
+fn assert_yield_future<F: Future<Output = ()>>() {}
+fn assert_debug<T: Debug>() {}
+fn assert_error<T: std::error::Error + Display>() {}
+fn assert_id<T: Copy + Debug + Display + Eq + Ord + Hash>() {}
 
 fn handle_contract(
     thread: &ThreadHandle,
@@ -494,6 +541,7 @@ fn handle_contract(
     let _ = thread.queue_macrotask(|| {});
     let _ = thread.is_closed();
     let _ = thread.is_current();
+    let _: ThreadHandle = thread.clone();
 
     let _ = worker.queue_macrotask(|| {});
     let _ = worker.is_finished();
@@ -504,14 +552,63 @@ fn handle_contract(
     join.abort();
     let _ = join.is_finished();
     let _: AbortHandle = join.abort_handle();
+    assert_join_future::<JoinHandle<u32>>();
     abort.abort();
     let _ = abort.is_finished();
+    let _: AbortHandle = abort.clone();
     timeout.cancel();
     interval.cancel();
+    let _: TimeoutHandle = timeout.clone();
+    let _: IntervalHandle = interval.clone();
 
     let setup = WorkerJoinError::SetupPanicked;
     let _ = setup.is_setup_panicked();
     let _ = setup.is_runtime_panicked();
+    let _ = WorkerJoinError::RuntimePanicked;
+
+    assert_debug::<ThreadHandle>();
+    assert_debug::<WorkerHandle>();
+    assert_debug::<WorkerJoin>();
+    assert_debug::<JoinHandle<()>>();
+    assert_debug::<AbortHandle>();
+    assert_debug::<TimeoutHandle>();
+    assert_debug::<IntervalHandle>();
+}
+
+/// The cancel-on-drop guard, whose whole surface is inherent methods and
+/// operator impls that `cargo public-api` cannot see through the private module
+/// its type is defined in.
+fn cancel_on_drop_contract(timeout: TimeoutHandle, interval: IntervalHandle) {
+    let guard: CancelOnDrop<TimeoutHandle> = timeout.cancel_on_drop();
+    // `Deref`, so the guard is usable wherever the token was.
+    let _: &TimeoutHandle = &guard;
+    guard.cancel();
+
+    let guard: CancelOnDrop<IntervalHandle> = interval.cancel_on_drop();
+    let token: IntervalHandle = guard.into_inner();
+    TimerCancel::cancel_timer(&token);
+    assert_debug::<CancelOnDrop<IntervalHandle>>();
+}
+
+/// Errors, identifiers, and the small futures. Every one of these types is
+/// re-exported from a private module, so the report shows the name and nothing
+/// else.
+fn value_contract() {
+    assert_error::<QueueError>();
+    let _ = QueueError::Closed;
+    let _ = QueueError::Full;
+
+    assert_id::<RuntimeId>();
+    assert_id::<TurnId>();
+    let _: Option<RuntimeId> = runite::current_runtime_id();
+    let _: Option<TurnId> = runite::current_turn();
+
+    assert_yield_future::<YieldNow>();
+    let _: YieldNow = runite::yield_now();
+    assert_debug::<YieldNow>();
+
+    runite::on_shutdown(|| {});
+    runite::shutdown();
 }
 
 fn issue_9_traits<
@@ -609,7 +706,8 @@ fn render(surfaces: &[ApiSurface]) -> String {
     out.push_str(&format!(
         "_Generated by `xtask api-report` (`mise run api-report`) with \
          `cargo-public-api`, Rust `{RUSTDOC_TOOLCHAIN}`, and auto-trait, blanket, \
-         and derived impls omitted. Do not edit by hand._\n\n"
+         and derived impls omitted — those are diffed in \
+         [`public-api-traits.md`](public-api-traits.md). Do not edit by hand._\n\n"
     ));
     out.push_str(
         "The portable default section is the exact intersection of the four \
@@ -649,18 +747,32 @@ fn render(surfaces: &[ApiSurface]) -> String {
     ));
     out.push_str("## Compile-checked handle contract\n\n");
     out.push_str(
-        "`cargo-public-api` lists re-exported handle types but currently omits \
-         their inherent methods because their definitions live in a private \
-         implementation module. `xtask api-report` therefore compiles this \
-         contract for every target with default, each individual feature, and \
-         all features:\n\n\
-         - `ThreadHandle::{queue_macrotask, is_closed, is_current}`\n\
+        "`cargo-public-api` lists re-exported types but currently omits \
+         everything *on* them — inherent methods, variants, and trait impls — \
+         because their definitions live in a private implementation module. \
+         Every type below reaches the crate root through `platform::\
+         runtime_shared`, so the sections further down name it and stop. \
+         `xtask api-report` therefore compiles this contract for every target \
+         with default, each individual feature, and all features, which is what \
+         makes these members part of the gated surface rather than an \
+         unwitnessed promise:\n\n\
+         - `ThreadHandle::{queue_macrotask, is_closed, is_current}`, `Clone`\n\
          - `WorkerHandle::{queue_macrotask, is_finished, join, thread}`\n\
          - `WorkerJoin: Future<Output = Result<(), WorkerJoinError>>`\n\
-         - `WorkerJoinError::{is_setup_panicked, is_runtime_panicked}`\n\
+         - `WorkerJoinError::{SetupPanicked, RuntimePanicked, \
+         is_setup_panicked, is_runtime_panicked}`\n\
          - `JoinHandle::{abort, is_finished, abort_handle}` and \
-         `AbortHandle::{abort, is_finished}`\n\
-         - `TimeoutHandle::cancel` and `IntervalHandle::cancel`\n\
+         `JoinHandle<T>: Future<Output = Result<T, JoinError>>`\n\
+         - `AbortHandle::{abort, is_finished}`, `Clone`\n\
+         - `TimeoutHandle`/`IntervalHandle`: `cancel`, `cancel_on_drop`, \
+         `Clone`\n\
+         - `CancelOnDrop::{cancel, into_inner}`, `Deref` to its token, and \
+         `TimerCancel::cancel_timer`\n\
+         - `QueueError::{Closed, Full}` as an `Error`, and `RuntimeId`/`TurnId` \
+         as `Copy + Display + Ord + Hash` identifiers\n\
+         - `YieldNow: Future<Output = ()>`, plus `yield_now`, `current_turn`, \
+         `current_runtime_id`, `on_shutdown` and `shutdown`\n\
+         - `Debug` on every handle above\n\
          - `Builder`/`Runtime` construction and every loop entry point on \
          them, plus `os::linux::BuilderExt` reached through a `Builder` on \
          Linux\n\
@@ -694,6 +806,112 @@ fn render(surfaces: &[ApiSurface]) -> String {
             let additions = surface
                 .api(feature_set)
                 .difference(surface.api(ApiFeatureSet::Default))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            render_grouped(
+                &mut out,
+                &format!(
+                    "{} `{}` additions (`{}`)",
+                    surface.target.label,
+                    feature_set.label(),
+                    surface.target.triple
+                ),
+                &additions,
+                &modules,
+            );
+        }
+    }
+    out
+}
+
+/// Renders the auto-trait and derived impls, decomposed the same way as
+/// [`render`] so the two files read against each other.
+fn render_traits(surfaces: &[ApiSurface]) -> String {
+    let mut portable = surfaces[0].traits(ApiFeatureSet::Default).clone();
+    for surface in &surfaces[1..] {
+        portable = portable
+            .intersection(surface.traits(ApiFeatureSet::Default))
+            .cloned()
+            .collect();
+    }
+
+    let mut all_items = BTreeSet::new();
+    for surface in surfaces {
+        all_items.extend(surface.api(ApiFeatureSet::All).iter().cloned());
+    }
+    let modules: Vec<String> = all_items
+        .iter()
+        .filter_map(|line| declared_module(line))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str("# `runite` auto-trait and derived impls\n\n");
+    out.push_str(&format!(
+        "_Generated by `xtask api-report` (`mise run api-report`) with \
+         `cargo-public-api`, Rust `{RUSTDOC_TOOLCHAIN}`. Do not edit by hand._\n\n"
+    ));
+    out.push_str(
+        "The companion to [`public-api.md`](public-api.md), which omits these \
+         so that the items a reviewer reads are not buried under five to seven \
+         synthesized lines per type. They are still public API: losing `Send` \
+         on a guard, `Unpin` on a future, or a derived `Clone` breaks callers \
+         exactly as removing a method does, so they are diffed here instead of \
+         going unwitnessed. The decomposition matches the other file — portable \
+         intersection, per-target delta, per-feature additions.\n\n\
+         Blanket impls are omitted from both files: those follow from a foreign \
+         trait's own definition rather than from anything runite declares.\n\n\
+         **This file cannot see types re-exported from a private module.** \
+         `cargo-public-api` renders those as a bare `pub use` with nothing \
+         attached, so the auto traits of `ThreadHandle`, `JoinHandle`, \
+         `CancelOnDrop` and their neighbours are gated by the `trybuild` cases \
+         in `tests/ui/` instead — `pass/auto_traits.rs` for the ones that must \
+         stay `Send`, `fail/join_handle_send.rs` and \
+         `fail/cancel_on_drop_send.rs` for the ones that must not.\n\n",
+    );
+
+    out.push_str("## Summary\n\n");
+    out.push_str("| Target | Default | `hyper` | `futures-compat` | `rustls` | All features |\n");
+    out.push_str("| --- | ---: | ---: | ---: | ---: | ---: |\n");
+    for surface in surfaces {
+        out.push_str(&format!(
+            "| {} (`{}`) | {} | {} | {} | {} | {} |\n",
+            surface.target.label,
+            surface.target.triple,
+            surface.traits(ApiFeatureSet::Default).len(),
+            surface.traits(ApiFeatureSet::Hyper).len(),
+            surface.traits(ApiFeatureSet::FuturesCompat).len(),
+            surface.traits(ApiFeatureSet::Rustls).len(),
+            surface.traits(ApiFeatureSet::All).len(),
+        ));
+    }
+    out.push('\n');
+
+    render_grouped(&mut out, "Portable default impls", &portable, &modules);
+    for surface in surfaces {
+        let delta = surface
+            .traits(ApiFeatureSet::Default)
+            .difference(&portable)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        render_grouped(
+            &mut out,
+            &format!(
+                "{} default target delta (`{}`)",
+                surface.target.label, surface.target.triple
+            ),
+            &delta,
+            &modules,
+        );
+    }
+    for feature_set in OPTIONAL_FEATURE_SETS
+        .iter()
+        .copied()
+        .chain([ApiFeatureSet::All])
+    {
+        for surface in surfaces {
+            let additions = surface
+                .traits(feature_set)
+                .difference(surface.traits(ApiFeatureSet::Default))
                 .cloned()
                 .collect::<BTreeSet<_>>();
             render_grouped(

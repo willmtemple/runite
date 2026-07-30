@@ -27,6 +27,7 @@ exclude = [
   "/proc_macros",
   "/xtask",
   "/docs/public-api.md",
+  "/docs/public-api-traits.md",
   "CONTRIBUTING.md",
   "SECURITY.md",
   "mise.toml",

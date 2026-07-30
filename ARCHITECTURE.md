@@ -646,7 +646,8 @@ reserved for genuine platform concepts: descriptor readiness, Unix-domain
 sockets/signals and fd traits on Unix; Windows console signals,
 handle/socket traits, and `os::windows::fs` extensions on Windows. The
 generated `docs/public-api.md` records the portable intersection plus explicit
-target and feature deltas.
+target and feature deltas; `docs/public-api-traits.md` does the same for the
+auto-trait and derived impls the first file omits for readability.
 
 Adoption is fallible on every platform:
 

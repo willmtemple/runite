@@ -119,7 +119,8 @@ GitHub issues and pull requests are limited to collaborators. Please start by
   Windows backends behind the existing `cfg` gates and mirror behavior where practical.
 - **Public API** changes should update doctests, the README, the CHANGELOG, and (for runtime
   semantics) ARCHITECTURE.md, and regenerate the public API snapshot with
-  `mise run api-report` (CI fails on a stale `docs/public-api.md`).
+  `mise run api-report` (CI fails on a stale `docs/public-api.md` or
+  `docs/public-api-traits.md`).
 
 ## Security issues
 

@@ -199,45 +199,17 @@ changes.
   direction, which is what lets a peer tell the end of a message from a
   truncation — a plain transport shutdown does not.
 
-### Fixed
-
-- Socket read and write deadlines no longer fail outright when the kernel
-  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
-  `recv_from_timeout`, and `connect_stream_timeout` submitted an
-  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
-  quietly switched to the readiness path an identical call carrying a deadline
-  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
-  their deadline-free siblings do, applying what is left of the deadline
-  through the runtime's timer the way the kqueue backend already did — the
-  linked timeout has already been running when the kernel rejects the opcode
-  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
-  The cost is a timer per call instead of a linked SQE, and only on the
-  fallback path; `send_timeout` caches whether the kernel accepts a
-  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
-  needs is paid once per thread rather than on every call. Found by masking the
-  opcode probe across the integration suite, which now runs under two
-  constrained profiles in `mise run capability-matrix`.
-  ([#19](https://github.com/willmtemple/runite/issues/19))
-
-- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
-  is inherited. It waits for the process-wide stdin reader to release the
-  terminal, and that wait was unbounded — an interrupt frees a reader parked in
-  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
-  on an interactive terminal returns only when the user types. Spawning a child
-  could therefore hang the whole event loop until a keypress. The wait is now
-  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
-  Windows already did, and the caller may retry.
-  ([#28](https://github.com/willmtemple/runite/issues/28))
-
-- `watch::Sender::send` could report success with no receivers. It checked the
-  receiver count under the book lock, released it, then wrote the value, so the
-  last `Receiver` dropping in that window left `send` consuming the value,
-  advancing the version, and returning `Ok(())` — contradicting its documented
-  contract. The check and the write now happen under one book lock. The
-  previous value is moved out rather than assigned over, so `T::drop` runs
-  after both locks are released: dropping it in place would run user code under
-  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
-  ([#26](https://github.com/willmtemple/runite/issues/26))
+  `TlsStream::into_parts` returns a `tls::TlsParts` rather than a
+  `(S, Connection)` pair, because those two are not everything the stream was
+  holding. Ciphertext read from the transport that rustls has not deframed yet,
+  and ciphertext rustls produced that the transport has not taken yet, are each
+  irrecoverable from the other two — a read returns as soon as rustls accepts
+  one batch of records, so a residue is the normal case on a busy stream, and
+  dropping it desynchronizes the record stream from the session by however many
+  bytes it held. That surfaces later as a decrypt failure that reads as the
+  peer's fault. `TlsParts` returns both alongside the transport and the session
+  and is `#[non_exhaustive]`, so another buffer would not have to be another
+  silent loss.
 
 - `Debug` on the 67 public types that lacked it, and
   `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
@@ -373,7 +345,15 @@ changes.
   It matters most for intervals, where an uncancelled timer keeps the runtime
   alive and a leaked one stops `run()` from ever returning. The guard is not
   `Clone`, and `into_inner` releases the timer to a longer-lived owner without
-  cancelling. ([#8](https://github.com/willmtemple/runite/issues/8))
+  cancelling.
+
+  It is also not `Send`, unlike the tokens it wraps. Cancelling a timer from a
+  thread other than the one that armed it fails the generation check and is
+  silently ignored — documented behaviour since 0.2, and readable at a call site
+  that spells `handle.cancel()` out. A guard has no such call site: moved to
+  another thread it would drop there, cancel nothing, and leave an interval
+  holding the original runtime's `run()` open with no error, warning, or panic.
+  ([#8](https://github.com/willmtemple/runite/issues/8))
 
 - `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
   worth retrying: `true` only for a momentarily full queue, `false` for a
@@ -397,6 +377,44 @@ changes.
   ([#30](https://github.com/willmtemple/runite/issues/30))
 
 ### Fixed
+
+- Socket read and write deadlines no longer fail outright when the kernel
+  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
+  `recv_from_timeout`, and `connect_stream_timeout` submitted an
+  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
+  quietly switched to the readiness path an identical call carrying a deadline
+  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
+  their deadline-free siblings do, applying what is left of the deadline
+  through the runtime's timer the way the kqueue backend already did — the
+  linked timeout has already been running when the kernel rejects the opcode
+  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
+  The cost is a timer per call instead of a linked SQE, and only on the
+  fallback path; `send_timeout` caches whether the kernel accepts a
+  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
+  needs is paid once per thread rather than on every call. Found by masking the
+  opcode probe across the integration suite, which now runs under two
+  constrained profiles in `mise run capability-matrix`.
+  ([#19](https://github.com/willmtemple/runite/issues/19))
+
+- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
+  is inherited. It waits for the process-wide stdin reader to release the
+  terminal, and that wait was unbounded — an interrupt frees a reader parked in
+  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
+  on an interactive terminal returns only when the user types. Spawning a child
+  could therefore hang the whole event loop until a keypress. The wait is now
+  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
+  Windows already did, and the caller may retry.
+  ([#28](https://github.com/willmtemple/runite/issues/28))
+
+- `watch::Sender::send` could report success with no receivers. It checked the
+  receiver count under the book lock, released it, then wrote the value, so the
+  last `Receiver` dropping in that window left `send` consuming the value,
+  advancing the version, and returning `Ok(())` — contradicting its documented
+  contract. The check and the write now happen under one book lock. The
+  previous value is moved out rather than assigned over, so `T::drop` runs
+  after both locks are released: dropping it in place would run user code under
+  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
+  ([#26](https://github.com/willmtemple/runite/issues/26))
 
 - `release-verify` no longer passes `--allow-dirty` to `cargo package`
   unconditionally. That flag writes `"dirty": true` into
@@ -439,6 +457,18 @@ changes.
 
 ### Changed
 
+- The public API report now covers what it previously left out. Types
+  re-exported from a private implementation module render as a bare `pub use`,
+  so `docs/public-api.md` listed ten of them — `ThreadHandle`, `JoinHandle`,
+  `CancelOnDrop` and their neighbours — with none of their roughly twenty
+  inherent methods, five of which are new in this release. Those members are
+  now compiled into `xtask api-report`'s contract probe for every target and
+  feature set, which is what makes them gated surface rather than an
+  unwitnessed promise. Auto-trait and derived impls, which the report omitted
+  for readability and therefore could not diff, are rendered into a companion
+  `docs/public-api-traits.md`; the same private-module blind spot applies
+  there, so the auto traits that carry a contract are gated by `trybuild` cases
+  under `tests/ui/` instead.
 - Fixed two intra-doc links on `TcpStream` that pointed at inherent
   `read_exact`/`write_all` methods removed in this release; they now name the
   extension-trait methods.
@@ -529,8 +559,8 @@ changes.
   relied on passing a `Stdio` by copy should construct one per call, and code
   that cloned a `Command` should build it twice or wrap it.
 
-  Note that the public API report does not track derived trait impls, so this
-  change does not appear in `docs/public-api.md`.
+  Derived impls are tracked from 0.3 on, in `docs/public-api-traits.md`; this
+  particular removal predates that file, so it shows up in neither report.
 
 ## [0.2.0] — 2026-07-27
 

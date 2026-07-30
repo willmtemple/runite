@@ -177,6 +177,7 @@ const FORBIDDEN_PACKAGE_PATHS: &[&str] = &[
     "rust-toolchain.toml",
     "SECURITY.md",
     "docs/public-api.md",
+    "docs/public-api-traits.md",
 ];
 
 fn package_version(manifest: &Path) -> Result<String, String> {
