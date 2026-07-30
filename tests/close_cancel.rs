@@ -27,11 +27,20 @@ fn temp_file(label: &str) -> std::path::PathBuf {
     path
 }
 
-/// Whether the calling process still has `raw` open.
-fn is_open(raw: std::os::fd::RawFd) -> bool {
-    // SAFETY: `F_GETFD` only interrogates the descriptor table and writes
-    // nothing. An invalid descriptor is reported as -1, which is the answer.
-    unsafe { libc::fcntl(raw, libc::F_GETFD) != -1 }
+/// Whether `raw` is still open **and still names `path`**.
+///
+/// Asking only whether the number is open would be a race: the tests in this
+/// binary run concurrently, so another thread can be handed the number the
+/// instant it is freed, and the probe would report "still open" about an
+/// entirely different file. Comparing what the descriptor actually points at
+/// answers the question that matters — did *our* file get closed — regardless
+/// of who has the number now.
+fn still_names(raw: std::os::fd::RawFd, path: &std::path::Path) -> bool {
+    match std::fs::read_link(format!("/proc/self/fd/{raw}")) {
+        Ok(target) => target == path,
+        // Closed, so the entry is gone.
+        Err(_) => false,
+    }
 }
 
 /// Abort a task that is mid-close. Before the fix this aborted the process with
@@ -64,6 +73,7 @@ fn a_dropped_close_does_not_close_a_reissued_descriptor() {
     let target = path.clone();
     let victim_path = temp_file("victim");
     let victim_for_task = victim_path.clone();
+    let victim_probe = victim_path.clone();
 
     let victim_survived = block_on(move || async move {
         let file = runite::fs::File::open(&target).await.expect("open");
@@ -99,7 +109,7 @@ fn a_dropped_close_does_not_close_a_reissued_descriptor() {
 
         match victim {
             // We were handed the number back: it must still be ours.
-            Some(file) => is_open(file.as_raw_fd()),
+            Some(file) => still_names(file.as_raw_fd(), &victim_probe),
             // Never reissued within the budget, so there is nothing to check.
             // Not a pass or a failure of the property — report success rather
             // than a false alarm, the other tests still cover the mechanism.
@@ -122,6 +132,7 @@ fn a_never_polled_close_still_closes_exactly_once() {
     let path = temp_file("unpolled");
     let target = path.clone();
 
+    let probe = path.clone();
     let closed = block_on(move || async move {
         let file = runite::fs::File::open(&target).await.expect("open");
         let raw = file.as_raw_fd();
@@ -129,7 +140,7 @@ fn a_never_polled_close_still_closes_exactly_once() {
         for _ in 0..16 {
             runite::yield_now().await;
         }
-        !is_open(raw)
+        !still_names(raw, &probe)
     });
 
     assert!(closed, "an unsubmitted close must still release the file");

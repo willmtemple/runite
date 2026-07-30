@@ -210,7 +210,21 @@ jobs:
                   raise
               if published["yanked"]:
                   raise SystemExit(f"{name}@{version} exists but is yanked; refusing release")
-              local = hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest()
+              # `runite` cannot be packaged in publish shape until its exact
+              # proc-macro dependency is on the registry, so on the ordinary
+              # path its artifact does not exist yet. Reaching here means the
+              # version is already published, which only happens on a rerun --
+              # and a rerun that got far enough to publish `runite` also got
+              # far enough to publish the proc-macro, so the artifact will have
+              # been built by the publish-shape step below. If it somehow was
+              # not, say so rather than crashing on a missing file.
+              path = pathlib.Path(artifact)
+              if not path.exists():
+                  raise SystemExit(
+                      f"{name}@{version} is already published, but {artifact} was not built, "
+                      "so its checksum cannot be compared. Re-run after `xtask publish-shape`."
+                  )
+              local = hashlib.sha256(path.read_bytes()).hexdigest()
               if published["checksum"] != local:
                   message = (
                       f"{name}@{version} exists with checksum {published['checksum']}, "
@@ -310,6 +324,13 @@ jobs:
           done
           echo "Timed out waiting for runite-proc-macros@${version} in the Cargo index" >&2
           exit 1
+      # Only possible now. Packaging `runite` resolves `runite-proc-macros` at
+      # an exact version from the registry, so this cannot run in the pre-flight
+      # gate for a version whose proc-macro has not been published -- which is
+      # every new release. The artifact is what the post-publication checksum
+      # comparison reads.
+      - name: Build runite in publish shape
+        run: cargo run --quiet --package xtask -- publish-shape runite
       - name: Publish runite
         if: steps.published.outputs.runite == 'missing'
         run: cargo publish --locked --package runite

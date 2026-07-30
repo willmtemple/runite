@@ -75,12 +75,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let macro_artifact = artifacts.join(format!("runite-proc-macros-{macro_version}.crate"));
     require_file(&main_artifact)?;
     require_file(&macro_artifact)?;
-    build_publish_shaped_artifacts(
-        &root,
-        &release_dir,
-        allow_dirty,
-        &["runite", "runite-proc-macros"],
-    )?;
+    // Only the proc-macro. See `build_publish_shaped_artifacts`.
+    build_publish_shaped_artifacts(&root, &release_dir, allow_dirty, &["runite-proc-macros"])?;
 
     let unpacked = release_dir.join("unpacked");
     fs::create_dir_all(&unpacked)
@@ -247,6 +243,52 @@ fn package_list(root: &Path, package: &str, allow_dirty: bool) -> Result<BTreeSe
 /// the workspace artifact means comparing a checksum the published crate can
 /// never have, which turns a successful release into a permanently
 /// unpublishable version.
+///
+/// # Not every package can be shaped at every moment
+///
+/// `runite` depends on `runite-proc-macros` at an exact version, so packaging
+/// it in publish shape resolves that version *from the registry*. Before a
+/// release that version does not exist yet, and `cargo package --package
+/// runite` fails with "failed to select a version for the requirement".
+///
+/// So `runite`'s publish-shaped artifact cannot be produced by a pre-flight
+/// gate at all — it only becomes possible once the proc-macro is on crates.io,
+/// which is exactly the ordering the release already follows. The pre-flight
+/// shapes the proc-macro; the workflow shapes `runite` after the proc-macro
+/// publication has landed, via `xtask publish-shape`.
+///
+/// Attempting both here is what the first version of this did, and it made
+/// `release-verify` fail for any version whose proc-macro was unpublished —
+/// that is, every new release.
+/// Produces one package's publish-shaped artifact, for the release workflow to
+/// call once that package's registry dependencies exist.
+///
+/// Separate from `release-verify` because of the ordering described on
+/// [`build_publish_shaped_artifacts`]: `runite` cannot be shaped until
+/// `runite-proc-macros` is published.
+pub(crate) fn publish_shape(args: &[String]) -> Result<(), String> {
+    let mut packages: Vec<&str> = Vec::new();
+    let mut allow_dirty = false;
+    for arg in args {
+        match arg.as_str() {
+            "--allow-dirty" => allow_dirty = true,
+            other if other.starts_with("--") => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => packages.push(other),
+        }
+    }
+    if packages.is_empty() {
+        return Err("usage: xtask publish-shape [--allow-dirty] <package>...".to_owned());
+    }
+
+    let root = crate::command::workspace_root();
+    let release_dir = root.join("target").join("xtask-release");
+    fs::create_dir_all(&release_dir)
+        .map_err(|error| format!("create {}: {error}", release_dir.display()))?;
+    build_publish_shaped_artifacts(&root, &release_dir, allow_dirty, &packages)
+}
+
 fn build_publish_shaped_artifacts(
     root: &Path,
     release_dir: &Path,

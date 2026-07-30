@@ -660,12 +660,16 @@ mod unix_extra {
         remove_socket_file(&cleanup_server);
     }
 
+    /// A Unix socket address is capped at roughly 108 bytes, so these paths
+    /// live in the system temporary directory rather than under `target/`,
+    /// whose depth is not this test's to control. Building them from
+    /// `current_dir()` worked from a checkout near the filesystem root and
+    /// failed with "Unix socket path is too long" as soon as one sat deeper --
+    /// which is exactly what happens when the packaged crate is unpacked for
+    /// release verification. The names are kept short for the same reason.
     fn unique_socket_path(_label: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::current_dir()
-            .expect("current dir")
-            .join("target")
-            .join("nuds");
+        let root = std::env::temp_dir().join("runite-nuds");
         std::fs::create_dir_all(&root).expect("create unix socket test directory");
         root.join(format!(
             "u{}-{}.sock",
