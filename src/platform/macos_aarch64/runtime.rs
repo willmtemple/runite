@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use super::driver::{self, Driver, FdReadinessToken, ProcessExitToken};
 use crate::platform::runtime_shared as shared;
+use crate::platform::runtime_shared::RuntimeConfig;
 
 pub use shared::{
     AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
@@ -29,8 +30,9 @@ pub use shared::{
 pub(crate) struct MacosRuntime;
 
 impl shared::Runtime for MacosRuntime {
-    fn create_driver_pair()
-    -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
+    fn create_driver_pair(
+        _config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
         let (driver, notifier) = driver::create_driver()?;
         Ok((Box::new(driver), Box::new(notifier)))
     }
@@ -109,6 +111,10 @@ where
     Exit: FnOnce() + 'static,
 {
     shared::spawn_worker::<MacosRuntime, Init, Exit>(initial_task, on_exit)
+}
+
+pub fn build_runtime(config: RuntimeConfig) -> io::Result<()> {
+    shared::build_runtime::<MacosRuntime>(config)
 }
 
 pub fn run() {

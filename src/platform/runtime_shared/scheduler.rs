@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
+use super::config::RuntimeConfig;
 use super::driver_backend::{DriverBackend, Notifier};
 use super::future_task::{FutureTask, JoinState, TaskShared, cancel_tasks_for_shutdown};
 use super::handles::{
@@ -24,7 +25,8 @@ use super::handles::{
 use super::state::{
     ChildWorker, IntervalEntry, MacroTask, RuntimeCounters, ThreadShared, WorkerCompletion,
     describe_panic, install_thread, lock_queue, thread_teardown_guard, try_ensure_current_thread,
-    try_with_installed_thread, with_current_thread, with_installed_thread,
+    try_install_configured_thread, try_with_installed_thread, with_current_thread,
+    with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
 use super::{IntervalCallback, LocalTask, MICROTASK_STARVATION_THRESHOLD};
@@ -43,7 +45,9 @@ use crate::trace_targets;
 /// threads**.
 #[doc(hidden)]
 pub trait Runtime: 'static {
-    fn create_driver_pair() -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)>;
+    fn create_driver_pair(
+        config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)>;
     fn monotonic_now() -> io::Result<Duration>;
 
     fn spawn_worker_thread(task: super::SendTask) -> io::Result<std::thread::JoinHandle<()>> {
@@ -322,6 +326,10 @@ where
 /// `initial_task` is queued onto the worker as its first macrotask.
 /// `on_exit` runs on the parent runtime thread after the worker shuts down.
 ///
+/// The worker inherits the spawning thread's [`RuntimeConfig`]. A thread that
+/// has not been configured through [`crate::Builder`] passes on the defaults,
+/// which is what it is running with itself.
+///
 /// # Panics
 ///
 /// Panics if the worker thread, its non-runtime reaper, or its driver cannot be
@@ -336,7 +344,14 @@ where
         event = "spawn_worker",
         "spawning runtime worker thread"
     );
-    let (driver, notifier) = R::create_driver_pair().expect("worker driver should initialize");
+    // Read the parent's configuration without forcing its runtime to exist:
+    // the parent is installed a few lines below anyway, and installing it here
+    // would reorder driver creation between parent and child.
+    let config = try_with_installed_thread(|state| {
+        state.map_or_else(RuntimeConfig::default, |state| state.config)
+    });
+    let (driver, notifier) =
+        R::create_driver_pair(config).expect("worker driver should initialize");
     let shared = Arc::new(ThreadShared::new(notifier));
     let handle = ThreadHandle {
         shared: Arc::clone(&shared),
@@ -367,7 +382,7 @@ where
     let worker_thread = R::spawn_worker_thread(Box::new(move || {
         let teardown = thread_teardown_guard();
         let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            install_thread(shared, driver, Some(Arc::clone(&worker_completion)));
+            install_thread(shared, driver, Some(Arc::clone(&worker_completion)), config);
         }));
         let mut outcome = match setup {
             Ok(()) => {
@@ -639,6 +654,15 @@ pub fn run_ready_tasks<R: Runtime>() {
 pub fn block_on<R: Runtime, F: Future>(future: F) -> F::Output {
     with_current_thread::<R, _>(|_| {});
     block_on_installed::<R, F>(future)
+}
+
+/// Validates `config` and installs the current thread's runtime from it.
+///
+/// Backs [`crate::Builder::build`]; see that method for the contract this
+/// reports through `io::Result`.
+pub fn build_runtime<R: Runtime>(config: RuntimeConfig) -> io::Result<()> {
+    config.validate()?;
+    try_install_configured_thread::<R>(config)
 }
 
 /// Fallible counterpart to [`block_on`]: reports driver-creation failure rather

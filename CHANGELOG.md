@@ -65,6 +65,29 @@ changes.
   a synchronous path, or choose its own exit status. Only startup is fallible:
   an error produced by the future is returned inside `Ok`.
   ([#40](https://github.com/willmtemple/runite/issues/40))
+- `Builder`, which starts the calling thread's runtime explicitly rather than
+  as a side effect of the first entry point to be called, and returns the
+  driver's error instead of panicking on it. `build()` yields a `Runtime`: a
+  `!Send` token, not an owner, since a runtime *is* the thread's state — the
+  free functions keep working alongside it, dropping it shuts nothing down, and
+  its methods are the loop entry points minus their startup panic. A runtime
+  can only be configured by the call that creates it, so `build()` on a thread
+  that already has one reports `ErrorKind::AlreadyExists` rather than accepting
+  settings it cannot apply.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+- `runite::os::linux::BuilderExt::ring_entries` sets the io_uring
+  submission-queue size, default 256. Shrinking it is what lets a runite
+  program start alongside something else drawing on `RLIMIT_MEMLOCK` — a
+  profiler charges its sample buffers to the same budget, which is why
+  `perf record` could make startup fail outright. It is a Linux extension
+  rather than a portable `Builder` method because kqueue and IOCP have no
+  equivalent, and a knob that does nothing on two of three platforms is a bug
+  that only surfaces on the platform nobody tested. Worker threads inherit it,
+  transitively, since the budget is per process. A size the kernel would not
+  use verbatim — not a power of two, or outside `2..=32768` — is an error
+  rather than being rounded up or clamped in silence, because a ring sized
+  against a memory budget must not quietly come back bigger.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
 - `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
   iteration of the event loop, readable from a task poll or a microtask
   callback and `None` outside a turn. A consumer with its own diagnostics

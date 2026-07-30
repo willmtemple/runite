@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1058 | 1072 | 1101 | 1115 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1150 | 1170 | 1193 | 1213 | 174 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1150 | 1170 | 1193 | 1213 | 174 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1145 | 1165 | 1188 | 1208 | 169 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1048 | 1062 | 1091 | 1105 | 72 |
 
-Portable default items: **986**
+Portable default items: **976**
 
 ## Compile-checked handle contract
 
@@ -25,19 +25,23 @@ Portable default items: **986**
 - `WorkerJoinError::{is_setup_panicked, is_runtime_panicked}`
 - `JoinHandle::{abort, is_finished, abort_handle}` and `AbortHandle::{abort, is_finished}`
 - `TimeoutHandle::cancel` and `IntervalHandle::cancel`
+- `Builder`/`Runtime` construction and every loop entry point on them, plus `os::linux::BuilderExt` reached through a `Builder` on Linux
 - Windows handle/socket adoption traits and `os::windows::fs`/`signal::windows` APIs
 
 ## Portable default surface
 
-Items: **986**
+Items: **976**
 
 ### `runite`
 
 ```rust
 #[non_exhaustive] pub enum runite::JoinError
 impl core::error::Error for runite::JoinError
+impl core::fmt::Debug for runite::Runtime
 impl core::fmt::Display for runite::JoinError
+impl runite::Builder
 impl runite::JoinError
+impl runite::Runtime
 pub fn &mut S::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 pub fn &mut S::size_hint(&self) -> (usize, core::option::Option<usize>)
 pub fn &mut T::consume(core::pin::Pin<&mut Self>, usize)
@@ -67,20 +71,25 @@ pub fn core::pin::Pin<P>::poll_read_vectored(core::pin::Pin<&mut Self>, &mut cor
 pub fn core::pin::Pin<P>::poll_seek(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, std::io::SeekFrom) -> core::task::poll::Poll<core::io::error::Result<u64>>
 pub fn core::pin::Pin<P>::poll_write(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[u8]) -> core::task::poll::Poll<core::io::error::Result<usize>>
 pub fn core::pin::Pin<P>::poll_write_vectored(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>, &[core::io::io_slice::IoSlice<'_>]) -> core::task::poll::Poll<core::io::error::Result<usize>>
+pub fn runite::Builder::build(self) -> core::io::error::Result<runite::Runtime>
+pub fn runite::Builder::new() -> Self
 pub fn runite::JoinError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::JoinError::is_aborted(&self) -> bool
 pub fn runite::JoinError::is_cancelled(&self) -> bool
 pub fn runite::JoinError::is_panicked(&self) -> bool
+pub fn runite::Runtime::block_on<F>(&self, F) -> <F as core::future::future::Future>::Output where F: core::future::future::Future
+pub fn runite::Runtime::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn runite::Runtime::run(&self)
+pub fn runite::Runtime::run_ready_tasks(&self)
+pub fn runite::Runtime::run_until_stalled(&self)
 pub fn runite::block_on<F>(F) -> <F as core::future::future::Future>::Output where F: core::future::future::Future
 pub fn runite::current_thread_handle() -> ThreadHandle
 pub fn runite::current_turn() -> core::option::Option<TurnId>
-pub fn runite::on_shutdown<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::queue_macrotask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::queue_microtask<F>(F) where F: core::ops::function::FnOnce() + 'static
 pub fn runite::run()
 pub fn runite::run_ready_tasks()
 pub fn runite::run_until_stalled()
-pub fn runite::shutdown()
 pub fn runite::spawn<F>(F) -> JoinHandle<<F as core::future::future::Future>::Output> where F: core::future::future::Future + 'static, <F as core::future::future::Future>::Output: 'static
 pub fn runite::spawn_blocking<F, R>(F) -> core::io::error::Result<runite::task::BlockingJoinHandle<R>> where F: core::ops::function::FnOnce() -> R + core::marker::Send + 'static, R: core::marker::Send + 'static
 pub fn runite::spawn_worker<Init, Exit>(Init, Exit) -> WorkerHandle where Init: core::ops::function::FnOnce() + core::marker::Send + 'static, Exit: core::ops::function::FnOnce() + 'static
@@ -96,6 +105,8 @@ pub runite::JoinError::Aborted
 pub runite::JoinError::Cancelled
 pub runite::JoinError::Panicked
 pub struct runite::BlockingJoinHandle<R: core::marker::Send + 'static>
+pub struct runite::Builder
+pub struct runite::Runtime
 pub struct runite::Stderr
 pub struct runite::Stdin
 pub struct runite::Stdout
@@ -317,7 +328,6 @@ impl runite::fs::Metadata
 impl runite::fs::OpenOptions
 impl runite::fs::ReadDir
 pub async fn runite::fs::DirEntry::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
-pub async fn runite::fs::File::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::fs::File::create(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::fs::File::metadata(&self) -> core::io::error::Result<runite::fs::Metadata>
 pub async fn runite::fs::File::open(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
@@ -384,7 +394,6 @@ pub type runite::fs::ReadDir::Item = core::result::Result<runite::fs::DirEntry, 
 ### `runite::io`
 
 ```rust
-#[non_exhaustive] pub enum runite::io::CloseOutcome
 impl runite::io::AsyncRead for runite::fs::File
 impl runite::io::AsyncRead for runite::net::OwnedReadHalf
 impl runite::io::AsyncRead for runite::net::TcpStream
@@ -605,8 +614,6 @@ pub fn runite::io::WriteVectored<'a, 'buf, W>::fmt(&self, &mut core::fmt::Format
 pub fn runite::io::copy<'a, R, W>(&'a mut R, &'a mut W) -> runite::io::Copy<'a, R, W> where R: runite::io::AsyncRead + ?core::marker::Sized, W: runite::io::AsyncWrite + ?core::marker::Sized
 pub fn runite::io::copy_bidirectional<'a, A, B>(&'a mut A, &'a mut B) -> runite::io::CopyBidirectional<'a, A, B> where A: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized, B: runite::io::AsyncRead + runite::io::AsyncWrite + core::marker::Unpin + ?core::marker::Sized
 pub mod runite::io
-pub runite::io::CloseOutcome::Closed
-pub runite::io::CloseOutcome::StillShared
 pub struct runite::io::BufReader<R>
 pub struct runite::io::BufWriter<W>
 pub struct runite::io::Close<'a, W: ?core::marker::Sized>
@@ -670,36 +677,23 @@ pub use runite::io::SeekFrom
 ```rust
 #[non_exhaustive] pub struct runite::metrics::Counters
 #[non_exhaustive] pub struct runite::metrics::Gauges
-#[non_exhaustive] pub struct runite::metrics::Peaks
 #[non_exhaustive] pub struct runite::metrics::Snapshot
 pub fn runite::metrics::snapshot() -> runite::metrics::Snapshot
 pub mod runite::metrics
-pub runite::metrics::Counters::coalesced_wakes: u64
 pub runite::metrics::Counters::macrotasks_run: u64
-pub runite::metrics::Counters::microtask_bound_turns: u64
 pub runite::metrics::Counters::microtasks_run: u64
-pub runite::metrics::Counters::operations_completed: u64
 pub runite::metrics::Counters::remote_tasks_rejected: u64
 pub runite::metrics::Counters::task_polls: u64
 pub runite::metrics::Counters::task_wakes: u64
-pub runite::metrics::Counters::tasks_cancelled: u64
 pub runite::metrics::Counters::turns: u64
 pub runite::metrics::Gauges::armed_timers: usize
 pub runite::metrics::Gauges::live_tasks: usize
 pub runite::metrics::Gauges::local_macrotask_queue_depth: usize
 pub runite::metrics::Gauges::microtask_queue_depth: usize
 pub runite::metrics::Gauges::outstanding_operations: usize
-pub runite::metrics::Gauges::ready_tasks: usize
 pub runite::metrics::Gauges::remote_macrotask_queue_depth: usize
-pub runite::metrics::Peaks::armed_timers: usize
-pub runite::metrics::Peaks::live_tasks: usize
-pub runite::metrics::Peaks::local_macrotask_queue_depth: usize
-pub runite::metrics::Peaks::microtask_queue_depth: usize
-pub runite::metrics::Peaks::outstanding_operations: usize
-pub runite::metrics::Peaks::ready_tasks: usize
 pub runite::metrics::Snapshot::counters: runite::metrics::Counters
 pub runite::metrics::Snapshot::gauges: runite::metrics::Gauges
-pub runite::metrics::Snapshot::peaks: runite::metrics::Peaks
 ```
 
 ### `runite::net`
@@ -719,15 +713,12 @@ impl runite::net::UdpSocket
 pub async fn runite::net::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
 pub async fn runite::net::TcpListener::accept(&self) -> core::io::error::Result<(runite::net::TcpStream, core::net::socket_addr::SocketAddr)>
 pub async fn runite::net::TcpListener::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub async fn runite::net::TcpListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::TcpSocket::connect(self, core::net::socket_addr::SocketAddr) -> core::io::error::Result<runite::net::TcpStream>
-pub async fn runite::net::TcpStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::TcpStream::connect<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::TcpStream::connect_timeout(&core::net::socket_addr::SocketAddr, core::time::Duration) -> core::io::error::Result<Self>
 pub async fn runite::net::TcpStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub async fn runite::net::TcpStream::try_clone(&self) -> core::io::error::Result<Self>
 pub async fn runite::net::UdpSocket::bind<A>(A) -> core::io::error::Result<Self> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
-pub async fn runite::net::UdpSocket::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::UdpSocket::connect<A>(&self, A) -> core::io::error::Result<()> where A: std::net::socket_addr::ToSocketAddrs + core::marker::Send + 'static
 pub async fn runite::net::UdpSocket::peek(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::UdpSocket::peek_from(&self, &mut [u8]) -> core::io::error::Result<(usize, core::net::socket_addr::SocketAddr)>
@@ -1104,20 +1095,21 @@ pub type runite::time::Sleep::Output = ()
 
 ## Linux x86_64 default target delta (`x86_64-unknown-linux-gnu`)
 
-Items: **177**
+Items: **174**
+
+### `runite`
+
+```rust
+pub fn runite::Builder::ring_entries(self, u32) -> Self
+```
 
 ### `runite::fd`
 
 ```rust
-#[non_exhaustive] pub enum runite::fd::Drain
-impl runite::fd::Drain
-pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<runite::fd::Drain>
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
-pub fn runite::fd::Drain::is_end_of_input(self) -> bool
 pub mod runite::fd
-pub runite::fd::Drain::EndOfInput
-pub runite::fd::Drain::Stopped
 ```
 
 ### `runite::fs`
@@ -1202,15 +1194,12 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
-pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
-pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1270,6 +1259,15 @@ pub type runite::net::unix::Incoming::Item = core::result::Result<runite::net::u
 pub type runite::net::unix::UnixDatagram::Error = core::io::error::Error
 pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
+```
+
+### `runite::os::linux`
+
+```rust
+impl runite::os::linux::BuilderExt for runite::Builder
+pub fn runite::os::linux::BuilderExt::ring_entries(self, u32) -> Self
+pub mod runite::os::linux
+pub trait runite::os::linux::BuilderExt
 ```
 
 ### `runite::os::unix`
@@ -1330,20 +1328,21 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## Linux aarch64 default target delta (`aarch64-unknown-linux-gnu`)
 
-Items: **177**
+Items: **174**
+
+### `runite`
+
+```rust
+pub fn runite::Builder::ring_entries(self, u32) -> Self
+```
 
 ### `runite::fd`
 
 ```rust
-#[non_exhaustive] pub enum runite::fd::Drain
-impl runite::fd::Drain
-pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<runite::fd::Drain>
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
-pub fn runite::fd::Drain::is_end_of_input(self) -> bool
 pub mod runite::fd
-pub runite::fd::Drain::EndOfInput
-pub runite::fd::Drain::Stopped
 ```
 
 ### `runite::fs`
@@ -1428,15 +1427,12 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
-pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
-pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1498,6 +1494,15 @@ pub type runite::net::unix::UnixListener::Error = core::io::error::Error
 pub type runite::net::unix::UnixStream::Error = core::io::error::Error
 ```
 
+### `runite::os::linux`
+
+```rust
+impl runite::os::linux::BuilderExt for runite::Builder
+pub fn runite::os::linux::BuilderExt::ring_entries(self, u32) -> Self
+pub mod runite::os::linux
+pub trait runite::os::linux::BuilderExt
+```
+
 ### `runite::os::unix`
 
 ```rust
@@ -1556,20 +1561,15 @@ pub type runite::signal::unix::Signals::Item = runite::signal::unix::SignalKind
 
 ## macOS aarch64 default target delta (`aarch64-apple-darwin`)
 
-Items: **177**
+Items: **169**
 
 ### `runite::fd`
 
 ```rust
-#[non_exhaustive] pub enum runite::fd::Drain
-impl runite::fd::Drain
-pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<runite::fd::Drain>
+pub async fn runite::fd::read_chunks<Fd: std::os::fd::owned::AsFd>(&Fd, &mut [u8], impl core::ops::function::FnMut(&[u8]) -> core::ops::control_flow::ControlFlow<()>) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_readable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
 pub async fn runite::fd::wait_writable<Fd: std::os::fd::owned::AsFd>(Fd) -> core::io::error::Result<()>
-pub fn runite::fd::Drain::is_end_of_input(self) -> bool
 pub mod runite::fd
-pub runite::fd::Drain::EndOfInput
-pub runite::fd::Drain::Stopped
 ```
 
 ### `runite::fs`
@@ -1654,15 +1654,12 @@ impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixDatagram
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixListener
 impl std::os::fd::raw::AsRawFd for runite::net::unix::UnixStream
 pub async fn runite::net::unix::OwnedWriteHalf::shutdown(&self) -> core::io::error::Result<()>
-pub async fn runite::net::unix::UnixDatagram::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixDatagram::connect(&self, impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<()>
 pub async fn runite::net::unix::UnixDatagram::recv(&self, &mut [u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::recv_from(&self, &mut [u8]) -> core::io::error::Result<(usize, std::os::unix::net::addr::SocketAddr)>
 pub async fn runite::net::unix::UnixDatagram::send(&self, &[u8]) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixDatagram::send_to(&self, &[u8], impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<usize>
 pub async fn runite::net::unix::UnixListener::accept(&self) -> core::io::error::Result<(runite::net::unix::UnixStream, std::os::unix::net::addr::SocketAddr)>
-pub async fn runite::net::unix::UnixListener::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
-pub async fn runite::net::unix::UnixStream::close_descriptor(self) -> core::io::error::Result<runite::io::CloseOutcome>
 pub async fn runite::net::unix::UnixStream::connect(impl core::convert::AsRef<std::path::Path>) -> core::io::error::Result<Self>
 pub async fn runite::net::unix::UnixStream::shutdown(&self, std::net::Shutdown) -> core::io::error::Result<()>
 pub fn runite::net::unix::Incoming::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result

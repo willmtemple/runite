@@ -96,9 +96,22 @@
 //! assert_eq!(total.get(), 6);
 //! ```
 //!
+//! Both of those start the thread's runtime as a side effect and panic if the
+//! machine will not have one. [`Builder`] makes that step explicit and
+//! recoverable, and is where a platform's tuning knobs are reached:
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> {
+//! let runtime = runite::Builder::new().build()?;
+//! runtime.run();
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Where to look next
 //!
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
+//! - [`Builder`] and [`Runtime`] for configured, fallible startup
 //! - [`run`], [`queue_macrotask`], [`queue_microtask`], and [`spawn`] for
 //!   driving and feeding the event loop
 //! - [`spawn_worker`], [`WorkerHandle`], and [`ThreadHandle`] for multi-threaded work
@@ -207,6 +220,12 @@ pub(crate) mod trace_targets {
     pub const SIGNAL: &str = "runite::signal";
 }
 
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
+mod builder;
 pub mod channel;
 #[cfg(unix)]
 pub mod fd;
@@ -234,6 +253,14 @@ mod logic_safety_tests;
 pub mod macros;
 
 pub use runite_proc_macros::{main, test};
+
+// Explicit runtime construction; documentation lives at the definition site.
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
+pub use builder::{Builder, Runtime};
 
 #[cfg(any(
     target_os = "linux",
@@ -382,6 +409,10 @@ mod runtime_api {
     /// worker teardown with [`WorkerHandle::join`]. This is the building block
     /// for scaling across cores: start one worker per core. See the crate's
     /// architecture guide.
+    ///
+    /// The worker's runtime inherits the spawning thread's [`Builder`](crate::Builder)
+    /// configuration, transitively, so a process that trimmed its I/O backend
+    /// to fit a resource limit does not undo that with every worker it starts.
     ///
     /// # Panics
     ///
@@ -534,6 +565,9 @@ mod runtime_api {
     ///
     /// Only startup is fallible here. An error produced *by* the future is the
     /// future's own and is returned inside `Ok`.
+    ///
+    /// [`Builder`](crate::Builder) is the same recovery story with configuration
+    /// attached, and separates starting the runtime from driving it.
     ///
     /// # Panics
     ///

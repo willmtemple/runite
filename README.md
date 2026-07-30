@@ -93,10 +93,30 @@ fn main() {
 }
 ```
 
+Both of those start the thread's runtime implicitly and panic if it cannot be
+started. `Builder` makes startup explicit, returns the failure instead, and is
+where a platform's tuning lives:
+
+```rust
+// `ring_entries` is Linux-only and needs the extension trait in scope; the
+// portable `Builder::new().build()` is the same call without it.
+use runite::os::linux::BuilderExt;
+
+fn main() -> std::io::Result<()> {
+    // 32 io_uring submission entries instead of the default 256, to leave
+    // locked memory for a profiler attached to the same process.
+    let runtime = runite::Builder::new().ring_entries(32).build()?;
+    runtime.run();
+    Ok(())
+}
+```
+
 ## What you get
 
 - **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`),
-  `#[runite::test]`, and `block_on` for driving one future to completion.
+  `#[runite::test]`, `block_on` for driving one future to completion, and
+  `try_block_on`/`Builder::build` when a startup failure should be reported
+  rather than raised.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
   `queue_microtask`, `spawn`, `yield_now`, and `current_turn` for a key that joins
   your own diagnostics to the loop iteration that produced them.

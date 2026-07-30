@@ -209,6 +209,48 @@ application's fault, and neither is something a backtrace helps with.
 Only startup is fallible. An error from your own future comes back inside
 `Ok`.
 
+### The runtime can be configured before it starts
+
+`Builder` separates starting the thread's runtime from driving it, with the
+same reportable boundary:
+
+```rust
+fn main() -> std::io::Result<()> {
+    let runtime = runite::Builder::new().build()?;
+    runtime.run();
+    Ok(())
+}
+```
+
+The `Runtime` it returns is a token for *this thread's* event loop, not an
+object that owns one — `runite::spawn` and friends go on working next to it,
+and dropping it shuts nothing down. Because a runtime is configured by the call
+that creates it, `build()` has to be the thread's first runtime call:
+afterwards it reports `ErrorKind::AlreadyExists` rather than silently ignoring
+your settings.
+
+The reason to want it is tuning. On Linux:
+
+```rust
+use runite::os::linux::BuilderExt;
+
+fn main() -> std::io::Result<()> {
+    let runtime = runite::Builder::new().ring_entries(32).build()?;
+    runtime.run();
+    Ok(())
+}
+```
+
+`ring_entries` is the io_uring submission-queue size, 256 by default. Lowering
+it is the fix for the `QuotaExceeded` startup failure above when you cannot
+raise `RLIMIT_MEMLOCK`: it shrinks what the runtime pins so a profiler in the
+same process still fits. Workers inherit it, and a size the kernel would round
+up or clamp is rejected rather than quietly adjusted.
+
+It lives on `os::linux::BuilderExt` rather than on `Builder` because kqueue and
+IOCP have no ring to size, and a portable method that did nothing on two of the
+three platforms would be worse than one you cannot call there at all.
+
 ### A key that joins your diagnostics to the runtime's
 
 `runite::current_turn()` returns a `TurnId` for the event-loop iteration

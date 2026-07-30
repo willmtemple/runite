@@ -67,6 +67,44 @@ pub(crate) const IORING_TIMEOUT_ABS: u32 = 1 << 0;
 pub(crate) const IOSQE_IO_LINK: u8 = 1 << 2;
 pub(crate) const IOSQE_CQE_SKIP_SUCCESS: u8 = 1 << 6;
 
+/// Submission-queue entries a runtime thread's ring gets when nothing asks for
+/// something else. Large enough that a burst of concurrent operations is
+/// submitted in one `io_uring_enter`, small enough that one ring per runtime
+/// thread stays well inside a default `RLIMIT_MEMLOCK`.
+pub(crate) const DEFAULT_RING_ENTRIES: u32 = 256;
+
+/// The smallest ring the runtime can operate. An operation submitted with a
+/// linked timeout is two SQEs published atomically, and `submit_pending`
+/// rejects a batch larger than the ring rather than tearing it apart.
+pub(crate) const MIN_RING_ENTRIES: u32 = 2;
+
+/// `IORING_MAX_ENTRIES`. The runtime always sets `IORING_SETUP_CLAMP`, so the
+/// kernel would silently reduce anything larger instead of failing.
+pub(crate) const MAX_RING_ENTRIES: u32 = 32_768;
+
+/// Rejects a submission-queue size the kernel would not use verbatim.
+///
+/// `io_uring_setup(2)` rounds its `entries` argument up to a power of two, and
+/// with `IORING_SETUP_CLAMP` it also caps it at [`MAX_RING_ENTRIES`] — both
+/// silently. Accepting those values would hand back a ring larger than the one
+/// that was asked for, and the reason to ask for a specific size in the first
+/// place is a locked-memory budget that something else in the process is also
+/// drawing on. Getting quietly more than requested is precisely the failure
+/// this knob exists to avoid, so a value the kernel would adjust is an error
+/// rather than a suggestion.
+pub(crate) fn check_ring_entries(entries: u32) -> io::Result<()> {
+    if !(MIN_RING_ENTRIES..=MAX_RING_ENTRIES).contains(&entries) || !entries.is_power_of_two() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "io_uring ring_entries must be a power of two between {MIN_RING_ENTRIES} and \
+                 {MAX_RING_ENTRIES}, not {entries}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 thread_local! {
     static CURRENT_SUBMITTER: Cell<*const IoUring> = const { Cell::new(ptr::null()) };
 }
@@ -640,6 +678,13 @@ impl IoUring {
 
     pub(crate) fn supported_ops(&self) -> SupportedOps {
         self.supported_ops
+    }
+
+    /// Submission-queue entries the kernel actually allocated, read from the
+    /// mapped ring rather than from what was requested.
+    #[cfg(test)]
+    pub(crate) fn sq_entries(&self) -> u32 {
+        load_u32(self.sq_ring_entries)
     }
 
     pub(crate) fn supports_submit_all(&self) -> bool {

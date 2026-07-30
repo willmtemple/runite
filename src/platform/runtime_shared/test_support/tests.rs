@@ -242,7 +242,7 @@ fn mock_notifier_returns_scripted_failure() {
     control.fail_next_notify(io::ErrorKind::PermissionDenied, "notification denied");
 
     let (driver, notifier) = harness
-        .enter(MockRuntime::create_driver_pair)
+        .enter(|| MockRuntime::create_driver_pair(RuntimeConfig::default()))
         .expect("mock driver should initialize");
     let error = notifier
         .notify()
@@ -267,7 +267,7 @@ fn mock_controller_cancellation_unblocks_waiter() {
     let harness = MockRuntimeHarness::new();
     let control = harness.plan_driver();
     let (driver, _notifier) = harness
-        .enter(MockRuntime::create_driver_pair)
+        .enter(|| MockRuntime::create_driver_pair(RuntimeConfig::default()))
         .expect("mock driver should initialize");
 
     thread::scope(|scope| {
@@ -1565,7 +1565,7 @@ fn mock_driver_dispatches_completions_in_script_order() {
     control.queue_completion("first", move || first.record(1usize));
 
     let (driver, _notifier) = harness
-        .enter(MockRuntime::create_driver_pair)
+        .enter(|| MockRuntime::create_driver_pair(RuntimeConfig::default()))
         .expect("mock driver should initialize");
     assert!(driver.poll().expect("first poll should succeed").is_some());
     assert!(driver.poll().expect("second poll should succeed").is_some());

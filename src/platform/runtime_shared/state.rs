@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use super::config::RuntimeConfig;
 use super::driver_backend::{DriverBackend, Notifier};
 use super::future_task::{FutureTask, cancel_tasks_for_shutdown};
 use super::handles::{QueueError, WorkerJoinError};
@@ -271,6 +272,10 @@ pub(crate) struct ThreadState {
     /// `IntervalHandle` references after the originating state was torn down
     /// (or after a handle is presented to a different runtime thread).
     pub(crate) generation: u64,
+    /// Configuration the driver above was created from. Retained so
+    /// [`spawn_worker`](super::scheduler::spawn_worker) can hand the same
+    /// configuration to the child it creates.
+    pub(crate) config: RuntimeConfig,
 }
 
 impl ThreadState {
@@ -279,6 +284,7 @@ impl ThreadState {
         driver: Box<dyn DriverBackend>,
         worker_completion: Option<Arc<WorkerCompletion>>,
         generation: u64,
+        config: RuntimeConfig,
     ) -> Self {
         Self {
             driver,
@@ -298,6 +304,7 @@ impl ThreadState {
             teardown_panicked: Cell::new(false),
             children: RefCell::new(Vec::new()),
             generation,
+            config,
         }
     }
 
@@ -918,14 +925,38 @@ pub(crate) fn try_ensure_current_thread<R: Runtime>() -> io::Result<()> {
     if !current_thread_ptr().is_null() {
         return Ok(());
     }
+    install_lazy_state::<R>(RuntimeConfig::default())
+}
+
+/// Installs this thread's runtime state from an explicit configuration.
+///
+/// Unlike [`try_ensure_current_thread`] this is *not* idempotent: a thread that
+/// already has a runtime reports [`io::ErrorKind::AlreadyExists`]. The driver
+/// described by `config` was created when the existing state was installed, so
+/// there is nothing left for a second configuration to affect, and quietly
+/// accepting one would be the silently-ignored knob that
+/// [`crate::Builder`] is shaped to prevent.
+pub(crate) fn try_install_configured_thread<R: Runtime>(config: RuntimeConfig) -> io::Result<()> {
+    if !current_thread_ptr().is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "this thread already has a runite runtime; it can only be configured before it starts",
+        ));
+    }
+    install_lazy_state::<R>(config)
+}
+
+fn install_lazy_state<R: Runtime>(config: RuntimeConfig) -> io::Result<()> {
     assert!(
         matches!(thread_phase(), ThreadPhase::Empty),
         "runite: runtime state is unavailable during thread teardown"
     );
-    let (driver, notifier) = R::create_driver_pair()?;
+    let (driver, notifier) = R::create_driver_pair(config)?;
     let shared = Arc::new(ThreadShared::new(notifier));
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    install_owned_state(Box::new(ThreadState::new(shared, driver, None, generation)));
+    install_owned_state(Box::new(ThreadState::new(
+        shared, driver, None, generation, config,
+    )));
     Ok(())
 }
 
@@ -969,6 +1000,7 @@ pub(crate) fn install_thread(
     shared: Arc<ThreadShared>,
     driver: Box<dyn DriverBackend>,
     worker_completion: Option<Arc<WorkerCompletion>>,
+    config: RuntimeConfig,
 ) {
     debug_assert!(
         current_thread_ptr().is_null(),
@@ -984,6 +1016,7 @@ pub(crate) fn install_thread(
         driver,
         worker_completion,
         generation,
+        config,
     )));
 }
 
