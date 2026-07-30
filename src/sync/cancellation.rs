@@ -56,7 +56,15 @@ pub struct CancellationToken {
 
 struct TokenState {
     cancelled: Cell<bool>,
-    wakers: RefCell<Vec<Waker>>,
+    /// Waiters registered by [`CancellationToken::cancelled`], each tagged so
+    /// that a dropped future can find and remove its own. Without the tag a
+    /// `select!` arm — which polls and drops one of these every iteration —
+    /// would leave a `Waker` behind on each pass, growing this vector for the
+    /// life of the token and lengthening every later `cancel`.
+    wakers: RefCell<Vec<(u64, Waker)>>,
+    /// Source of the tags above. Never reused, so a slot freed by one waiter
+    /// cannot be mistaken for another's.
+    next_waiter: Cell<u64>,
     /// Children are held weakly: a token that nobody kept must not be pinned
     /// alive by its parent, and cancelling a parent should not resurrect one.
     children: RefCell<Vec<Weak<TokenState>>>,
@@ -67,6 +75,7 @@ impl TokenState {
         Rc::new(Self {
             cancelled: Cell::new(false),
             wakers: RefCell::new(Vec::new()),
+            next_waiter: Cell::new(0),
             children: RefCell::new(Vec::new()),
         })
     }
@@ -81,7 +90,11 @@ impl TokenState {
         if self.cancelled.replace(true) {
             return;
         }
-        wakers.append(&mut self.wakers.borrow_mut());
+        wakers.extend(
+            std::mem::take(&mut *self.wakers.borrow_mut())
+                .into_iter()
+                .map(|(_, waker)| waker),
+        );
         let children = std::mem::take(&mut *self.children.borrow_mut());
         for child in children {
             if let Some(child) = child.upgrade() {
@@ -172,25 +185,74 @@ impl CancellationToken {
     /// Waits until this token is cancelled.
     ///
     /// Resolves immediately if it already is. Cancel-safe: dropping the
-    /// returned future deregisters nothing that another waiter depends on, and
-    /// a later call observes the same state.
+    /// returned future takes its own registration with it and leaves every
+    /// other waiter untouched, and a later call observes the same state. That
+    /// is what makes the `select!` shape below sustainable — it drops one of
+    /// these on every iteration, and a registration left behind by each would
+    /// grow the token's waiter list for the life of the token.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn example(token: runite::sync::CancellationToken) {
-    /// token.cancelled().await;
+    /// # async fn example(
+    /// #     token: runite::sync::CancellationToken,
+    /// #     mut rx: runite::channel::mpsc::Receiver<u32>,
+    /// # ) {
+    /// loop {
+    ///     runite::select! {
+    ///         _ = token.cancelled() => break,
+    ///         message = rx.recv() => { let _ = message; }
+    ///     }
+    /// }
     /// # }
     /// ```
     pub async fn cancelled(&self) {
-        let mut registered = false;
+        /// Removes this waiter's registration when the future is dropped,
+        /// whether it was dropped mid-wait or after resolving.
+        struct Registration<'state> {
+            state: &'state TokenState,
+            waiter: Option<u64>,
+        }
+
+        impl Drop for Registration<'_> {
+            fn drop(&mut self) {
+                let Some(waiter) = self.waiter else {
+                    return;
+                };
+                let mut wakers = self.state.wakers.borrow_mut();
+                if let Some(index) = wakers.iter().position(|(slot, _)| *slot == waiter) {
+                    wakers.swap_remove(index);
+                }
+            }
+        }
+
+        let mut registration = Registration {
+            state: &self.state,
+            waiter: None,
+        };
         poll_fn(|context| {
             if self.state.cancelled.get() {
                 return Poll::Ready(());
             }
-            if !registered {
-                registered = true;
-                self.state.wakers.borrow_mut().push(context.waker().clone());
+            let mut wakers = self.state.wakers.borrow_mut();
+            match registration.waiter {
+                None => {
+                    let waiter = self.state.next_waiter.get();
+                    self.state.next_waiter.set(waiter + 1);
+                    registration.waiter = Some(waiter);
+                    wakers.push((waiter, context.waker().clone()));
+                }
+                // Re-polled, possibly by a different task than the one that
+                // registered — a `select!` arm re-created each iteration is
+                // exactly that. The stored waker has to be the current one or
+                // the cancellation reaches nobody.
+                Some(waiter) => {
+                    if let Some((_, stored)) = wakers.iter_mut().find(|(slot, _)| *slot == waiter)
+                        && !stored.will_wake(context.waker())
+                    {
+                        *stored = context.waker().clone();
+                    }
+                }
             }
             Poll::Pending
         })
@@ -218,7 +280,12 @@ mod tests {
     use super::CancellationToken;
     use crate::{queue_macrotask, run, spawn};
     use std::cell::Cell;
+    use std::future::Future;
+    use std::pin::pin;
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     #[test]
     fn cancellation_reaches_clones_and_children_but_not_parents() {
@@ -282,6 +349,192 @@ mod tests {
         }
         run();
         assert!(late.get());
+    }
+
+    /// Polling a `cancelled()` future and dropping it is what a `select!` arm
+    /// does on every iteration, so the registration it made has to go with it.
+    /// Retaining them would grow the token's waiter list for the life of the
+    /// token and lengthen every later `cancel`.
+    #[test]
+    fn a_dropped_waiter_leaves_no_registration_behind() {
+        let token = CancellationToken::new();
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        for _ in 0..1_000 {
+            let mut waiting = pin!(token.cancelled());
+            assert_eq!(
+                waiting.as_mut().poll(&mut context),
+                Poll::Pending,
+                "an uncancelled token does not resolve"
+            );
+            assert_eq!(
+                token.state.wakers.borrow().len(),
+                1,
+                "a polled waiter registers exactly once"
+            );
+        }
+
+        assert_eq!(
+            token.state.wakers.borrow().len(),
+            0,
+            "every dropped waiter should have taken its registration with it"
+        );
+    }
+
+    /// Deregistration must take the waiter's own slot and nobody else's: a
+    /// dropped `select!` arm alongside a live waiter must leave that waiter
+    /// registered *and* wakeable, which is the half a length check alone would
+    /// not catch.
+    #[test]
+    fn dropping_one_waiter_leaves_the_others_registered() {
+        struct Counting(AtomicUsize);
+
+        impl Wake for Counting {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let token = CancellationToken::new();
+        let kept = Arc::new(Counting(AtomicUsize::new(0)));
+        let abandoned = Arc::new(Counting(AtomicUsize::new(0)));
+        let kept_waker = Waker::from(Arc::clone(&kept));
+        let abandoned_waker = Waker::from(Arc::clone(&abandoned));
+
+        let mut survivor = pin!(token.cancelled());
+        assert_eq!(
+            survivor
+                .as_mut()
+                .poll(&mut Context::from_waker(&kept_waker)),
+            Poll::Pending
+        );
+        {
+            let mut discarded = pin!(token.cancelled());
+            assert_eq!(
+                discarded
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&abandoned_waker)),
+                Poll::Pending
+            );
+            assert_eq!(token.state.wakers.borrow().len(), 2);
+        }
+        assert_eq!(
+            token.state.wakers.borrow().len(),
+            1,
+            "only the dropped waiter's registration should go"
+        );
+
+        token.cancel();
+        assert_eq!(
+            kept.0.load(Ordering::SeqCst),
+            1,
+            "the surviving waiter must still be woken"
+        );
+        assert_eq!(
+            abandoned.0.load(Ordering::SeqCst),
+            0,
+            "a dropped waiter must not be woken"
+        );
+        assert_eq!(
+            survivor
+                .as_mut()
+                .poll(&mut Context::from_waker(&kept_waker)),
+            Poll::Ready(())
+        );
+    }
+
+    /// A future polled again by a different task must leave the *current*
+    /// waker registered. `select!` re-polls its arms, and a task that moved
+    /// its work between polls would otherwise never be woken.
+    #[test]
+    fn a_repolled_waiter_registers_the_waker_it_was_last_polled_with() {
+        struct Counting(AtomicUsize);
+
+        impl Wake for Counting {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let token = CancellationToken::new();
+        let first = Arc::new(Counting(AtomicUsize::new(0)));
+        let second = Arc::new(Counting(AtomicUsize::new(0)));
+        let first_waker = Waker::from(Arc::clone(&first));
+        let second_waker = Waker::from(Arc::clone(&second));
+
+        let mut waiting = pin!(token.cancelled());
+        assert_eq!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&first_waker)),
+            Poll::Pending
+        );
+        assert_eq!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker)),
+            Poll::Pending
+        );
+        assert_eq!(
+            token.state.wakers.borrow().len(),
+            1,
+            "a re-poll replaces the registration rather than adding one"
+        );
+
+        token.cancel();
+        assert_eq!(
+            second.0.load(Ordering::SeqCst),
+            1,
+            "the current waker wakes"
+        );
+        assert_eq!(
+            first.0.load(Ordering::SeqCst),
+            0,
+            "the waker from the earlier poll is stale and must not be used"
+        );
+    }
+
+    /// A `select!` arm is a fresh `cancelled()` future on every iteration, and
+    /// the task polling it is the same one each time. The registration count
+    /// must not track the number of iterations.
+    #[test]
+    fn a_select_loop_does_not_accumulate_registrations() {
+        let token = CancellationToken::new();
+        let deepest = Rc::new(Cell::new(0usize));
+
+        let (sender, mut receiver) = crate::channel::mpsc::channel::<u32>(4);
+        {
+            let token = token.clone();
+            let deepest = Rc::clone(&deepest);
+            spawn(async move {
+                for _ in 0..64u32 {
+                    crate::select! {
+                        _ = token.cancelled() => break,
+                        message = receiver.recv() => {
+                            if message.is_none() {
+                                break;
+                            }
+                        }
+                    }
+                    deepest.set(deepest.get().max(token.state.wakers.borrow().len()));
+                }
+            });
+        }
+
+        spawn(async move {
+            for value in 0..64u32 {
+                sender.send(value).await.expect("receiver is alive");
+            }
+        });
+        run();
+
+        assert_eq!(
+            deepest.get(),
+            0,
+            "each iteration's arm should deregister before the next one registers"
+        );
+        assert_eq!(token.state.wakers.borrow().len(), 0);
     }
 
     /// Cancelling runs user wakers, and those may touch the same token. The
