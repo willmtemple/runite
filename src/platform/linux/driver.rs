@@ -905,6 +905,16 @@ impl Drop for Driver {
         drop(self.take_notifier_target());
         let shutdown_error = match self.quiesce_operations() {
             Ok(()) => {
+                // Releasing the ring is only safe once no operation can still
+                // reach callback-owned storage, and `IoUring::drop` does not
+                // establish that — closing the ring fd queues the kernel's
+                // teardown rather than waiting for it. `quiesce_operations`
+                // returns `Ok` only after every completion has been reaped, so
+                // this is the whole of the argument.
+                debug_assert!(
+                    self.completions.borrow().is_empty(),
+                    "quiesce_operations reported success with completions outstanding"
+                );
                 if let Some(ring) = self.ring.get_mut().take() {
                     drop(ring);
                 }
