@@ -1,10 +1,10 @@
-# Windows backend — 0.2 design
+# Windows backend design
 
 *This document describes the design of the Windows backend: an IOCP-based driver plus a
 `sys/windows` operation backend. It parallels the Linux (`io_uring`) and macOS (`kqueue` +
-blocking offload) backends described in `ARCHITECTURE.md`. Applications
-upgrading resource-adoption code should also read the
-[0.1 → 0.2 migration guide](MIGRATING-0.2.md).*
+blocking offload) backends described in `ARCHITECTURE.md`. Applications upgrading should also
+read the migration guides: [0.1 → 0.2](MIGRATING-0.2.md) for resource adoption, and
+[0.2 → 0.3](MIGRATING-0.3.md) for the rest.*
 
 ## Why IOCP (and not readiness emulation or IoRing)
 
@@ -128,9 +128,12 @@ Every low-level `CompletionFuture` registers a cancel callback that calls
 completion runs the callback:
 
 - If the op is still in flight it completes with `ERROR_OPERATION_ABORTED`; the packet
-  still arrives and frees the context — this is the IOCP analogue of Linux's
-  `pending_cancel_buffers` guard map, but the port gives it to us for free because *every*
-  submitted op produces exactly one packet.
+  still arrives and frees the context. Linux reaches the same invariant by holding the
+  operation's completion callback until the *original* op's terminal CQE — never the cancel's
+  own, because `IORING_OP_ASYNC_CANCEL` can report `-EALREADY` and the target may still be
+  writing. The port gives it to us structurally instead: *every* submitted op produces exactly
+  one packet, so there is nothing to keep a cancelled operation's storage alive for beyond the
+  packet that is coming anyway.
 - If the op already completed (packet dequeued, `finished` set), the future's Drop skips
   the cancel callback entirely; dispatch and drop share a thread, so there is no race.
 - Closing a handle with in-flight I/O also cancels it; the packets are still delivered.

@@ -1,22 +1,21 @@
 # Migrating from runite 0.2 to 0.3
 
 runite 0.3 keeps the event-loop-per-thread model and every architectural
-property 0.2 established. What changes is the process API, which grows the
-ability to attach a child to resources the caller already owns — and gives up
-some derived traits to do it.
+property 0.2 established. What it changes is naming and shape: five breaking
+changes, spread across `sync`, `stdio`, `io`, `net::unix` and `process`, that
+remove name collisions and asymmetries the 0.2 API had accumulated. Nothing
+about scheduling, cancellation, or buffer ownership moves.
 
 ```toml
 [dependencies]
 runite = "0.3"
 ```
 
-> **This guide is written as 0.3 is developed** and grows with it. Until 0.3 is
-> released, treat it as the running record of what will need changing rather
-> than a finished document.
-
 ## Required source changes
 
-This section covers changes the compiler will force you to make.
+This section covers changes the compiler will force you to make. The
+[silent behavior changes](#silent-behavior-changes) below produce no diagnostic
+at all and need a deliberate audit.
 
 ### `sync::Permit` is now `sync::SemaphorePermit`
 
@@ -149,10 +148,87 @@ let mut diff = git();
 Note that runite's public API report does not track derived trait impls, so
 this change does not appear in `docs/public-api.md`.
 
+## Silent behavior changes
+
+Nothing below produces a compiler error. Existing code keeps building and
+behaves differently, so these need an explicit audit.
+
+### `tracing` events are now emitted in release builds
+
+Twenty-one steady-state trace sites on `runite::driver`, `runite::runtime`,
+`runite::scheduler`, `runite::timer` and `runite::async` were
+`#[cfg(debug_assertions)]` in 0.2, so a release build emitted no per-turn,
+per-task, per-timer or per-operation event at all. They are unconditional now.
+
+If your release deployment installs a `tracing` subscriber that accepts
+everything, it will start receiving events it has never seen. Two things follow:
+
+- **Filter runite's targets off explicitly if you are not collecting them.**
+  Once anything installs a global default, every event site consults its
+  interest cache. A filter that answers "sometimes" rather than a definite no
+  makes hot sites like `queue_microtask` pay a thread-local read and a virtual
+  call per emission. With no subscriber installed at all, an event costs a
+  relaxed load and a not-taken branch, and its fields are never evaluated.
+- **Queue-wait timing starts when you start collecting.** `macrotask_dequeued`
+  carries `wait_ns`, which needs a clock stamp on every macrotask push; that
+  stamp is taken only while a subscriber is accepting `runite::scheduler` at
+  `TRACE`, so tasks already queued when the subscriber arrives are dequeued
+  without it.
+
+README.md's "Profiling and observability" section documents the full target
+list.
+
+### `watch::Sender::send` reports the receivers it actually had
+
+`send` checked the receiver count, released the book lock, then wrote the value.
+The last `Receiver` dropping in that window left `send` consuming the value,
+advancing the version, and returning `Ok(())` — contradicting its documented
+contract. The check and the write now happen under one lock, so that race
+returns `Err` and the value comes back to you. Code that treated `Ok(())` as
+"nothing to handle" was relying on a bug in the narrow case; code that already
+handled `Err` is unaffected.
+
+### An inherited-stdin spawn can now report `WouldBlock`
+
+`Command::spawn` waits for the process-wide stdin reader to release the
+terminal before handing it to a child. That wait was unbounded: a reader already
+inside `read(2)` on an interactive terminal returns only when the user types, so
+spawning could hang the whole event loop. It is bounded now and reports
+`ErrorKind::WouldBlock` past that point, matching what Windows already did. A
+caller that unwrapped the spawn will panic where it used to hang; retry instead.
+
+### `io_uring` setup reports `QuotaExceeded`, not `OutOfMemory`
+
+Ring setup failing on the locked-memory limit used to surface the raw `ENOMEM`
+as `ErrorKind::OutOfMemory`, which sent the reader to look at free RAM. It is
+`ErrorKind::QuotaExceeded` now, and the message reports the current
+`RLIMIT_MEMLOCK`. Anything matching on `OutOfMemory` to detect this stops
+matching.
+
+### Socket deadlines no longer fail on kernels without the opcode
+
+`recv_timeout`, `send_timeout`, `recv_from_timeout` and
+`connect_stream_timeout` returned `ErrorKind::Unsupported` where their
+deadline-free siblings quietly used the readiness path. They now fall back the
+same way, applying what is left of the deadline through the runtime's timer.
+Code with an `Unsupported` branch for this will find it unreachable.
+
+### New `#[must_use]` warnings
+
+`time::Sleep`, `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`,
+`MutexGuard`, `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and
+`watch::Ref` are now `#[must_use]`. These are warnings rather than errors, but
+they fail a build that denies warnings — and each one they find is a real
+no-op: `sleep(d);` and `let _ = semaphore.acquire().await;` both did nothing and
+compiled silently. `JoinHandle` and `BlockingJoinHandle` are deliberately not
+marked, because dropping a join handle detaches the task on purpose.
+
 ## New capabilities
 
 Nothing here forces a source change; these exist so an application does not
-have to reach outside runite for them.
+have to reach outside runite for them. The
+[changelog](../CHANGELOG.md) is the complete list; this section covers the ones
+worth going out of your way for.
 
 ### A child can be started on a descriptor you own
 
@@ -253,10 +329,13 @@ three platforms would be worse than one you cannot call there at all.
 
 #### Configuring a `#[runite::main]` program
 
-`#[runite::main]` and `#[runite::test]` start the thread's runtime before your
-body runs, so a `Builder` *inside* one arrives too late and reports
-`AlreadyExists`. Give the settings to the attribute instead and it builds the
-runtime it names:
+A `Builder` *inside* an attribute body normally arrives too late and reports
+`AlreadyExists`: an `async` body is already being driven by a runtime, and an
+attribute carrying settings built one before the body ran. (A bare
+`#[runite::main] fn main()` is the one shape where the body precedes the
+runtime, so a `build()` there does succeed and the attribute's trailing `run()`
+drives it — but there is nothing to gain by relying on that.) Give the settings
+to the attribute instead and it builds the runtime it names:
 
 ```rust,ignore
 #[runite::main(ring_entries = 32)]
@@ -368,3 +447,147 @@ takes the status. And a **pid is not a stable identity**: it can be reused once
 the process is reaped, so a pid obtained long ago may name something else.
 Adopting a process that no longer exists fails at `from_pid` rather than
 producing a handle whose `wait` never completes.
+
+### TLS, behind the `rustls` feature
+
+`tls::TlsConnector` and `tls::TlsAcceptor` handshake over anything implementing
+runite's `AsyncRead + AsyncWrite` and hand back a `TlsStream` that is itself
+such a transport, so a `TcpStream`, a Unix socket or a test duplex all work —
+and with the `hyper` feature on too, hyper speaks HTTPS. Before this, reaching
+an `https://` endpoint meant `hyper-rustls`, which depends on `tokio-rustls`
+and drags in a second reactor nothing on this thread ever drives.
+
+Two things to know before enabling it. **The crypto provider is yours to pick:**
+runite depends on `rustls` with no provider feature, so an application that
+enables neither `ring` nor `aws-lc-rs` gets rustls's panic about being unable to
+determine the process-level `CryptoProvider`. And **rustls is re-exported as
+`runite::tls::rustls`** — the public signatures are written in its types, so
+name them through that path rather than a `rustls` dependency of your own that
+cargo may or may not unify.
+
+### Cooperative cancellation a task can observe
+
+`sync::CancellationToken` is cloneable, hierarchical, and `!Send` like the rest
+of `sync`. It complements `AbortHandle` rather than replacing it: an abort is
+done *to* a task at its next suspension point, a token is something a task
+chooses to check, so work that must flush a buffer or release a lock before
+stopping can do so.
+
+```rust
+let token = runite::sync::CancellationToken::new();
+let child = token.child_token();   // cancelled when its parent is, never upward
+
+runite::spawn({
+    let child = child.clone();
+    async move {
+        child.cancelled().await;
+        flush_and_stop();
+    }
+});
+```
+
+### Running code on the way out
+
+`on_shutdown` registers a closure to run when the thread's runtime is torn
+down — before spawned tasks are cancelled and before the driver is destroyed,
+so the hook is handed a runtime that can still do something. It is keyed to
+teardown rather than to an entry point returning, because `run_until_stalled`
+and `run_ready_tasks` return routinely and mean nothing by it.
+
+`shutdown()` performs that teardown on the caller's own stack:
+
+```rust
+runite::run();
+runite::shutdown();   // hooks run here, on this stack
+```
+
+**On Windows this is the only way a hook on an application-owned thread runs at
+all.** Teardown at thread exit happens under the loader lock, where executing
+arbitrary user code or closing a completion port can deadlock process shutdown,
+so runite deliberately does neither. It is worth preferring on Unix too, where
+TLS destructor order would otherwise decide when hooks run relative to the rest
+of the thread's state. Calling it with no runtime installed does nothing, and
+the thread may install a fresh one afterwards.
+
+### Reading the runtime's own numbers
+
+`metrics::snapshot()` returns three separate types, because conflating them is
+the mistake the separation exists to prevent: `Gauges` are levels right now,
+`Counters` are monotonic totals whose useful quantity is a difference, and
+`Peaks` are high-water marks that answer "how bad did this get" after the level
+has fallen back.
+
+```rust
+let before = runite::metrics::snapshot();
+// ... run some work ...
+let after = runite::metrics::snapshot();
+let polls = after.counters.task_polls - before.counters.task_polls;
+```
+
+Reading a snapshot walks nothing and needs no subscriber; a thread with no
+runtime installed reads zeroes rather than panicking. `Peaks` covers the
+thread-local gauges only — there is no peak for
+`remote_macrotask_queue_depth`, because sampling it every turn would take the
+mutex `ThreadHandle::queue_macrotask` contends on; `counters.remote_tasks_rejected`
+answers the same question.
+
+### Closing a descriptor at a point you choose
+
+`close_descriptor` on `File`, `TcpStream`, `TcpListener`, `UdpSocket`,
+`UnixStream`, `UnixListener` and `UnixDatagram` returns
+`io::Result<io::CloseOutcome>`. The point is **ordering**, not error reporting:
+on Linux the close goes through the ring as `IORING_OP_CLOSE`, sequenced behind
+operations already submitted against that descriptor. A `close(2)` from `Drop`
+is not — the kernel keeps the underlying file alive until those finish, but
+frees the descriptor *number* immediately, so a racing `open` elsewhere can be
+handed it. macOS and Windows have no asynchronous close and gain only the
+outcome.
+
+`CloseOutcome::StillShared` is not an error: a split half, a listener's
+`Incoming`, or an in-flight Windows operation can hold the descriptor, and
+nothing leaks because the last holder still closes it. Do not reach for this to
+catch close errors — `close(2)` error reporting is too unreliable to build on,
+which is why `std` has no `File::close` either.
+
+### Draining a raw descriptor, on Unix
+
+`fd::read_chunks` encapsulates the readiness loop `wait_readable` otherwise asks
+every caller to write. `on_chunk` runs for each read as it completes, so chunks
+are delivered *before* the loop parks — a burst ending mid-frame is visible
+immediately rather than at the next write — `Interrupted` retries instead of
+waiting for readiness already reported, and returning `ControlFlow::Break` ends
+the drain. The returned `fd::Drain` says which of the two ended it, so a
+consumer draining a pseudoterminal can tell end of input (the child exited)
+from its own byte budget running out.
+
+### Timers that cancel themselves
+
+`TimeoutHandle::cancel_on_drop` and `IntervalHandle::cancel_on_drop` wrap a
+timer token in a guard that cancels when it leaves scope. The plain handles are
+unchanged — dropping one leaves the timer running, matching
+`setInterval`/`clearInterval` — so this is opt-in. It matters most for
+intervals, where a leaked one keeps the runtime alive and stops `run()` from
+ever returning. `into_inner` releases the timer to a longer-lived owner without
+cancelling it.
+
+### Telling a retryable `spawn_blocking` refusal from a terminal one
+
+`task::is_retryable(&error)` is `true` only for a momentarily full queue and
+`false` for a stopped or uncreatable pool. It takes `io::Error` rather than
+introducing an error type, so `spawn_blocking` stays in `io::Result` and
+composes with the rest of the crate.
+
+### More of the diagnostic identity
+
+Alongside `current_turn()`, `current_runtime_id()` names one thread's event loop
+— process-unique, stable for the loop's life, never reused — and
+`time::monotonic_now()` reads the clock runite arms its own deadlines against,
+so your records and runite's can be correlated without proving two clocks are
+the same one. Its epoch is documented: unspecified origin, so only differences
+mean anything, but every thread in the process and every process on the same
+running system reads the same clock.
+
+`runite::runtime` at `TRACE` also emits one `event = "turn"` record per loop
+iteration — why the loop woke, how long it parked, how long it spent runnable,
+queue depths either side, and what it drained. It costs nothing when nothing is
+collecting. README.md documents the fields.

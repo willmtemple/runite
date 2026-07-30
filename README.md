@@ -105,9 +105,12 @@ fn main() -> std::io::Result<()> {
 ```
 
 A runtime is configured by the call that creates it, so `build()` must be the
-thread's first runtime call — inside a `#[runite::main]` body it reports
-`AlreadyExists`, because the attribute has already started one. Pass the
-settings to the attribute instead:
+thread's first runtime call, which an attribute body normally is not: an
+`async` body is already being driven by one, and an attribute carrying settings
+built one before the body ran, so `build()` there reports `AlreadyExists`. (A
+*bare* `#[runite::main] fn main()` is the exception — its body runs before the
+attribute's trailing `run()` — but nothing is gained by relying on that.) Pass
+the settings to the attribute instead:
 
 ```rust,ignore
 // Linux only: `ring_entries` sizes the io_uring submission queue, which kqueue
@@ -139,9 +142,15 @@ fn main() -> std::io::Result<()> {
   and `#[runite::test]`, either of which can carry the runtime's settings —
   `#[runite::main(ring_entries = 32)]`; `block_on` for driving one future to
   completion; and `try_block_on`/`Builder::build` when a startup failure should
-  be reported rather than raised. The attributes start the runtime before your
-  body runs, so `Builder::build` inside one is refused; it is for a
-  hand-written `fn main`.
+  be reported rather than raised. `Builder` is for a hand-written `fn main`: an
+  attribute body is normally running on a runtime already, so a `build()` there
+  is refused with `AlreadyExists`.
+- **Lifecycle:** `on_shutdown` registers a closure to run when the thread's
+  runtime is torn down — before spawned tasks are cancelled, so it is handed a
+  runtime that can still do something — and `shutdown` performs that teardown on
+  the caller's own stack. On Windows `shutdown` is the only way a hook on an
+  application-owned thread runs at all, because teardown at thread exit happens
+  under the loader lock.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
   `queue_microtask`, `spawn`, `yield_now`, and `current_turn` for a key that joins
   your own diagnostics to the loop iteration that produced them.
@@ -153,13 +162,28 @@ fn main() -> std::io::Result<()> {
   `JoinError::Cancelled` identifies tasks terminalized when `run()` reaches
   quiescence without a scheduler-visible wake source.
 - **Timers:** `time::set_timeout` and `time::set_interval` (each returns a
-  handle with `.cancel()`), plus `time::{sleep, timeout, interval}` where
+  handle with `.cancel()`, or `.cancel_on_drop()` for a guard that cancels when
+  it leaves scope), plus `time::{sleep, timeout, interval}` where
   `time::interval` is the awaitable interval.
 - **I/O:** async `fs`, `net` (TCP/UDP everywhere; Unix-domain sockets on Unix), `stdio`, and crate-local
   `AsyncRead`/`AsyncBufRead`/`AsyncWrite`/`AsyncSeek`/`Stream` traits with vectored
   method surface (scalar-backed today — no backend issues `readv`/`writev` yet) and
   future adapters; TCP split/reunite, listener `incoming()` streams, async
-  stdin/stdout/stderr, and `BufReader`/`BufWriter`.
+  stdin/stdout/stderr, and `BufReader`/`BufWriter`. `close_descriptor` closes a
+  file or socket at a point you choose — on Linux through the ring, so the close
+  is ordered behind operations already submitted against that descriptor, which
+  a `close(2)` from `Drop` is not. On Unix, `fd::read_chunks` drains a raw
+  descriptor through the readiness loop `wait_readable` otherwise asks every
+  caller to write.
+- **TLS:** `tls::{TlsConnector, TlsAcceptor, TlsStream}` behind the optional
+  `rustls` feature, over any runite transport and over `hyper` when that feature
+  is on too. The crypto provider is the application's choice; see the feature
+  table below.
+- **Observability:** `metrics::snapshot()` returns `Gauges` (levels now),
+  `Counters` (monotonic totals) and `Peaks` (high-water marks) for the calling
+  thread, with no subscriber and no allocation; `tracing` events on the targets
+  tabulated under [Profiling and observability](#profiling-and-observability),
+  emitted in release builds as well as debug.
 - **Control flow:** fair-by-default `select!` with `biased;`, branch guards,
   `else`, output patterns, and handlers that can await or leave the surrounding
   control-flow context.
@@ -168,8 +192,12 @@ fn main() -> std::io::Result<()> {
   a Unix `pre_exec` hook runs between fork and exec, and `Child::from_pid` adopts a
   process started elsewhere.
 - **Channels & sync:** `channel::{mpsc, oneshot, broadcast, watch}`,
-  `sync::{Mutex, RwLock, Semaphore, Notify, OnceCell}`.
-- **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool.
+  `sync::{Mutex, RwLock, Semaphore, Notify, OnceCell}`, and
+  `sync::CancellationToken` — cloneable, hierarchical cooperative cancellation
+  that a task chooses to observe, as against `abort`, which is done to it.
+- **Blocking offload:** `spawn_blocking` onto a bounded shared OS-thread pool,
+  with `task::is_retryable` to tell a momentarily full queue from a stopped
+  pool.
 - **Signals:** portable `signal::ctrl_c`, async Unix signal handling (including SIGWINCH
   via `SignalKind::WindowChange`) with `signal::unix::signals` for watching several
   kinds on one stream, and Windows console control events (`signal::windows`).

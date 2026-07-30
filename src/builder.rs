@@ -46,13 +46,18 @@ use crate::platform::runtime_shared::RuntimeConfig;
 ///
 /// # Relationship to the entry-point attributes
 ///
-/// [`#[runite::main]`](macro@crate::main) and
-/// [`#[runite::test]`](macro@crate::test) install the runtime before the
-/// annotated body runs, so a `Builder` inside one is refused with
-/// [`AlreadyExists`](io::ErrorKind::AlreadyExists). Those attributes take the
-/// same settings themselves — `#[runite::main(ring_entries = 32)]` — and a
-/// `Builder` is for a hand-written `fn main` that wants to handle a startup
-/// failure rather than panic on it.
+/// A `Builder` inside a [`#[runite::main]`](macro@crate::main) or
+/// [`#[runite::test]`](macro@crate::test) body is normally refused with
+/// [`AlreadyExists`](io::ErrorKind::AlreadyExists): an `async` body is already
+/// being driven by a runtime, and an attribute carrying settings built one
+/// before the body ran. The one shape where the body precedes the runtime is a
+/// *bare* attribute on a synchronous `fn` — that body runs before the
+/// attribute's trailing [`run`](crate::run) — so a `build()` there succeeds and
+/// the trailing `run` drives what it built. Nothing is gained by relying on
+/// that: those attributes take the same settings themselves —
+/// `#[runite::main(ring_entries = 32)]` — and a `Builder` is for a
+/// hand-written `fn main` that wants to handle a startup failure rather than
+/// panic on it.
 ///
 /// # Relationship to `try_block_on`
 ///

@@ -7,10 +7,10 @@
 //! almost nothing else, and without numbers the only visible fact is a
 //! percentage of a core.
 //!
-//! # Two kinds of number, deliberately two types
+//! # Three kinds of number, deliberately three types
 //!
-//! A [`Snapshot`] carries [`Gauges`] and [`Counters`] separately, because they
-//! answer different questions and are combined differently:
+//! A [`Snapshot`] carries [`Gauges`], [`Counters`] and [`Peaks`] separately,
+//! because they answer different questions and are combined differently:
 //!
 //! - A **gauge** is a level read at an instant — live tasks, queue depth. It
 //!   is meaningful on its own and meaningless to subtract across two
@@ -18,10 +18,10 @@
 //! - A **counter** is monotonic and cumulative — polls, wakes, turns. The
 //!   individual value says little; the *difference* between two snapshots is
 //!   the quantity you want.
-//!
-//! - A **peak** is the highest a gauge has reached. Not a level, and
-//!   differencing two of them is meaningless; it answers "how bad did this
-//!   get", which is the question after an incident.
+//! - A **peak** is the highest a thread-local gauge has reached. Not a level,
+//!   and differencing two of them is meaningless; it answers "how bad did this
+//!   get", which is the question after an incident. [`Peaks`] says why the
+//!   cross-thread queue depth has none.
 //!
 //! Keeping them in one flat struct would invite exactly the mistake of
 //! subtracting a gauge or reading a counter as a level.
@@ -161,7 +161,7 @@ pub struct Counters {
     pub remote_tasks_rejected: u64,
 }
 
-/// Highest value each gauge has reached on this runtime thread.
+/// Highest value each thread-local gauge has reached on this runtime thread.
 ///
 /// A peak is a third kind of number, and conflating it with either of the
 /// others is the mistake this separation exists to prevent. It is not a level
@@ -173,6 +173,14 @@ pub struct Counters {
 /// drains entirely within one turn can therefore be missed; catching that would
 /// mean instrumenting every push, which costs more on the hot path than the
 /// fidelity is worth.
+///
+/// [`Gauges::remote_macrotask_queue_depth`] deliberately has no counterpart
+/// here. Reading it takes the mutex
+/// [`ThreadHandle::queue_macrotask`](crate::ThreadHandle::queue_macrotask)
+/// contends on, and a peak is sampled every turn, so the field would put a lock
+/// acquisition on every iteration of every runite loop. For "how close did the
+/// cross-thread queue get to its bound", use
+/// [`Counters::remote_tasks_rejected`], which counts the sends that reached it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Peaks {
@@ -198,7 +206,7 @@ pub struct Snapshot {
     pub gauges: Gauges,
     /// Totals accumulated since this thread's runtime started.
     pub counters: Counters,
-    /// Worst case each gauge has reached.
+    /// Worst case each thread-local gauge has reached.
     pub peaks: Peaks,
 }
 

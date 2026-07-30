@@ -36,10 +36,14 @@ mod keyword {
 /// # Configuring the runtime
 ///
 /// The bare attribute starts the thread's runtime lazily and with the
-/// defaults, which is also why `runite::Builder::build()` inside the body
-/// fails with [`AlreadyExists`](std::io::ErrorKind::AlreadyExists): the
-/// runtime is already there. Pass the settings to the attribute instead, and
-/// it builds the runtime it names before the body runs:
+/// defaults. In an `async` body that still means the runtime exists before the
+/// body does — `runite::block_on` installs it — so a
+/// `runite::Builder::build()` there fails with
+/// [`AlreadyExists`](std::io::ErrorKind::AlreadyExists). A bare *synchronous*
+/// body is the exception: it runs before the trailing `runite::run()`, so a
+/// `build()` in it succeeds and that `run()` drives what it built. Pass the
+/// settings to the attribute instead, and it builds the runtime it names
+/// before the body runs, in either shape:
 ///
 /// ```ignore
 /// #[runite::main(ring_entries = 32)]

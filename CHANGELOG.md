@@ -199,58 +199,6 @@ changes.
   direction, which is what lets a peer tell the end of a message from a
   truncation — a plain transport shutdown does not.
 
-### Fixed
-
-- Socket read and write deadlines no longer fail outright when the kernel
-  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
-  `recv_from_timeout`, and `connect_stream_timeout` submitted an
-  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
-  quietly switched to the readiness path an identical call carrying a deadline
-  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
-  their deadline-free siblings do, applying what is left of the deadline
-  through the runtime's timer the way the kqueue backend already did — the
-  linked timeout has already been running when the kernel rejects the opcode
-  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
-  The cost is a timer per call instead of a linked SQE, and only on the
-  fallback path; `send_timeout` caches whether the kernel accepts a
-  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
-  needs is paid once per thread rather than on every call. Found by masking the
-  opcode probe across the integration suite, which now runs under two
-  constrained profiles in `mise run capability-matrix`.
-  ([#19](https://github.com/willmtemple/runite/issues/19))
-
-- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
-  is inherited. It waits for the process-wide stdin reader to release the
-  terminal, and that wait was unbounded — an interrupt frees a reader parked in
-  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
-  on an interactive terminal returns only when the user types. Spawning a child
-  could therefore hang the whole event loop until a keypress. The wait is now
-  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
-  Windows already did, and the caller may retry.
-  ([#28](https://github.com/willmtemple/runite/issues/28))
-
-- `watch::Sender::send` could report success with no receivers. It checked the
-  receiver count under the book lock, released it, then wrote the value, so the
-  last `Receiver` dropping in that window left `send` consuming the value,
-  advancing the version, and returning `Ok(())` — contradicting its documented
-  contract. The check and the write now happen under one book lock. The
-  previous value is moved out rather than assigned over, so `T::drop` runs
-  after both locks are released: dropping it in place would run user code under
-  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
-  ([#26](https://github.com/willmtemple/runite/issues/26))
-
-- `Debug` on the 67 public types that lacked it, and
-  `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
-  cannot reopen. Coverage was inconsistent within single modules —
-  `fs::Metadata` and `DirEntry` derived it while `File`, `OpenOptions` and
-  `ReadDir` did not; every channel error derived it while no channel `Sender`
-  or `Receiver` did — which poisoned `#[derive(Debug)]` on any downstream type
-  holding one. The impls are deliberately opaque
-  (`debug_struct(..).finish_non_exhaustive()`): most of these are futures and
-  guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
-  on type parameters that frequently cannot have it.
-  ([#31](https://github.com/willmtemple/runite/issues/31))
-
 - `fd::read_chunks`, which encapsulates the readiness loop that `wait_readable`
   otherwise asks every caller to write. The loop carries three pieces of
   load-bearing knowledge the raw API does not express, each a bug when missed
@@ -325,8 +273,15 @@ changes.
   coalesced wakes, microtasks and macrotasks run, operations completed, tasks
   cancelled, microtask-bound turns, remote tasks rejected — whose useful
   quantity is the difference between two snapshots. Peaks are the highest each
-  gauge has reached, which answers "how bad did this get" after an incident and
-  survives the level falling back to zero.
+  *thread-local* gauge has reached, which answers "how bad did this get" after
+  an incident and survives the level falling back to zero.
+
+  `remote_macrotask_queue_depth` is the one gauge with no peak. Reading it takes
+  the mutex `ThreadHandle::queue_macrotask` contends on, and peaks are sampled
+  every turn, so a `Peaks` field for it would put a lock acquisition on every
+  iteration of every runite loop. Use `counters.remote_tasks_rejected` for the
+  question a remote-depth peak would answer: it counts the sends that actually
+  hit the bound.
 
   `microtask_bound_turns` counts turns whose microtask drain took longer than
   everything else in the turn combined, which is how a consumer learns the
@@ -383,20 +338,57 @@ changes.
   with the rest of the crate without a conversion at every seam.
   ([#46](https://github.com/willmtemple/runite/issues/46))
 
-- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
-  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
-  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
-  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
-  compiled without a warning.
-
-  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
-  Dropping a join handle detaches the task, which is a documented and intended
-  operation rather than a mistake — unlike an unawaited future, which does
-  nothing at all. Marking them flagged 141 call sites across this repository's
-  own tests and examples, essentially all of them correct.
-  ([#30](https://github.com/willmtemple/runite/issues/30))
-
 ### Fixed
+
+- Socket read and write deadlines no longer fail outright when the kernel
+  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
+  `recv_from_timeout`, and `connect_stream_timeout` submitted an
+  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
+  quietly switched to the readiness path an identical call carrying a deadline
+  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
+  their deadline-free siblings do, applying what is left of the deadline
+  through the runtime's timer the way the kqueue backend already did — the
+  linked timeout has already been running when the kernel rejects the opcode
+  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
+  The cost is a timer per call instead of a linked SQE, and only on the
+  fallback path; `send_timeout` caches whether the kernel accepts a
+  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
+  needs is paid once per thread rather than on every call. Found by masking the
+  opcode probe across the integration suite, which now runs under two
+  constrained profiles in `mise run capability-matrix`.
+  ([#19](https://github.com/willmtemple/runite/issues/19))
+
+- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
+  is inherited. It waits for the process-wide stdin reader to release the
+  terminal, and that wait was unbounded — an interrupt frees a reader parked in
+  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
+  on an interactive terminal returns only when the user types. Spawning a child
+  could therefore hang the whole event loop until a keypress. The wait is now
+  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
+  Windows already did, and the caller may retry.
+  ([#28](https://github.com/willmtemple/runite/issues/28))
+
+- `watch::Sender::send` could report success with no receivers. It checked the
+  receiver count under the book lock, released it, then wrote the value, so the
+  last `Receiver` dropping in that window left `send` consuming the value,
+  advancing the version, and returning `Ok(())` — contradicting its documented
+  contract. The check and the write now happen under one book lock. The
+  previous value is moved out rather than assigned over, so `T::drop` runs
+  after both locks are released: dropping it in place would run user code under
+  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
+  ([#26](https://github.com/willmtemple/runite/issues/26))
+
+- `Debug` on the 67 public types that lacked it, and
+  `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
+  cannot reopen. Coverage was inconsistent within single modules —
+  `fs::Metadata` and `DirEntry` derived it while `File`, `OpenOptions` and
+  `ReadDir` did not; every channel error derived it while no channel `Sender`
+  or `Receiver` did — which poisoned `#[derive(Debug)]` on any downstream type
+  holding one. The impls are deliberately opaque
+  (`debug_struct(..).finish_non_exhaustive()`): most of these are futures and
+  guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
+  on type parameters that frequently cannot have it.
+  ([#31](https://github.com/willmtemple/runite/issues/31))
 
 - `release-verify` no longer passes `--allow-dirty` to `cargo package`
   unconditionally. That flag writes `"dirty": true` into
@@ -438,6 +430,43 @@ changes.
   it. ([#27](https://github.com/willmtemple/runite/issues/27))
 
 ### Changed
+
+- Steady-state `tracing` events are emitted in release builds, not only in
+  debug. Twenty-one trace sites on `runite::driver`, `runite::runtime`,
+  `runite::scheduler`, `runite::timer` and `runite::async` were
+  `#[cfg(debug_assertions)]`, so a release build produced no per-turn,
+  per-task, per-timer or per-operation event on any target, and
+  `runite::timer` and `runite::async` had no vocabulary at all — the builds
+  worth profiling were the ones with nothing to see. With no subscriber
+  installed an event costs a relaxed load and a not-taken branch, and field
+  expressions are never evaluated.
+
+  Two consequences, both written up under "Profiling and observability" in
+  README.md. `macrotask_dequeued`'s `wait_ns` needs a clock stamp on every
+  macrotask push, so `MacroTask::queued_at` is now filled only while a
+  subscriber is accepting `runite::scheduler` at `TRACE`: tasks already queued
+  when a subscriber is installed are dequeued without it. And once anything
+  installs a global default, every event site consults its interest cache — a
+  filter that answers "sometimes" rather than a definite no makes hot sites
+  like `queue_microtask` pay a thread-local read and a virtual call per
+  emission, so filter runite's targets off explicitly if you are collecting
+  something else.
+
+  `runite::signal` is now a `trace_targets` constant like the other five,
+  where it had been an undocumented string literal at its one call site.
+
+- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
+  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
+  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
+  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
+  compiled without a warning.
+
+  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
+  Dropping a join handle detaches the task, which is a documented and intended
+  operation rather than a mistake — unlike an unawaited future, which does
+  nothing at all. Marking them flagged 141 call sites across this repository's
+  own tests and examples, essentially all of them correct.
+  ([#30](https://github.com/willmtemple/runite/issues/30))
 
 - Fixed two intra-doc links on `TcpStream` that pointed at inherent
   `read_exact`/`write_all` methods removed in this release; they now name the
