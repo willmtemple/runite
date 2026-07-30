@@ -211,7 +211,7 @@ fn start_configured_runtime(
 }
 
 fn generate(function: ItemFn, args: EntryArgs, kind: EntryKind) -> TokenStream2 {
-    let crate_path = args.crate_path.clone();
+    let crate_path = &args.crate_path;
     let is_async = function.sig.asyncness.is_some();
     let original_name = function.sig.ident.clone();
     let output = function.sig.output.clone();
@@ -237,7 +237,7 @@ fn generate(function: ItemFn, args: EntryArgs, kind: EntryKind) -> TokenStream2 
     // anything else has started one — so it is built up front and the same two
     // shapes are driven through the token it returns.
     let runtime = format_ident!("__runite_runtime", span = Span::mixed_site());
-    let start = start_configured_runtime(&args, &crate_path, &runtime);
+    let start = start_configured_runtime(&args, crate_path, &runtime);
     let drive = match (&start, is_async) {
         (None, true) => quote! { #crate_path::block_on(#implementation_name()) },
         (None, false) => quote! {
