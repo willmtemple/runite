@@ -77,9 +77,11 @@ impl Child {
     ///
     /// Use this when something other than [`Command`](super::Command) started
     /// the process — a `std::process::Command` spawned for an API runite does
-    /// not have, or a helper that returns a pid. The returned `Child` has no
-    /// standard-stream pipes; [`wait`](Self::wait), [`try_wait`](Self::try_wait),
-    /// [`id`](Self::id), and [`kill`](Self::kill) all work as usual.
+    /// not have, or a helper that returns a pid. Within the supported case
+    /// below, the returned `Child` is not a second-class handle: it simply has
+    /// no standard-stream pipes, and [`wait`](Self::wait),
+    /// [`try_wait`](Self::try_wait), [`id`](Self::id), and [`kill`](Self::kill)
+    /// behave as they do for a spawned child.
     ///
     /// Exit notification is event-driven on every platform: a pidfd on Linux,
     /// a `kqueue` process filter on macOS, and a registered wait on the process
@@ -87,10 +89,17 @@ impl Child {
     ///
     /// # Errors
     ///
-    /// Returns an error if no process with this identifier exists, or if the
-    /// caller may not observe it. A process that has already exited **and been
-    /// reaped** no longer exists, so adopting it fails rather than returning a
-    /// `Child` whose `wait` never completes.
+    /// Returns an error if no process with this identifier exists. A process
+    /// that has already exited **and been reaped** no longer exists, so adopting
+    /// it fails rather than returning a `Child` whose `wait` never completes.
+    ///
+    /// Adoption is not an access check, and how much of one it happens to
+    /// perform differs by platform: Linux opens a pidfd, which requires no
+    /// rights over the target and so adopts any live pid, including pid 1;
+    /// macOS probes with signal 0 and can report `EPERM`; Windows opens the
+    /// process for synchronize and query-limited-information and reports
+    /// `ERROR_ACCESS_DENIED` without them. Success says the pid was live, not
+    /// that anything else will be permitted.
     ///
     /// On Unix, `pid` is validated before any syscall: zero, or a value beyond
     /// the platform's `pid_t`, is [`io::ErrorKind::InvalidInput`] rather than a
@@ -98,10 +107,18 @@ impl Child {
     ///
     /// # Caveats
     ///
-    /// - **On Unix the process must be a direct child of this one.** Exit
-    ///   notification works for any process, but reading the exit *status*
-    ///   requires being its parent, so [`wait`](Self::wait) on a non-child
-    ///   fails once the process exits. Windows has no such restriction.
+    /// - **On Unix the process must be a direct child of this one.** Reading an
+    ///   exit status requires being the parent, and nothing at adoption time can
+    ///   tell whether the target is a child, so adoption succeeds for any live
+    ///   pid and the failure surfaces later: for a non-child,
+    ///   [`wait`](Self::wait), [`try_wait`](Self::try_wait) and
+    ///   [`kill`](Self::kill) all fail *immediately* with `ECHILD` — `wait` does
+    ///   not wait for the exit, and `kill` does not send the signal. Windows has
+    ///   no such restriction.
+    /// - **On Windows adoption may outrun what the caller is allowed to do.**
+    ///   Terminate rights are asked for but not required, so a process the
+    ///   caller may wait on but not terminate still adopts and
+    ///   [`kill`](Self::kill) is the call that reports `ERROR_ACCESS_DENIED`.
     /// - **Nothing else may reap the process.** If another `Child`, a
     ///   `std::process::Child`, or a `SIGCHLD` handler calls `waitpid` for the
     ///   same pid, whichever gets there first takes the status and the other

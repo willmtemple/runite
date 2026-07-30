@@ -178,7 +178,9 @@ change process group, or drop privileges.
 It takes `Fn` rather than std's `FnMut`, because a runite `Command` may be
 spawned more than once. As with std, the hook is `unsafe` to install: it runs
 in a forked child where only async-signal-safe operations are sound, so it must
-not allocate or take locks. Returning `Err` aborts the spawn.
+not allocate or take locks. Also as with std, hooks accumulate: registering a
+second one does not replace the first, all of them run in registration order,
+and the first to return `Err` aborts the spawn.
 
 Together with the previous item, this is enough to start a shell on a
 pseudoterminal without `std::process`.
@@ -362,9 +364,16 @@ for signal in [SIGHUP, SIGTERM, SIGKILL] {
 ```
 
 Three caveats. On Unix the process must be a **direct child**, because reading
-an exit status requires being its parent. **Nothing else may reap it** — if a
-`std::process::Child` for the same pid is still alive, whichever waits first
-takes the status. And a **pid is not a stable identity**: it can be reused once
-the process is reaped, so a pid obtained long ago may name something else.
+an exit status requires being its parent; nothing at adoption time can tell
+parentage, so adopting anything else succeeds and then `wait`, `try_wait` and
+`kill` all fail straight away with `ECHILD`, without waiting and without
+signalling. **Nothing else may reap it** — if a `std::process::Child` for the
+same pid is still alive, whichever waits first takes the status. And a **pid is
+not a stable identity**: it can be reused once the process is reaped, so a pid
+obtained long ago may name something else.
+
 Adopting a process that no longer exists fails at `from_pid` rather than
-producing a handle whose `wait` never completes.
+producing a handle whose `wait` never completes. Adoption is not an access
+check, though: a Linux pidfd needs no rights over the target at all, and on
+Windows adoption settles for synchronize and query-limited-information, leaving
+`kill` to report a missing `PROCESS_TERMINATE`.

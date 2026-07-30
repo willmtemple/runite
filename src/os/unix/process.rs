@@ -26,8 +26,13 @@ pub trait CommandExt {
     /// [`std::os::unix::process::CommandExt::pre_exec`] takes `FnMut` because a
     /// `std` `Command` owns its hook outright.
     ///
-    /// Returning `Err` from the hook aborts the spawn, and
-    /// [`Command::spawn`] returns that error.
+    /// Registering a second hook adds to the first rather than replacing it, as
+    /// in `std`: every hook runs, in registration order. A builder that layers
+    /// two concerns onto one [`Command`] therefore gets both, instead of
+    /// silently losing whichever was registered first.
+    ///
+    /// Returning `Err` from a hook aborts the spawn, and [`Command::spawn`]
+    /// returns that error. Hooks registered after it do not run.
     ///
     /// # Safety
     ///
@@ -95,6 +100,6 @@ impl CommandExt for Command {
         &mut self,
         hook: impl Fn() -> io::Result<()> + Send + Sync + 'static,
     ) -> &mut Self {
-        self.set_pre_exec(PreExec(Arc::new(hook)))
+        self.push_pre_exec(PreExec(Arc::new(hook)))
     }
 }

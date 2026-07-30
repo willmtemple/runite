@@ -205,7 +205,7 @@ pub(crate) struct CommandSpec {
     pub stdout: StdioKind,
     pub stderr: StdioKind,
     #[cfg(unix)]
-    pub pre_exec: Option<PreExec>,
+    pub pre_exec: Vec<PreExec>,
 }
 
 /// Builder for spawning an async subprocess.
@@ -248,7 +248,7 @@ impl Command {
                 stdout: StdioKind::Inherit,
                 stderr: StdioKind::Inherit,
                 #[cfg(unix)]
-                pre_exec: None,
+                pre_exec: Vec::new(),
             },
         }
     }
@@ -257,10 +257,11 @@ impl Command {
     ///
     /// Used internally by
     /// [`os::unix::process::CommandExt::pre_exec`](crate::os::unix::process::CommandExt::pre_exec),
-    /// which carries the safety contract.
+    /// which carries the safety contract. Hooks accumulate rather than replace,
+    /// so a builder that layers two of them does not silently lose the first.
     #[cfg(unix)]
-    pub(crate) fn set_pre_exec(&mut self, hook: PreExec) -> &mut Self {
-        self.spec.pre_exec = Some(hook);
+    pub(crate) fn push_pre_exec(&mut self, hook: PreExec) -> &mut Self {
+        self.spec.pre_exec.push(hook);
         self
     }
 

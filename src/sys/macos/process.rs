@@ -42,7 +42,9 @@ pub(crate) fn spawn(spec: &CommandSpec) -> io::Result<Child> {
     command.stdin(stdio(&spec.stdin)?);
     command.stdout(stdio(&spec.stdout)?);
     command.stderr(stdio(&spec.stderr)?);
-    if let Some(hook) = &spec.pre_exec {
+    // Registered one at a time so std's own chaining decides the order and the
+    // short-circuit on error, rather than a second implementation of both here.
+    for hook in &spec.pre_exec {
         let hook = hook.clone();
         // SAFETY: the contract is forwarded from
         // `os::unix::process::CommandExt::pre_exec`, whose caller promised the

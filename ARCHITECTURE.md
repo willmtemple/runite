@@ -514,20 +514,30 @@ There is no periodic timer and no blocking-pool offload for child exit on any pl
 
 `Child::from_pid` adopts a process runite did not spawn, using the same wait paths. Linux opens a
 fresh pidfd, macOS registers the same `EVFILT_PROC` filter, and Windows opens the process with
-`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE`. Because an adopted Windows
-process is a bare handle rather than a `std::process::Child`, the backend's process object is an
-enum over the two, and the adopted arm polls exit itself: it waits on the handle with a zero timeout
-and only reads `GetExitCodeProcess` once the object is signalled, since `STILL_ACTIVE` is
-indistinguishable from a process that genuinely exited with that value. Adoption validates the
-target up front on every platform, so a process that is already gone fails to adopt rather than
-producing a handle whose `wait` never completes. On Unix the target must be a direct child, because
-reading an exit status requires being its parent.
+`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION`, preferring to also get `PROCESS_TERMINATE` and
+retrying without it on `ERROR_ACCESS_DENIED`. Terminate is a write-class right the mandatory
+integrity policy refuses where the two observation rights are granted, so requiring it would refuse
+adoption of processes the caller may legitimately wait on; `kill` is left to report the missing
+right. Because an adopted Windows process is a bare handle rather than a `std::process::Child`, the
+backend's process object is an enum over the two, and the adopted arm polls exit itself: it waits on
+the handle with a zero timeout and only reads `GetExitCodeProcess` once the object is signalled,
+since `STILL_ACTIVE` is indistinguishable from a process that genuinely exited with that value.
+
+Adoption validates that the target exists on every platform, so a process that is already gone fails
+to adopt rather than producing a handle whose `wait` never completes. It is not an access check, and
+how much of one it incidentally performs differs: a pidfd needs no rights over the target, a signal-0
+probe can report `EPERM`, `OpenProcess` needs the mask above. On Unix the target must be a direct
+child, because reading an exit status requires being its parent — and nothing available at adoption
+time can tell parentage, so a non-child adopts successfully and every subsequent `waitpid` fails at
+once with `ECHILD`, including the one `kill` does first.
 
 A standard stream configured from a caller-owned descriptor (`Stdio::from`) is duplicated at each
 spawn rather than consumed, which keeps a `Command` reusable and leaves the caller's descriptor
-theirs. On Unix a `pre_exec` hook is stored behind an `Arc` and forwarded to
+theirs. On Unix `pre_exec` hooks are stored behind `Arc`s and forwarded to
 `std::os::unix::process::CommandExt::pre_exec` for the same reason — a runite `Command` may be
-spawned more than once, so the hook is `Fn` rather than std's `FnMut`.
+spawned more than once, so a hook is `Fn` rather than std's `FnMut`. They are kept in a `Vec` and
+registered with std one at a time, so std's own chaining decides the order and the short-circuit on
+error, and a second registration adds to the first instead of replacing it.
 
 Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
 Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, macOS uses the

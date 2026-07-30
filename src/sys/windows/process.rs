@@ -67,8 +67,10 @@ impl Process {
         match self {
             Self::Spawned(child) => child.kill(),
             Self::Adopted { handle, .. } => {
-                // SAFETY: `handle` is a live process handle opened with
-                // `PROCESS_TERMINATE`; the exit code is a plain value.
+                // SAFETY: `handle` is a live process handle; the exit code is a
+                // plain value. Adoption only prefers `PROCESS_TERMINATE`, so
+                // this is where a handle that lacks it reports
+                // `ERROR_ACCESS_DENIED`.
                 let ok = unsafe {
                     windows_sys::Win32::System::Threading::TerminateProcess(
                         handle.as_raw_handle() as HANDLE,
@@ -116,29 +118,56 @@ fn adopted_try_wait(handle: &OwnedHandle) -> io::Result<Option<StdExitStatus>> {
     Ok(Some(StdExitStatus::from_raw(code)))
 }
 
+/// The rights adoption actually needs: wait on the process object, then read
+/// its exit code once it signals.
+///
+/// `SYNCHRONIZE` is a standard access right applying to every waitable object,
+/// but windows-sys declares it once, as a `FILE_ACCESS_RIGHTS` under
+/// `Storage::FileSystem`. The value is the same for a process handle.
+const OBSERVE_PROCESS: u32 = windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE
+    | windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+
+/// Picks the access mask adoption opens with, preferring one that can also
+/// terminate.
+///
+/// `PROCESS_TERMINATE` is a write-class right and is refused by the mandatory
+/// integrity policy where `PROCESS_QUERY_LIMITED_INFORMATION` and `SYNCHRONIZE`
+/// are granted, so demanding it up front would refuse adoption of processes the
+/// caller may perfectly well wait on. Ask for it, settle without it, and let
+/// `kill` be the call that reports the missing right. Only `ERROR_ACCESS_DENIED`
+/// is retried; anything else (a pid that is not there, say) is the answer.
+///
+/// Takes the opener rather than a pid so the fallback can be tested without a
+/// process the test is forbidden to terminate — which pids qualify depends on
+/// the machine and on whether the session is elevated.
+fn adopt_with(open: impl Fn(u32) -> io::Result<RawHandle>) -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
+
+    let raw = match open(OBSERVE_PROCESS | PROCESS_TERMINATE) {
+        Ok(raw) => raw,
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            open(OBSERVE_PROCESS)?
+        }
+        Err(error) => return Err(error),
+    };
+    // SAFETY: the opener returns a fresh handle that nothing else owns.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
 /// Adopts an already-running process for exit notification.
 pub(crate) fn from_pid(pid: u32) -> io::Result<Child> {
-    // `SYNCHRONIZE` is a standard access right applying to every waitable
-    // object, but windows-sys declares it once, as a `FILE_ACCESS_RIGHTS`
-    // under `Storage::FileSystem`. The value is the same for a process handle.
-    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    };
+    use windows_sys::Win32::System::Threading::OpenProcess;
 
-    // SAFETY: `OpenProcess` takes only scalars and returns null on failure.
-    let raw = unsafe {
-        OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-            0,
-            pid,
-        )
-    };
-    if raw.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `OpenProcess` returned a fresh handle that nothing else owns.
-    let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+    let handle = adopt_with(|access| {
+        // SAFETY: `OpenProcess` takes only scalars and returns null on failure.
+        let raw = unsafe { OpenProcess(access, 0, pid) };
+        if raw.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(raw as RawHandle)
+        }
+    })?;
     Ok(Child {
         inner: Some(Process::Adopted { pid, handle }),
         status: None,
@@ -386,4 +415,70 @@ fn stdio(kind: &StdioKind) -> io::Result<std::process::Stdio> {
         // again and the caller's handle stays theirs.
         StdioKind::Raw(handle) => std::process::Stdio::from(handle.try_clone()?),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::cell::{Cell, RefCell};
+
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
+
+    /// A process the caller may wait on but not terminate is still adoptable:
+    /// the observation rights are what `wait` and `try_wait` need, and refusing
+    /// the whole call over a right only `kill` uses would lose the exit.
+    ///
+    /// The refusal is staged rather than found on the machine, because which
+    /// pids deny `PROCESS_TERMINATE` while granting
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` depends on the box and on whether the
+    /// session is elevated.
+    #[test]
+    fn adoption_settles_for_observation_rights() {
+        let asked = RefCell::new(Vec::new());
+        let handle = adopt_with(|access| {
+            asked.borrow_mut().push(access);
+            if access & PROCESS_TERMINATE != 0 {
+                return Err(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32));
+            }
+            // SAFETY: `OpenProcess` takes only scalars and returns null on
+            // failure.
+            let raw = unsafe { OpenProcess(access, 0, std::process::id()) };
+            assert!(!raw.is_null(), "{}", io::Error::last_os_error());
+            Ok(raw as RawHandle)
+        })
+        .expect("adoption should settle for observation rights");
+
+        assert_eq!(
+            asked.into_inner(),
+            vec![OBSERVE_PROCESS | PROCESS_TERMINATE, OBSERVE_PROCESS]
+        );
+        assert!(
+            adopted_try_wait(&handle)
+                .expect("this process should be queryable")
+                .is_none(),
+            "the test process is still running"
+        );
+    }
+
+    /// The retry is for the permission case only. A pid that is not there must
+    /// fail at adoption with the kernel's own error, not be probed twice and
+    /// reported as something else.
+    #[test]
+    fn adoption_does_not_retry_a_failure_that_is_not_a_permission() {
+        let attempts = Cell::new(0);
+        let error = adopt_with(|_| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32))
+        })
+        .expect_err("a non-permission failure should propagate");
+
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER as i32),
+            "the kernel's error should survive"
+        );
+    }
 }
