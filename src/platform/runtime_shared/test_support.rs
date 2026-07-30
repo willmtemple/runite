@@ -560,7 +560,7 @@ impl MockDriverControl {
         self.queue_mock_ready(MockReady {
             events: ReadyEvents {
                 wake: true,
-                timer: false,
+                ..ReadyEvents::default()
             },
             wakes: count,
             timers: 0,
@@ -572,8 +572,8 @@ impl MockDriverControl {
         assert!(count > 0, "timer count must be non-zero");
         self.queue_mock_ready(MockReady {
             events: ReadyEvents {
-                wake: false,
                 timer: true,
+                ..ReadyEvents::default()
             },
             wakes: 0,
             timers: count,
@@ -587,7 +587,12 @@ impl MockDriverControl {
         task: impl FnOnce() + Send + 'static,
     ) {
         self.queue_mock_ready(MockReady {
-            events: ReadyEvents::default(),
+            // A queued completion is exactly what `ReadyEvents::io` names: the
+            // driver dispatched an I/O completion this poll.
+            events: ReadyEvents {
+                io: true,
+                ..ReadyEvents::default()
+            },
             wakes: 0,
             timers: 0,
             completion: Some(MockCompletion {
@@ -1613,6 +1618,80 @@ pub fn zero_interval_fires_once_per_turn_without_spinning<R: Runtime>() {
     run::<R>();
 
     assert_eq!(count.get(), 5);
+}
+
+/// Answers `enabled` and nothing else, so a workload can be run with the turn
+/// record either wanted or declined.
+///
+/// `register_callsite` is deliberately left at its default (`sometimes`): an
+/// `always`/`never` answer would be cached per callsite and outlive the scoped
+/// dispatcher, so the second workload would inherit the first one's interest.
+struct TurnInterest {
+    collect: bool,
+}
+
+impl tracing::Subscriber for TurnInterest {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        if self.collect {
+            *metadata.level() <= tracing::Level::TRACE
+        } else {
+            *metadata.level() <= tracing::Level::WARN
+        }
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Runs a loop that parks in the driver and returns how many turn-record
+/// samples it took.
+fn turn_samples_for_parking_loop<R: Runtime>(collect: bool) -> u64 {
+    tracing::subscriber::with_default(TurnInterest { collect }, || {
+        super::scheduler::reset_turn_samples();
+        // A pending timer is what makes `run` park rather than return idle, so
+        // this exercises the park-timing branch as well as the two per-turn
+        // samples.
+        timeout::<R, _>(Duration::from_millis(5), || {});
+        run::<R>();
+        super::scheduler::turn_samples_taken()
+    })
+}
+
+/// With nothing collecting, the turn machinery must sample no queue depth,
+/// take no lock on the cross-thread queue, and not time the driver park.
+///
+/// This is the one property that has to be pinned rather than asserted in
+/// prose: the record runs on every iteration of every runite loop, and the
+/// cross-thread queue depth is read under the very mutex `enqueue_macro`
+/// contends on. Checking that no event was emitted would prove nothing —
+/// `tracing` filters the event on its own with the gate deleted entirely — so
+/// this counts the work instead.
+pub fn dormant_turn_records_cost_nothing<R: Runtime>() {
+    // Positive control first: the same workload must reach the sample sites
+    // when something *is* collecting, so the zero below means "gated off"
+    // rather than "unreachable".
+    let collected = turn_samples_for_parking_loop::<R>(true);
+    assert!(
+        collected >= 3,
+        "a collecting loop samples twice per turn and once per park, saw {collected}"
+    );
+
+    let dormant = turn_samples_for_parking_loop::<R>(false);
+    assert_eq!(
+        dormant, 0,
+        "a loop with no turn-record collector must take no samples at all"
+    );
 }
 
 #[cfg(test)]

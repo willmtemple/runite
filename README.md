@@ -264,6 +264,86 @@ Two consequences worth knowing:
   definite no, hot sites like `queue_microtask` pay a thread-local read and a virtual call per
   emission. Filter runite's targets off explicitly if you are collecting something else.
 
+#### Identity: what a record is about
+
+Task ids and timer ids restart at 1 on every runtime thread, and driver tokens are per-driver
+and wrapping, so `timer_id = 3` names nothing on its own — in a timeline merged from several
+threads it is as many timers as there are threads. Every event on `runite::scheduler`,
+`runite::timer` and `runite::async` therefore carries both a `runtime_id` and a `turn_id`.
+Either is absent (`None`) when there is no honest answer: work queued from a foreign thread has
+no `runtime_id`, and anything outside a turn has no `turn_id`. A cross-thread post
+(`queue_remote_task`, `remote_queue_full`) additionally carries `to_runtime_id`, because that is
+the one case where "which runtime" has two answers.
+
+`runite::runtime` and `runite::driver` are not covered by that rule, so read each event's fields
+rather than assuming. The turn record and `run_wait` carry both identities; `run_enter`,
+`run_exit` and `spawn_worker` name a runtime but no turn, since they bracket turns rather than
+happen inside one; the teardown events name neither, because the state they report on is already
+being dismantled.
+
+The same identities are readable from application code, so your own records can join against
+runite's on equality:
+
+| Function                                  | Returns                                            |
+| ----------------------------------------- | -------------------------------------------------- |
+| [`current_runtime_id()`]                  | which runtime — one thread's event loop            |
+| [`current_turn()`]                        | which turn of that loop                            |
+| [`time::monotonic_now()`]                 | the clock runite arms its own deadlines on         |
+
+`monotonic_now` has a documented epoch: unspecified origin, so only differences mean anything,
+but every thread in the process and every process on the same running system reads the same
+clock, and runite's deadlines are expressed against it. It does not survive a reboot and has no
+relationship to wall-clock time.
+
+[`current_runtime_id()`]: https://docs.rs/runite/latest/runite/fn.current_runtime_id.html
+[`current_turn()`]: https://docs.rs/runite/latest/runite/fn.current_turn.html
+[`time::monotonic_now()`]: https://docs.rs/runite/latest/runite/time/fn.monotonic_now.html
+
+#### Per-turn records
+
+`runite::runtime` at `TRACE` emits one `event = "turn"` record per iteration of the event loop.
+It is the cheapest useful unit of attribution — one record for a whole turn rather than one per
+task or per completion — and it answers the question an idle process raises: what woke this
+loop, and what did it then do?
+
+| Field                                                    | Meaning                                                                     |
+| -------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `runtime_id`, `turn_id`                                  | which loop, which iteration                                                 |
+| `entry`                                                  | `run`, `block_on`, `run_until_stalled`, or `run_ready_tasks`                |
+| `wake`                                                   | `timer`, `io`, `notify`, `spurious`, or `queued`                            |
+| `wait_ns`                                                | time parked in the driver before this turn; `0` means the loop never parked |
+| `runnable_ns`, `microtask_ns`                            | time on work, and how much of it went to the microtask checkpoint           |
+| `microtasks`, `macrotasks`, `task_polls`                 | units of work run                                                           |
+| `timers`, `remote_adopted`, `worker_exits`, `notifications` | what the turn drained from the driver and the cross-thread queue         |
+| `operations_completed`                                   | async operations of this runtime that finished during the turn              |
+| `microtask_bound`, `microtask_starvation`                | whether the checkpoint dominated the turn, and whether the guard fired      |
+| `*_depth_before` / `*_depth_after`                       | microtask, local macrotask and cross-thread queue depths either side        |
+
+Three details matter when reading these.
+
+A park belongs to the turn its wake *begins*, not to the turn that performed it, so `wait_ns`
+and `wake` describe the same event and `runnable_ns` never includes a park.
+
+`wake` is derived from what the turn observed and nothing else. A turn that did not park was not
+woken by anything and reads `queued`, however much else happened to be moving at the time — that
+covers a turn continuing existing work, a host driving the loop with `run_ready_tasks`, and the
+first turn after entering. Given a park, the cause comes from the driver's own readiness bits;
+since a wake can carry more than one, `wake` names the narrowest — a timer expiry beats I/O,
+which beats a bare notification — with the counts on the same record saying what else arrived.
+`spurious` means the loop parked and the driver gave it nothing.
+
+`operations_completed` is a difference of a cumulative counter, so it counts every async
+operation of this runtime that reached a terminal result inside the turn's wall-clock window,
+including ones finished on a blocking-pool thread. That makes it useful for accounting and
+useless for attribution, which is why `wake` does not read it.
+
+The record costs nothing when nothing is collecting: the queue depths are not sampled, the
+cross-thread queue is not locked, and the driver park is not timed. All of that sits behind the
+same interest check every other event site makes — which means the check answers on target and
+level only. Select turn records with `runite::runtime` at `TRACE`; a filter that decides by
+field name or value can accept the record's callsite while declining the guard's, and then
+no record is produced at all.
+
 For CPU profiling, build with `--release` and use `perf` / `cargo flamegraph` against an
 example or benchmark binary.
 

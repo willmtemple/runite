@@ -22,8 +22,9 @@ use super::driver::{self, Driver, DriverId};
 use crate::platform::runtime_shared as shared;
 
 pub use shared::{
-    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, on_shutdown, shutdown, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
+    TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, current_runtime_id, current_turn,
+    on_shutdown, shutdown, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
@@ -132,6 +133,10 @@ pub fn run_ready_tasks() {
     shared::run_ready_tasks::<WindowsRuntime>()
 }
 
+pub fn monotonic_now() -> Duration {
+    shared::monotonic_now::<WindowsRuntime>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::WindowsRuntime;
@@ -151,6 +156,11 @@ mod tests {
     #[test]
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<WindowsRuntime>();
+    }
+
+    #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<WindowsRuntime>();
     }
 
     #[test]

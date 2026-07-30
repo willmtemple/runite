@@ -197,6 +197,11 @@ pub struct Driver {
     timer_deadline: Cell<Option<Duration>>,
     pending_wakes: Cell<u64>,
     pending_timers: Cell<u64>,
+    /// A completion packet for an I/O operation was dispatched and has not yet
+    /// been reported through [`ReadyEvents::io`]. Held across the call
+    /// boundary because `wait` dispatches packets with no `ReadyEvents` to
+    /// report them on.
+    io_completed: Cell<bool>,
 }
 
 /// Creates a new driver and its paired [`ThreadNotifier`].
@@ -230,6 +235,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
         timer_deadline: Cell::new(None),
         pending_wakes: Cell::new(0),
         pending_timers: Cell::new(0),
+        io_completed: Cell::new(false),
     };
 
     Ok((driver, notifier))
@@ -282,10 +288,15 @@ impl Driver {
         if self.pending_timers.get() > 0 {
             pending.timer = true;
         }
-        if pending.wake || pending.timer {
+        // Packets dispatched inside `wait` had no `ReadyEvents` to be reported
+        // on; this is where the bit they set is handed over.
+        pending.io = self.io_completed.replace(false);
+        if pending.wake || pending.timer || pending.io {
             return Ok(Some(pending));
         }
-        self.process(Some(Duration::ZERO))
+        let ready = self.process(Some(Duration::ZERO));
+        self.io_completed.set(false);
+        ready
     }
 
     /// Blocks until at least one event is available.
@@ -437,7 +448,11 @@ impl Driver {
                         self.pending_wakes
                             .set(self.pending_wakes.get().saturating_add(1));
                     }
-                    IO_KEY => dispatch_io_entry(entry),
+                    IO_KEY => {
+                        ready.io = true;
+                        self.io_completed.set(true);
+                        dispatch_io_entry(entry);
+                    }
                     _ => {}
                 }
             }

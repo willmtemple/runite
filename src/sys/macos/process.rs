@@ -241,6 +241,8 @@ async fn wait_proc_exit(pid: libc::pid_t) -> io::Result<()> {
                             tracing::error!(
                                 target: crate::trace_targets::SCHEDULER,
                                 event = "process_cancel_dropped",
+                                runtime_id = crate::platform::runtime_shared::scheduler::trace_runtime_id(),
+                                turn_id = crate::platform::runtime_shared::scheduler::trace_turn_id(),
                                 "dropping process-wait cancellation because the remote queue is full"
                             );
                             handle.finish(None);

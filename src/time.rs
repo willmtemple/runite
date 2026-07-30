@@ -142,6 +142,57 @@ pub enum MissedTickBehavior {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Elapsed;
 
+/// Reads the monotonic clock the runtime schedules its own deadlines on.
+///
+/// This exists so a consumer keeping its own timeline can put runite's events
+/// and its own on one axis. Without it, correlating the two means guessing at
+/// an offset between two clocks that may not even be the same clock.
+///
+/// # The epoch, and what may be compared with what
+///
+/// The origin is an unspecified fixed point in the past — in practice system
+/// boot — so an individual reading means nothing and only *differences* are
+/// meaningful. Within that:
+///
+/// - **Every thread in the process shares it.** Two runtime threads' readings
+///   are directly comparable, so a merged timeline needs no per-thread
+///   correction.
+/// - **runite's own deadlines are on it.** A timer armed for `now + 10ms`
+///   has its deadline expressed against exactly this clock, so a lateness
+///   measurement against a reading here is real rather than approximate.
+/// - **Other processes on the same running system share it too**, because
+///   every backend reads a system-wide clock (`CLOCK_MONOTONIC` on Linux and
+///   macOS, `QueryPerformanceCounter` on Windows). Two processes started at
+///   different times still agree.
+/// - **It does not survive a reboot**, is not comparable across machines, and
+///   has no relationship to wall-clock time. Do not persist it, and do not
+///   convert it to a date.
+/// - **Whether it advances while the system is suspended is platform-defined.**
+///   Treat any interval that spans a suspend as unusable rather than as a very
+///   long one.
+/// - **It is not [`std::time::Instant`].** In practice most platforms base
+///   `Instant` on the same clock, but nothing guarantees the same origin, so
+///   subtracting one from the other is not meaningful.
+///
+/// # Panics
+///
+/// Panics if the platform clock cannot be read. That is already how the
+/// runtime treats a failing clock everywhere it arms a deadline: a runtime
+/// that cannot tell the time cannot schedule anything.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let start = runite::time::monotonic_now();
+/// runite::block_on(runite::time::sleep(Duration::from_millis(5)));
+/// assert!(runite::time::monotonic_now() - start >= Duration::from_millis(5));
+/// ```
+pub fn monotonic_now() -> Duration {
+    imp::monotonic_now()
+}
+
 /// Returns a future that completes after `duration` has elapsed on the current runtime thread.
 ///
 /// `sleep(Duration::ZERO)` still yields back to the event loop. It registers a

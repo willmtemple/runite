@@ -8,12 +8,12 @@ The portable default section is the exact intersection of the four supported tar
 
 | Target | Default | `hyper` | `futures-compat` | All features | Default target delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| macOS aarch64 (`aarch64-apple-darwin`) | 1163 | 1183 | 1206 | 1226 | 177 |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1058 | 1072 | 1101 | 1115 | 72 |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | 1166 | 1186 | 1209 | 1229 | 177 |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | 1166 | 1186 | 1209 | 1229 | 177 |
+| macOS aarch64 (`aarch64-apple-darwin`) | 1166 | 1186 | 1209 | 1229 | 177 |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | 1061 | 1075 | 1104 | 1118 | 72 |
 
-Portable default items: **986**
+Portable default items: **989**
 
 ## Compile-checked handle contract
 
@@ -29,7 +29,7 @@ Portable default items: **986**
 
 ## Portable default surface
 
-Items: **986**
+Items: **989**
 
 ### `runite`
 
@@ -72,6 +72,7 @@ pub fn runite::JoinError::is_aborted(&self) -> bool
 pub fn runite::JoinError::is_cancelled(&self) -> bool
 pub fn runite::JoinError::is_panicked(&self) -> bool
 pub fn runite::block_on<F>(F) -> <F as core::future::future::Future>::Output where F: core::future::future::Future
+pub fn runite::current_runtime_id() -> core::option::Option<RuntimeId>
 pub fn runite::current_thread_handle() -> ThreadHandle
 pub fn runite::current_turn() -> core::option::Option<TurnId>
 pub fn runite::on_shutdown<F>(F) where F: core::ops::function::FnOnce() + 'static
@@ -104,6 +105,7 @@ pub use runite::CancelOnDrop
 pub use runite::IntervalHandle
 pub use runite::JoinHandle
 pub use runite::QueueError
+pub use runite::RuntimeId
 pub use runite::ThreadHandle
 pub use runite::TimeoutHandle
 pub use runite::TimerCancel
@@ -1089,6 +1091,7 @@ pub fn runite::time::Sleep::drop(&mut self)
 pub fn runite::time::Sleep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn runite::time::Sleep::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
 pub fn runite::time::interval(core::time::Duration) -> runite::time::Interval
+pub fn runite::time::monotonic_now() -> core::time::Duration
 pub fn runite::time::set_interval<F>(core::time::Duration, F) -> crate::IntervalHandle where F: core::ops::function::FnMut() + 'static
 pub fn runite::time::set_timeout<F>(core::time::Duration, F) -> crate::TimeoutHandle where F: core::ops::function::FnOnce() + 'static
 pub fn runite::time::sleep(core::time::Duration) -> runite::time::Sleep

@@ -19,6 +19,7 @@ use super::uring::{
     IORING_OP_ASYNC_CANCEL, IORING_OP_MSG_RING, IORING_OP_POLL_ADD, IoUring, IoUringCqe,
     IoUringSqe, SupportedOps,
 };
+use crate::platform::runtime_shared::scheduler::{trace_runtime_id, trace_turn_id};
 use crate::platform::runtime_shared::{DriverBackend, Notifier};
 use crate::trace_targets;
 
@@ -211,6 +212,10 @@ pub struct Driver {
     pending_wakes: Cell<u64>,
     /// Accumulated count of pending timer expirations that have not yet been triggered.
     pending_timers: Cell<u64>,
+    /// An operation completion was dispatched and has not yet been reported
+    /// through [`ReadyEvents::io`]. Held across the call boundary because
+    /// `wait` dispatches completions with no `ReadyEvents` to report them on.
+    io_completed: Cell<bool>,
     /// Map of active completion tokens to associated handlers. When a CQE is received with a token in this map, the
     /// corresponding handler will be invoked with the CQE and removed from the map. This is the core mechanism by which
     /// async operations are tracked and dispatched to their continuations.
@@ -270,6 +275,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
             active_timer_deadline: Cell::new(None),
             pending_wakes: Cell::new(0),
             pending_timers: Cell::new(0),
+            io_completed: Cell::new(false),
             completions: RefCell::new(HashMap::new()),
             pending_cancel_tokens: RefCell::new(HashMap::new()),
         },
@@ -402,12 +408,16 @@ impl Driver {
         let mut ready = ReadyEvents {
             timer: self.pending_timers.get() != 0,
             wake: self.pending_wakes.get() != 0,
+            io: self.io_completed.get(),
         };
-        let had_durable_ready = ready.timer || ready.wake;
+        let had_durable_ready = ready.timer || ready.wake || ready.io;
         let saw_submission = self.flush_submissions(false, &mut ready)?;
         let saw_completion = self
             .ring()
             .drain_completions(|cqe| self.process_cqe(cqe, &mut ready));
+        // Everything `io_completed` was holding is now in `ready.io`, whether
+        // it was dispatched here or inside an earlier `wait`.
+        self.io_completed.set(false);
         let saw_any = had_durable_ready || saw_submission || saw_completion;
         if saw_any {
             tracing::trace!(
@@ -415,6 +425,7 @@ impl Driver {
                 event = "poll_ready",
                 timer_ready = ready.timer,
                 wake_ready = ready.wake,
+                io_ready = ready.io,
                 "driver poll produced ready events"
             );
         }
@@ -440,6 +451,8 @@ impl Driver {
         tracing::trace!(
             target: trace_targets::TIMER,
             event = "rearm_timer",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             deadline_ns = deadline.map(|value| value.as_nanos() as u64),
             "rearming driver timer"
         );
@@ -552,6 +565,8 @@ impl Driver {
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "submit_operation",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             token,
             "submitting async driver operation"
         );
@@ -599,6 +614,8 @@ impl Driver {
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "submit_operation_with_linked_timeout",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             main_token,
             timeout_token,
             timeout_ns = timeout.as_nanos() as u64,
@@ -627,6 +644,8 @@ impl Driver {
         tracing::trace!(
             target: trace_targets::ASYNC,
             event = "cancel_operation",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             token,
             "submitting async driver cancellation"
         );
@@ -726,6 +745,8 @@ impl Driver {
                 // is the only place kernel-visible storage is released, and it
                 // is reached only by the original operation's terminal CQE.
                 if let Some(callback) = self.completions.borrow_mut().remove(&cqe.user_data) {
+                    ready.io = true;
+                    self.io_completed.set(true);
                     callback(cqe);
                 }
             }

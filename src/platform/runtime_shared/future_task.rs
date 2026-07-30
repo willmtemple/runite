@@ -27,6 +27,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
 use super::handles::ThreadHandle;
+use super::scheduler::{trace_runtime_id, trace_turn_id};
 use super::state::{
     describe_panic, mark_teardown_panicked, try_with_installed_thread, with_installed_thread,
 };
@@ -145,6 +146,8 @@ impl FutureTask {
                 tracing::error!(
                     target: trace_targets::ASYNC,
                     event = "task_panicked",
+                    runtime_id = trace_runtime_id(),
+                    turn_id = trace_turn_id(),
                     task_id = self.id,
                     panic = describe_panic(&*payload),
                     "spawned task panicked; isolating and reporting JoinError::Panicked to the joiner",
@@ -216,6 +219,8 @@ fn wake_join_safely(waker: Option<Waker>, task_id: u64, terminal: &'static str) 
         tracing::error!(
             target: trace_targets::ASYNC,
             event = "join_waker_panicked",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             task_id,
             terminal,
             panic = describe_panic(&*payload),
@@ -230,6 +235,8 @@ fn drop_future_safely(future: LocalBoxFuture, task_id: u64, terminal: &'static s
         tracing::error!(
             target: trace_targets::ASYNC,
             event = "task_future_drop_panicked",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             task_id,
             terminal,
             panic = describe_panic(&*payload),

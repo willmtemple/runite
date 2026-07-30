@@ -76,6 +76,46 @@ changes.
   information about what the turn did; per-turn statistics belong to
   [#43](https://github.com/willmtemple/runite/issues/43).
   ([#52](https://github.com/willmtemple/runite/issues/52))
+- `current_runtime_id()` and `RuntimeId`: a process-unique name for one
+  thread's event loop, stable for that loop's whole life and never reused.
+  Nothing else in the diagnostic output was self-describing without it — task
+  ids and timer ids restart at 1 on every runtime thread and driver tokens are
+  per-driver and wrapping, so two threads reporting `timer_id = 3` were one row
+  in a merged timeline. Every `runite::scheduler`, `runite::timer` and
+  `runite::async` event now carries both `runtime_id` and `turn_id`; either is
+  absent rather than guessed when there is no honest answer, and a cross-thread
+  post also names its destination as `to_runtime_id`.
+  ([#50](https://github.com/willmtemple/runite/issues/50))
+- `time::monotonic_now()`, the clock runite arms its own deadlines against.
+  A consumer merging its records with runite's previously had to correlate
+  across two clocks it could not prove were the same one. The epoch is
+  documented: the origin is unspecified so only differences mean anything, but
+  every thread in the process — and every process on the same running system —
+  reads the same clock, and it does not survive a reboot or relate to
+  wall-clock time. ([#50](https://github.com/willmtemple/runite/issues/50))
+- A per-turn record on `runite::runtime` at `TRACE`, one `event = "turn"` per
+  iteration of the event loop, carrying why the loop woke, how long it was
+  parked in the driver, how long it then spent runnable, queue depths either
+  side, whether the microtask checkpoint dominated the turn or tripped the
+  starvation guard, and counts of the microtasks, macrotasks, task polls,
+  completions, timers, adopted cross-thread tasks and worker exits it drained.
+
+  A wake is classified from what the turn observed and nothing else. The causes
+  come from the driver's own readiness bits, so no counter that another thread
+  can move is allowed to name a wake; a turn that did not park reads `queued`
+  rather than borrowing whatever fired nearby, and a park the driver could not
+  explain reads `spurious`. A park is reported against the turn its wake
+  *begins*, so `wake` and `wait_ns` describe one event and `runnable_ns` never
+  counts sleeping as work.
+
+  The record is free when nothing is collecting — no queue-depth sampling, no
+  lock on the cross-thread queue, no clock read around the driver park — and
+  the counts are differences of counters the runtime already maintained, so
+  nothing new happens per task or per microtask. The dormant path counts the
+  samples it takes under test, so that claim fails a test rather than quietly
+  becoming untrue. Turn records are selected by target and level, not by field
+  predicate: the guard is a separate callsite with no fields.
+  ([#50](https://github.com/willmtemple/runite/issues/50))
 - `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
   existed only as an inherent method on `File`. Validation happens once at end
   of input rather than per chunk, so a multi-byte character split across two

@@ -266,7 +266,7 @@ mod runtime_api {
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
     pub use crate::platform::current::runtime::{
-        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle,
+        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
         TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, yield_now,
     };
     pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
@@ -771,6 +771,49 @@ mod runtime_api {
     /// ```
     pub fn current_turn() -> Option<TurnId> {
         imp::current_turn()
+    }
+
+    /// Returns the identifier of the runtime installed on the calling thread.
+    ///
+    /// One runtime is one thread's event loop. [`RuntimeId`] is stable for that
+    /// runtime's whole life, unique for the life of the process, and never
+    /// reused — a thread that tears its runtime down and starts another gets a
+    /// new one, because the two share no task, timer, or operation ids.
+    ///
+    /// This is the identity everything else has to be read against. Task ids
+    /// and timer ids restart at 1 on every runtime thread, and driver tokens
+    /// are per-driver and wrapping, so `timer_id = 3` names nothing on its own:
+    /// in a timeline merged from several threads it is as many rows as there
+    /// are threads. Pair it with a [`RuntimeId`] and it names one timer.
+    ///
+    /// Returns `None` on a thread with no runtime installed — a
+    /// `std::thread::spawn`'d helper, a blocking-pool thread, a foreign
+    /// callback. It does not install one, so a diagnostic path can call it
+    /// anywhere.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::mpsc;
+    ///
+    /// assert!(
+    ///     std::thread::spawn(runite::current_runtime_id).join().unwrap().is_none(),
+    ///     "a thread with no runtime has no runtime identity"
+    /// );
+    ///
+    /// let here = runite::block_on(async { runite::current_runtime_id() });
+    /// let (tx, rx) = mpsc::channel();
+    /// let worker = runite::spawn_worker(
+    ///     move || { tx.send(runite::current_runtime_id()).unwrap(); },
+    ///     || {},
+    /// );
+    /// runite::block_on(worker.join()).expect("worker should exit normally");
+    ///
+    /// assert!(here.is_some());
+    /// assert_ne!(here, rx.recv().unwrap(), "each runtime thread is its own runtime");
+    /// ```
+    pub fn current_runtime_id() -> Option<RuntimeId> {
+        imp::current_runtime_id()
     }
 
     /// Runs only the tasks and microtasks that are ready right now, then returns.
