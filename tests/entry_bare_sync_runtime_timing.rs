@@ -8,12 +8,15 @@
 //!
 //! This is the whole binary. The test needs a thread no other test has
 //! installed a runtime on, and a single-test binary has one however libtest is
-//! asked to schedule it.
+//! asked to schedule it. The other three shapes are covered in `macros.rs`,
+//! where two of them have to sit under `cfg(target_os = "linux")` because
+//! `ring_entries` is the only setting the attribute takes and it does not exist
+//! off Linux.
 
 /// If this ever starts failing, the attribute has begun installing a runtime
 /// before a bare synchronous body — at which point the absolute claim becomes
-/// true again and the four documentation sites that now carry the exception
-/// (README, ARCHITECTURE, `docs/MIGRATING-0.3.md`, `Builder` and the two
+/// true again and the documentation sites that now carry the exception (README,
+/// ARCHITECTURE, `docs/MIGRATING-0.3.md`, `Builder`'s rustdoc and the two
 /// attribute rustdocs) should drop it.
 #[runite::test]
 fn a_bare_sync_body_runs_before_its_runtime_exists() {

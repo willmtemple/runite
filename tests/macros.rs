@@ -7,9 +7,11 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-/// The attribute installs the runtime before the body runs, which is why a
-/// `Builder` inside one is refused — and why the settings have to be reachable
-/// from the attribute itself.
+/// A bare `async` body is driven by `block_on`, which installs the runtime
+/// before it polls anything, which is why a `Builder` here is refused — and why
+/// the settings have to be reachable from the attribute itself. Three of the
+/// four attribute shapes behave this way; the fourth is pinned by
+/// `entry_bare_sync_runtime_timing.rs`, which needs a binary to itself.
 #[runite::test]
 async fn a_builder_inside_the_attribute_is_too_late() {
     let error = runite::Builder::new()
