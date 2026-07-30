@@ -540,13 +540,19 @@ mod tests {
             after.gauges.outstanding_operations, 0,
             "nothing should remain outstanding once the loop drains"
         );
-        assert!(
-            after.peaks.outstanding_operations >= 1,
-            "the peak should remember the operation that was in flight"
-        );
+        // Deliberately no assertion on `peaks.outstanding_operations` here.
+        // Peaks are sampled once per turn, not at every mutation, so an
+        // operation submitted and completed inside a single turn is invisible
+        // to them — which is what a small local file read does on a fast
+        // machine. `Peaks` documents that exact limitation. An assertion here
+        // passed on the machine it was written on and failed on both Linux CI
+        // architectures.
+        //
+        // Peak semantics are covered by `peaks_outlive_the_level_falling_back`,
+        // which uses a gauge it can hold at a known level rather than racing
+        // the sampling point.
     }
 
-    /// Aborting a task counts as a cancellation rather than a completion.
     #[test]
     fn aborting_a_task_counts_as_a_cancellation() {
         let before = snapshot().counters;
