@@ -373,13 +373,18 @@ fn unix_comparable_part(surface: &ApiSurface, feature_set: ApiFeatureSet) -> BTr
 /// [`PORTABILITY_EXEMPTIONS`] entry: it is permanent, the platform is in the
 /// path the caller types, and `validate_surface` requires it on Linux while
 /// rejecting it on macOS and Windows, so widening the split fails there.
+///
+/// The `starts_with` patterns here and in [`is_platform_extension`] end at the
+/// argument list. Without it the pattern is a prefix on the *name*, so a new
+/// Linux-only `Builder::ring_entries_max` would inherit `ring_entries`'
+/// approval and never reach the Unix-identity check it exists to fail.
 fn is_unix_split(target: Target, line: &str) -> bool {
     is_exempt(line)
         || (target.triple.contains("linux")
             && (line.contains("runite::os::linux")
                 // Like `Command::pre_exec`, `BuilderExt::ring_entries` renders
                 // as an inherent-looking method on its receiver.
-                || line.starts_with("pub fn runite::Builder::ring_entries")))
+                || line.starts_with("pub fn runite::Builder::ring_entries(")))
 }
 
 fn is_platform_extension(target: Target, line: &str) -> bool {
@@ -392,12 +397,12 @@ fn is_platform_extension(target: Target, line: &str) -> bool {
         line.contains("std::os::windows")
             || line.contains("runite::os::windows")
             || line.contains("runite::signal::windows")
-            || line.starts_with("pub fn runite::fs::Metadata::file_attributes")
-            || line.starts_with("pub fn runite::fs::OpenOptions::access_mode")
-            || line.starts_with("pub fn runite::fs::OpenOptions::attributes")
-            || line.starts_with("pub fn runite::fs::OpenOptions::custom_flags")
-            || line.starts_with("pub fn runite::fs::OpenOptions::security_qos_flags")
-            || line.starts_with("pub fn runite::fs::OpenOptions::share_mode")
+            || line.starts_with("pub fn runite::fs::Metadata::file_attributes(")
+            || line.starts_with("pub fn runite::fs::OpenOptions::access_mode(")
+            || line.starts_with("pub fn runite::fs::OpenOptions::attributes(")
+            || line.starts_with("pub fn runite::fs::OpenOptions::custom_flags(")
+            || line.starts_with("pub fn runite::fs::OpenOptions::security_qos_flags(")
+            || line.starts_with("pub fn runite::fs::OpenOptions::share_mode(")
     } else {
         // The Linux-only namespaces are excused here too, so this check and
         // the Unix-identity one above cannot disagree about what is approved.
@@ -409,10 +414,10 @@ fn is_platform_extension(target: Target, line: &str) -> bool {
             || line.contains("runite::net::Unix")
             || line.contains("runite::os::unix")
             || line.contains("runite::signal::unix")
-            || line.starts_with("pub fn runite::process::ExitStatus::signal")
+            || line.starts_with("pub fn runite::process::ExitStatus::signal(")
             // `CommandExt::pre_exec` is reachable as an inherent-looking method
             // on `Command`, so it renders without the trait's module path.
-            || line.starts_with("pub unsafe fn runite::process::Command::pre_exec")
+            || line.starts_with("pub unsafe fn runite::process::Command::pre_exec(")
     }
 }
 
@@ -832,6 +837,30 @@ mod tests {
         assert!(!is_platform_extension(
             target("x86_64-pc-windows-msvc"),
             "pub fn runite::fs::read()"
+        ));
+    }
+
+    /// A prefix that stops at the method name approves every method starting
+    /// with it, so a new Linux-only knob could inherit `ring_entries`'
+    /// exemption without anyone deciding it should have one.
+    #[test]
+    fn extension_prefixes_stop_at_the_argument_list() {
+        let linux = target("x86_64-unknown-linux-gnu");
+        assert!(is_unix_split(
+            linux,
+            "pub fn runite::Builder::ring_entries(self, u32) -> Self"
+        ));
+        assert!(!is_unix_split(
+            linux,
+            "pub fn runite::Builder::ring_entries_max(self, u32) -> Self"
+        ));
+        assert!(!is_platform_extension(
+            linux,
+            "pub fn runite::Builder::ring_entries_max(self, u32) -> Self"
+        ));
+        assert!(!is_platform_extension(
+            target("x86_64-pc-windows-msvc"),
+            "pub fn runite::fs::OpenOptions::share_mode_default(&mut self) -> &mut Self"
         ));
     }
 

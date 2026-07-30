@@ -54,7 +54,7 @@
 //! # std::io::Result::Ok(())
 //! ```
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::os::fd::{AsFd, AsRawFd};
 
 /// Waits until the given descriptor becomes readable or reports an error/hangup
@@ -124,8 +124,14 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Drain {
-    /// The descriptor reported end of input. The peer is gone; further reads
-    /// will not produce data.
+    /// The peer is gone; further reads will not produce data.
+    ///
+    /// Usually this is `read` returning zero. A terminal is the exception
+    /// worth naming: Linux hangs a pseudoterminal controller up with `EIO`
+    /// rather than end of file once the last user-side descriptor closes.
+    /// [`read_chunks`] reports `EIO` from a terminal here anyway, so a
+    /// consumer keys its teardown on one outcome however the platform spells
+    /// the hangup. `EIO` from anything else is still an error.
     EndOfInput,
     /// `on_chunk` returned [`ControlFlow::Break`](core::ops::ControlFlow::Break),
     /// or the supplied buffer was empty. The descriptor is still live.
@@ -172,6 +178,15 @@ impl Drain {
 ///
 /// The descriptor must already be nonblocking; a blocking one will stall the
 /// event loop inside `read`.
+///
+/// # Platform behavior
+///
+/// A pseudoterminal controller whose last user-side descriptor has closed
+/// reports `EIO` on Linux rather than end of file. `EIO` from a terminal is
+/// therefore reported as [`Drain::EndOfInput`], so a consumer keying teardown
+/// on its child exiting does not have to know which platform's pty it is
+/// holding. `EIO` from a descriptor that is not a terminal — a genuine failure
+/// on a file or a socket — is still returned as an error.
 ///
 /// # Examples
 ///
@@ -232,6 +247,17 @@ pub async fn read_chunks<Fd: AsFd>(
         match error.kind() {
             io::ErrorKind::Interrupted => continue,
             io::ErrorKind::WouldBlock => wait_readable(fd.as_fd()).await?,
+            // Linux hangs a pty controller up with `EIO` where an ordinary
+            // descriptor reports end of input. Passing that through hands the
+            // one consumer `Drain` was designed for an I/O failure for the
+            // very event it keys teardown on, and makes the answer depend on
+            // whose pty it is. Narrowed to terminals so a real `EIO` on a file
+            // or a socket still surfaces as the failure it is. The `isatty`
+            // behind `is_terminal` overwrites `errno`, so it runs only after
+            // the error has been captured.
+            _ if error.raw_os_error() == Some(libc::EIO) && fd.as_fd().is_terminal() => {
+                return Ok(Drain::EndOfInput);
+            }
             _ => return Err(error),
         }
     }
@@ -413,6 +439,106 @@ mod tests {
                 flag.store(true, Ordering::Release);
                 // SAFETY: this task owns the descriptor's lifetime here.
                 unsafe { libc::close(read_fd) };
+            });
+        });
+        run();
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    /// A pseudoterminal controller reaches end of input when its last
+    /// user-side descriptor closes, even though Linux spells that `EIO`.
+    ///
+    /// This is the case the [`super::Drain`] type was added for: it is how a
+    /// terminal consumer learns its child exited.
+    #[test]
+    fn read_chunks_treats_a_hung_up_pty_as_end_of_input() {
+        use std::ops::ControlFlow;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut controller = -1;
+        let mut user = -1;
+        // SAFETY: both out-pointers are valid; null optional pointers request
+        // the default name, termios, and window size.
+        let rc = unsafe {
+            libc::openpty(
+                &mut controller,
+                &mut user,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty should succeed");
+        // SAFETY: `openpty` initialized both with owned, open descriptors.
+        let (controller, user) =
+            unsafe { (OwnedFd::from_raw_fd(controller), OwnedFd::from_raw_fd(user)) };
+        // SAFETY: the controller is open; O_NONBLOCK is required by the contract.
+        unsafe { libc::fcntl(controller.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+        let line = b"child output\n";
+        // SAFETY: the user side is open, and `line` is initialized storage.
+        let written = unsafe {
+            libc::write(
+                user.as_raw_fd(),
+                line.as_ptr().cast::<libc::c_void>(),
+                line.len(),
+            )
+        };
+        assert_eq!(written as usize, line.len());
+        // The child exiting: its last descriptor on the user side goes away.
+        drop(user);
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        queue_macrotask(move || {
+            spawn(async move {
+                let mut buffer = [0u8; 256];
+                let outcome =
+                    super::read_chunks(&controller, &mut buffer, |_| ControlFlow::Continue(()))
+                        .await
+                        .expect("a hung-up pty is a finished drain, not a failure");
+                // How much of the pending output survives the hangup differs
+                // between Linux and the BSDs, so only the outcome is asserted.
+                assert_eq!(
+                    outcome,
+                    super::Drain::EndOfInput,
+                    "a terminal consumer keys its teardown on this"
+                );
+                flag.store(true, Ordering::Release);
+            });
+        });
+        run();
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    /// The pty rule is narrowed to terminals, so `EIO` from anything else is
+    /// still the failure it is rather than a silent, empty drain.
+    ///
+    /// `/proc/self/mem` is the cheapest reliable `EIO` source: reading it at
+    /// offset zero addresses the unmapped first page. That makes the test
+    /// Linux-only, which is also the only platform where a hangup can be
+    /// confused with a failure.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_chunks_still_fails_on_a_non_terminal_eio() {
+        use std::ops::ControlFlow;
+        use std::os::fd::AsRawFd;
+
+        let mem = std::fs::File::open("/proc/self/mem").expect("/proc/self/mem should open");
+        // SAFETY: the file is open for the whole call; the contract wants the
+        // descriptor nonblocking.
+        unsafe { libc::fcntl(mem.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        queue_macrotask(move || {
+            spawn(async move {
+                let mut buffer = [0u8; 64];
+                let error = super::read_chunks(&mem, &mut buffer, |_| ControlFlow::Continue(()))
+                    .await
+                    .expect_err("EIO on a file is not end of input");
+                assert_eq!(error.raw_os_error(), Some(libc::EIO));
+                flag.store(true, Ordering::Release);
             });
         });
         run();

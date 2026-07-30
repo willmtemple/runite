@@ -97,12 +97,10 @@ pub struct UnixDatagram {
 }
 
 impl UnixStream {
-    /// Closes the descriptor, on Linux ordering the close behind operations
-    /// already submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
-    /// macOS has no asynchronous close: there the descriptor is closed
-    /// synchronously and only the outcome reporting is gained.
-    ///
+    /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle, and why it is not a way to catch close errors.
     ///
@@ -502,12 +500,10 @@ impl std::fmt::Display for ReuniteError {
 impl std::error::Error for ReuniteError {}
 
 impl UnixListener {
-    /// Closes the descriptor, on Linux ordering the close behind operations
-    /// already submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
-    /// macOS has no asynchronous close: there the descriptor is closed
-    /// synchronously and only the outcome reporting is gained.
-    ///
+    /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle, and why it is not a way to catch close errors.
     ///
@@ -660,12 +656,10 @@ impl Stream for Incoming {
 }
 
 impl UnixDatagram {
-    /// Closes the descriptor, on Linux ordering the close behind operations
-    /// already submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
-    /// macOS has no asynchronous close, and this type has no sharing to report
-    /// on, so there this does exactly what dropping the handle does.
-    ///
+    /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle. A datagram socket owns its descriptor outright and
     /// cannot be split or shared, so this never reports

@@ -1,4 +1,4 @@
-# Windows backend — 0.2 design
+# Windows backend design
 
 *This document describes the design of the Windows backend: an IOCP-based driver plus a
 `sys/windows` operation backend. It parallels the Linux (`io_uring`) and macOS (`kqueue` +
@@ -154,6 +154,7 @@ same logical write after `Pending`.
 | read / write | overlapped `ReadFile`/`WriteFile` at explicit offsets through IOCP |
 | cursor I/O | one shared serialized cursor state across `try_clone` handles, with explicit-offset overlapped ops and checked `SetFilePointerEx` updates |
 | metadata / sync / set_len / try_clone | blocking pool (no overlapped form), mirroring macOS |
+| close | synchronous `CloseHandle`/`closesocket`, from `Drop` and from `close_descriptor` alike; there is no asynchronous close to order against in-flight work, so `close_descriptor` buys only the `Closed`/`StillShared` outcome |
 | read_dir | shared bounded, demand-driven 32-entry blocking-pool batches; no worker waits for buffer capacity |
 | TCP connect | `ConnectEx` (wildcard-bind first) + `SO_UPDATE_CONNECT_CONTEXT` |
 | TCP accept | `AcceptEx` + `SO_UPDATE_ACCEPT_CONTEXT`, address parsed from the accept buffer |
@@ -193,6 +194,8 @@ know which world they are in.
   `std::os::windows::fs::OpenOptionsExt`).
 - `runite::os::windows::fs::MetadataExt` — `file_attributes`.
 - `runite::signal::windows` — console control events.
+- `Stdio: From<OwnedHandle>` — the Windows spelling of the Unix `From<OwnedFd>`, for wiring a
+  child's standard stream to a handle the caller already owns.
 - `Metadata::mode()` returns a synthesized POSIX-style mode on Windows (directory/file
   type bits plus `0o444`/`0o666`-style permission bits derived from `FILE_ATTRIBUTE_READONLY`),
   documented as an emulation.
