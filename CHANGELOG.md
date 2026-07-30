@@ -424,6 +424,39 @@ changes.
   opt-in via `release-verify --allow-dirty`; without it, a dirty packaged file
   fails loudly instead. ([#29](https://github.com/willmtemple/runite/issues/29))
 
+- `release-verify` no longer packages the crates a second time in a separate
+  "publish shape". That path was added on the premise that
+  `cargo package --workspace` records the proc-macro dependency differently
+  from what `cargo publish` uploads; measured, the two archives are the same
+  bytes. The embedded `Cargo.lock` names the sibling `.crate` by checksum, and
+  that file *is* the one published, so the digest cargo writes before the
+  release is the digest crates.io reports after it. The release workflow
+  compares against the workspace artifacts again, and `release-verify` now
+  asserts the identity that makes this sound instead of leaving it implicit.
+  Removing the second path also closes a hole it opened: a rerun of a release
+  whose crates were already published aborted, because the artifact the
+  comparison wanted could only be built later in the same run.
+
+- `release-verify` requires `docs/MIGRATING-0.3.md` in both the packaged file
+  list and the unpacked archive. It shipped either way — `docs/` is included by
+  default — but only the 0.2 guide was asserted, so an edit to the `exclude`
+  list could have dropped this release's guide silently.
+
+- `time` is pinned to at least 0.3.47 in `[dev-dependencies]` rather than only
+  in `Cargo.lock`. The advisory is RUSTSEC-2026-0009 (a stack exhaustion in
+  RFC 2822 parsing; the ID given in the commit that first pinned it was wrong).
+  Nothing in the manifest held the floor, and the MSRV-aware resolver picks
+  0.3.45 unprompted, so any lock regeneration reverted the pin and turned the
+  advisory job red with a fix `cargo update -p time` cannot apply. `time` is
+  reached only through the `rcgen` dev-dependency, so no published consumer was
+  ever exposed.
+
+- CI's crypto-provider leak guard reports a `cargo tree` that fails outright as
+  a failure. It was a pipeline under a leading `!`, which inverted grep's
+  "nothing matched" into success and suppressed `set -e` — so a broken manifest
+  read as a clean dependency graph. `pipefail` does not fix that; capturing the
+  output first does.
+
 ### Documented
 
 - The scheduling guarantee that layers built on runite batch on — *a microtask
@@ -493,6 +526,23 @@ changes.
 - `Child::from_pid`'s `# Errors` omitted the `InvalidInput` Unix returns for a
   `pid` that is not a process identifier — zero, or beyond `pid_t` — which it
   rejects before any syscall. Added, with a test.
+
+- The `Cargo.toml` line `runite::tls` hands you for choosing a crypto provider
+  works. `rustls = { version = "0.23", features = ["ring"] }` is additive to
+  rustls's defaults, which include `aws-lc-rs`, so it enabled *two* providers —
+  rustls then refuses to pick either and panics with the exact message the
+  section says it is avoiding, having also pulled in `aws-lc-sys` and its CMake
+  requirement. The snippet now sets `default-features = false`, matching what
+  runite uses for its own dev-dependencies, and a test holds the docs to naming
+  exactly one provider.
+
+- `mise run deny` checks licences and advisories the way CI does, and is part
+  of `mise run check`. cargo-deny was wired into no local task at all, and the
+  command `deny.toml` pointed at — a bare `cargo deny check` — resolves only
+  the default features, a graph containing no `rustls`, `ring`,
+  `rustls-webpki`, `untrusted` or `subtle`. It reported the ISC and
+  BSD-3-Clause allowances as unused and passed, so a contributor could clear
+  licences locally and still be failed by CI.
 
 ### Changed
 

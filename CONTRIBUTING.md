@@ -9,7 +9,7 @@ a change merged.
 
 ```sh
 mise install      # installs the pinned Rust toolchain and dev tools
-mise run check    # fmt + clippy + tests + workflow lint — the full local gate
+mise run check    # fmt + clippy + tests + workflow lint + licences — the full local gate
 ```
 
 If you do not use mise, a recent stable Rust toolchain (matching the `rust-version` /

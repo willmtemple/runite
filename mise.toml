@@ -37,6 +37,10 @@ rust = { version = "1", components = "rustfmt,clippy,llvm-tools" }
 # recorded in mise.lock like the other GitHub-hosted tools.
 "github:rhysd/actionlint" = "1.7.7"
 
+# Licence and advisory checking, so `mise run deny` runs the same tool CI's
+# cargo-deny-action runs rather than whatever `cargo install` last produced.
+"github:EmbarkStudios/cargo-deny" = "0.20.2"
+
 [tasks.build]
 description = "Build the workspace"
 run = "cargo build --workspace --all-targets"
@@ -80,6 +84,17 @@ run = "python3 -m unittest discover -s .github/scripts -p 'test_*.py'"
 [tasks.ci-lint]
 description = "Validate GitHub Actions workflow YAML and expressions"
 run = "actionlint .github/workflows/*.yml"
+
+# `--all-features` is not decoration. cargo-deny builds its graph from the
+# default feature set unless told otherwise, and that graph contains no
+# `rustls`, `ring`, `rustls-webpki`, `untrusted` or `subtle` -- the entire TLS
+# licence surface, including the only ISC and BSD-3-Clause crates runite pulls
+# in. A plain `cargo deny check` reports those allowances as unused and passes.
+# CI's cargo-deny-action defaults to `--all-features`, so this is the flag that
+# makes the local answer the same as the one that gates the pull request.
+[tasks.deny]
+description = "Check licences and advisories over the same graph CI uses"
+run = "cargo-deny --all-features check"
 
 [tasks.ci-nightly-install]
 description = "Install the pinned nightly with Miri and sanitizer components"
@@ -363,5 +378,5 @@ description = "Emit lcov coverage for CI consumption"
 run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(^|/)(xtask|proc_macros)/' --lcov --output-path lcov.info"
 
 [tasks.check]
-description = "Run the full local gate (fmt, lint, test, workflows, release gate)"
-depends = ["fmt", "lint", "test", "ci-lint", "ci-script-test"]
+description = "Run the full local gate (fmt, lint, test, workflows, licences)"
+depends = ["fmt", "lint", "test", "ci-lint", "ci-script-test", "deny"]

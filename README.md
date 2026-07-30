@@ -244,7 +244,7 @@ The toolchain is pinned with [mise](https://mise.jdx.dev/). Install it, then:
 
 ```sh
 mise install            # fetch the pinned Rust toolchain and dev tools
-mise run check          # fmt + clippy + tests + workflow lint (the full local gate)
+mise run check          # fmt + clippy + tests + workflow lint + licences (the local gate)
 ```
 
 Individual tasks:
@@ -262,6 +262,7 @@ Individual tasks:
 | `mise run capability-matrix` | Injected constrained-opcode dispatch tests, then the io-facing tests under two masked opcode profiles. | Verify old-kernel fallbacks.  |
 | `mise run stress-issue-6` | Repeated doctest and blocking-runtime liveness tests.             | Guard the former intermittent race. |
 | `mise run ci-lint` | `actionlint .github/workflows/*.yml`                                    | Validate workflow YAML.            |
+| `mise run deny`    | `cargo-deny --all-features check`                                       | Licences and advisories, as CI does. |
 
 ### Testing
 

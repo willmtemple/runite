@@ -6,6 +6,7 @@
 mod api_report;
 mod command;
 mod release_verify;
+mod sha256;
 mod targets;
 
 fn main() -> std::process::ExitCode {

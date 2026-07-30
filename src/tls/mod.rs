@@ -46,10 +46,31 @@
 //! Rustls crate features.
 //! ```
 //!
-//! Fix it in one of two ways. Either depend on `rustls` directly with a
-//! provider feature — `rustls = { version = "0.23", features = ["ring"] }` —
-//! and let rustls install it, or install one explicitly before building any
-//! configuration:
+//! Enabling one takes a direct `rustls` dependency, because a feature can only
+//! be turned on from a `Cargo.toml`:
+//!
+//! ```toml
+//! rustls = { version = "0.23", default-features = false, features = [
+//!   "logging",
+//!   "ring",
+//!   "std",
+//!   "tls12",
+//! ] }
+//! ```
+//!
+//! `default-features = false` is the load-bearing part. `aws-lc-rs` is one of
+//! rustls's defaults, so a bare `features = ["ring"]` enables `ring`
+//! *alongside* it: two providers, which is the other way to reach the panic
+//! above, and it pulls in `aws-lc-sys` and its CMake requirement as well. The
+//! other three are rustls's remaining defaults, and are the three runite
+//! enables itself, so naming them keeps your dependency from reading as
+//! narrower than the build you actually get. This is exactly the line runite
+//! uses for its own dev-dependencies.
+//!
+//! With one provider feature enabled and no other, rustls installs it for you
+//! and nothing else is needed. If more than one can be on — a workspace where
+//! another crate enables `aws-lc-rs`, say — choose explicitly instead, before
+//! any configuration is built:
 //!
 //! ```no_run
 //! runite::tls::rustls::crypto::ring::default_provider()
@@ -57,9 +78,8 @@
 //!     .expect("no other provider may be installed first");
 //! ```
 //!
-//! A direct dependency is still the way to *enable* a provider — a feature can
-//! only be turned on from a `Cargo.toml` — but write the code against
-//! [`runite::tls::rustls`](rustls) so the version can never drift.
+//! Write that against [`runite::tls::rustls`](rustls) rather than your own
+//! `rustls` path, so the version can never drift.
 //!
 //! Trust anchors are the same kind of decision and are equally out of scope:
 //! `rustls-native-certs` reads the platform store, `webpki-roots` compiles a

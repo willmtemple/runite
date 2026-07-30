@@ -21,7 +21,6 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("api-report") => api_report::run(&args[1..]),
         Some("release-verify") | Some("package-verify") => release_verify::run(&args[1..]),
-        Some("publish-shape") => release_verify::publish_shape(&args[1..]),
         Some("help") | Some("--help") | Some("-h") => {
             usage();
             Ok(())
@@ -37,8 +36,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
 fn usage() {
     eprintln!(
         "usage:\n  xtask api-report [--check]\n  \
-         xtask release-verify [--msrv] [--publish-dry-run]\n  \
-         xtask publish-shape [--allow-dirty] <package>..."
+         xtask release-verify [--msrv] [--publish-dry-run]"
     );
 }
 
