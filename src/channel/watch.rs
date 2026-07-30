@@ -305,15 +305,22 @@ impl<T: Send + 'static> Sender<T> {
         // critical section free of user code and defers the drop to after both
         // locks are released.
         let (previous, version) = {
-            let book = self.shared.lock_book();
-            if book.receiver_count == 0 {
-                return Err(SendError(value));
-            }
+            // Value first, then book, and the order is load-bearing. A reader
+            // holding a `Ref` owns the value read lock, and from there may take
+            // the book — `receiver_count`, `subscribe`. Taking the book first
+            // here would complete a cycle: this thread waiting on the value
+            // write lock while holding the book, that thread waiting on the
+            // book while holding the value read lock. Neither ever returns, and
+            // it is reachable through entirely ordinary public API.
             let mut slot = self
                 .shared
                 .value
                 .write()
                 .expect("watch state should not be poisoned");
+            let book = self.shared.lock_book();
+            if book.receiver_count == 0 {
+                return Err(SendError(value));
+            }
             let previous = std::mem::replace(&mut *slot, value);
             // Bump under the value write lock: readers cannot observe the new
             // value with the old version, or vice versa.
@@ -698,6 +705,52 @@ mod tests {
         );
         release.release();
         sender_thread.join().unwrap();
+        assert_eq!(*receiver.borrow(), 1);
+    }
+
+    /// `send` must take the value lock before the book, because that is the
+    /// order a reader uses.
+    ///
+    /// A `Ref` holds the value read lock, and its holder may go on to take the
+    /// book — `receiver_count`, `subscribe`. If `send` took the book first it
+    /// would wait on the value lock while holding the book, while the reader
+    /// waits on the book while holding the value lock. Neither returns.
+    ///
+    /// The sibling test above covers `send_modify`, which never held the book
+    /// across the write and so cannot catch this.
+    #[test]
+    fn send_takes_the_value_lock_before_the_book() {
+        let (sender, receiver) = channel(0usize);
+        let shared = Arc::clone(&receiver.shared);
+
+        // Held for the whole of the send below, exactly as a reader inspecting
+        // the current value would.
+        let borrowed = receiver.borrow();
+
+        let sender_thread = TrackedThread::new(std::thread::spawn(move || {
+            sender.send(1).expect("a receiver is alive");
+        }));
+
+        // Long enough that the send has certainly reached whichever lock it
+        // takes first. With the inversion it is now parked on the value write
+        // lock while holding the book.
+        std::thread::sleep(Duration::from_millis(100));
+        let book_was_free = shared.book.try_lock().is_ok();
+
+        // Released before asserting, deliberately. Panicking while the borrow
+        // is live drops `sender_thread` first — locals unwind in reverse
+        // declaration order — and its `join` then waits on a send that cannot
+        // proceed until this borrow goes away. The test would detect the
+        // deadlock by deadlocking, which in CI is a job timeout rather than a
+        // failure anyone can read.
+        drop(borrowed);
+        sender_thread.join().unwrap();
+
+        assert!(
+            book_was_free,
+            "send must not hold the book while it waits for the value lock: a \
+             reader holding a borrow and then taking the book would deadlock"
+        );
         assert_eq!(*receiver.borrow(), 1);
     }
 

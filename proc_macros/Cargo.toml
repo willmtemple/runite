@@ -1,6 +1,6 @@
 [package]
 name = "runite-proc-macros"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Procedural macros (#[runite::main]) for the runite async runtime. Use via the runite crate; not intended for direct consumption."

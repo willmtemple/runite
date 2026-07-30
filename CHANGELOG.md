@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-07-30
 
 See the [0.2 → 0.3 migration guide](docs/MIGRATING-0.3.md) for required source
 changes.
@@ -1024,6 +1024,7 @@ microtask/macrotask scheduling, local `!Send` futures, explicit worker
 runtimes, async filesystem/network/process/stdio services, timers, channels,
 and synchronization primitives.
 
-[Unreleased]: https://github.com/willmtemple/runite/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/willmtemple/runite/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/willmtemple/runite/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/willmtemple/runite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0
