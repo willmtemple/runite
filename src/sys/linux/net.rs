@@ -441,7 +441,7 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
     };
 
     let fallback_how = how;
-    match submit_uring::<(), _>(
+    let result = match submit_uring::<(), _>(
         move |sqe| {
             sqe.opcode = IORING_OP_SHUTDOWN;
             sqe.fd = fd;
@@ -454,6 +454,29 @@ pub async fn shutdown(op: NetOp) -> io::Result<()> {
         // `shutdown(2)` never blocks; run inline instead of bouncing to the blocking pool.
         Err(error) if should_fallback_to_offload(&error) => shutdown_sync(fd, fallback_how),
         result => result,
+    };
+
+    // `ENOTCONN` means the connection is already gone: the peer closed and this
+    // end has consumed the resulting end of stream. The caller asked for the
+    // connection to be shut down, and it is. There is nothing they can do with
+    // the error that they are not already doing.
+    //
+    // This is a parity fix, not a convenience. `IORING_OP_SHUTDOWN` needs Linux
+    // 5.11, so below that the request falls back to a synchronous `shutdown(2)`
+    // that runs **inline**, while the ring path completes later alongside
+    // everything else queued. That timing difference decides whether the peer's
+    // close has been observed yet, so the same program returned `Ok` on a
+    // modern kernel and `ENOTCONN` on an older one. hyper's graceful shutdown
+    // treats the error as fatal, so serving HTTPS worked in CI and would have
+    // failed on any kernel below 5.11.
+    //
+    // Caught by `hyper_serves_and_requests_over_tls` under the `above-5.6`
+    // profile of `mise run capability-matrix`, which is where the regression
+    // coverage for this lives — the constrained run is the only thing that
+    // reaches the fallback with a real socket.
+    match result {
+        Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => Ok(()),
+        other => other,
     }
 }
 
