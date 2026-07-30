@@ -52,6 +52,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             "LICENSE-MIT",
             "docs/WINDOWS.md",
             "docs/MIGRATING-0.2.md",
+            "docs/MIGRATING-0.3.md",
             "src/lib.rs",
         ],
     )?;
@@ -75,12 +76,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let macro_artifact = artifacts.join(format!("runite-proc-macros-{macro_version}.crate"));
     require_file(&main_artifact)?;
     require_file(&macro_artifact)?;
-    build_publish_shaped_artifacts(
-        &root,
-        &release_dir,
-        allow_dirty,
-        &["runite", "runite-proc-macros"],
-    )?;
 
     let unpacked = release_dir.join("unpacked");
     fs::create_dir_all(&unpacked)
@@ -105,6 +100,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             "LICENSE-MIT",
             "docs/WINDOWS.md",
             "docs/MIGRATING-0.2.md",
+            "docs/MIGRATING-0.3.md",
             "src/lib.rs",
         ],
     )?;
@@ -134,6 +130,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let main_lock = main_dir.join("Cargo.lock");
     let lock = fs::read_to_string(&main_lock)
         .map_err(|error| format!("failed to read {}: {error}", main_lock.display()))?;
+    verify_lock_records_packaged_macro(&lock, &macro_artifact)?;
     let patched_lock = patch_proc_macro_lock(&lock, &macro_version)?;
     fs::write(&main_lock, patched_lock)
         .map_err(|error| format!("failed to patch {}: {error}", main_lock.display()))?;
@@ -181,6 +178,7 @@ const FORBIDDEN_PACKAGE_PATHS: &[&str] = &[
     "rust-toolchain.toml",
     "SECURITY.md",
     "docs/public-api.md",
+    "docs/public-api-traits.md",
 ];
 
 fn package_version(manifest: &Path) -> Result<String, String> {
@@ -230,47 +228,63 @@ fn package_list(root: &Path, package: &str, allow_dirty: bool) -> Result<BTreeSe
         .collect())
 }
 
-/// Produces the artifacts in the shape `cargo publish` will actually upload.
+/// Establishes that the workspace-packaged `runite` artifact is the one
+/// `cargo publish` will upload, which is what lets the release workflow compare
+/// crates.io's recorded checksum against it.
 ///
-/// These differ from the workspace-packaged ones, and that is correct — which
-/// is exactly why they have to exist separately. `cargo package --workspace`
-/// rewrites the packaged `Cargo.lock` to reference the *locally packaged*
-/// proc-macro, so the unpacked tree can be built and tested before anything is
-/// uploaded. `cargo publish --locked --package runite`, which is what the
-/// release actually runs, resolves the proc-macro from the registry instead,
-/// recording a different checksum and so producing a different `.crate`.
+/// `runite` depends on `runite-proc-macros` at an exact version, so the
+/// `Cargo.lock` embedded in the packaged `runite` records that dependency
+/// against the registry, with a checksum. When the version is not on crates.io
+/// yet — the situation of every release — cargo has only one candidate to take
+/// that checksum from: the sibling `.crate` it just packaged. That sibling is
+/// byte-for-byte the file `cargo publish --package runite-proc-macros` uploads,
+/// so the checksum cargo writes now is the checksum the registry will report
+/// afterwards, and the archive is identical either way.
 ///
-/// The distinction is load-bearing rather than cosmetic. The release workflow
-/// compares crates.io's stored checksum against a local repackage, and a
-/// mismatch is close to unrecoverable: it is detected only after the first
-/// crate has been uploaded, and re-detected on every rerun. Comparing against
-/// the workspace artifact means comparing a checksum the published crate can
-/// never have, which turns a successful release into a permanently
-/// unpublishable version.
-fn build_publish_shaped_artifacts(
-    root: &Path,
-    release_dir: &Path,
-    allow_dirty: bool,
-    packages: &[&str],
-) -> Result<(), String> {
-    let publish_shape = release_dir.join("publish-shape");
-    for package in packages {
-        let mut command = Command::new("cargo");
-        command.current_dir(root).args(["package", "--no-verify"]);
-        if allow_dirty {
-            command.arg("--allow-dirty");
-        }
-        command
-            .args(["--package", package, "--target-dir"])
-            .arg(&publish_shape);
-        run_status(&mut command, &format!("package {package} in publish shape"))?;
+/// That identity is the reason `release-verify` does not also package `runite`
+/// on its own. It cannot: packaging `runite` standalone *resolves* the exact
+/// proc-macro dependency from the registry, which fails with "failed to select
+/// a version for the requirement" until that version is published. Since the
+/// workspace artifact is the same bytes, there is nothing to gain from trying.
+///
+/// The identity is asserted rather than assumed, because everything above is a
+/// statement about cargo's behaviour and a release that compares the wrong
+/// checksum is detected only after the first upload.
+fn verify_lock_records_packaged_macro(lock: &str, macro_artifact: &Path) -> Result<(), String> {
+    let recorded = proc_macro_lock_checksum(lock).ok_or_else(|| {
+        "the packaged runite Cargo.lock has no checksum for runite-proc-macros, so the \
+         artifact cannot be the one `cargo publish` uploads"
+            .to_owned()
+    })?;
+    let packaged = fs::read(macro_artifact)
+        .map_err(|error| format!("failed to read {}: {error}", macro_artifact.display()))?;
+    let digest = crate::sha256::hex_digest(&packaged);
+    if recorded == digest {
+        Ok(())
+    } else {
+        Err(format!(
+            "the packaged runite Cargo.lock records runite-proc-macros checksum {recorded}, \
+             but the packaged proc-macro artifact hashes to {digest}; the published `runite` \
+             would not match this artifact"
+        ))
     }
-    println!(
-        "xtask: publish-shaped artifacts written to {} (compare release checksums against these, \
-         not the workspace ones)",
-        publish_shape.join("package").display()
-    );
-    Ok(())
+}
+
+/// The `checksum` recorded for `runite-proc-macros` in a packaged lockfile.
+fn proc_macro_lock_checksum(lock: &str) -> Option<String> {
+    let mut in_target = false;
+    for line in lock.lines() {
+        if line == "[[package]]" {
+            in_target = false;
+        } else if line == "name = \"runite-proc-macros\"" {
+            in_target = true;
+        } else if in_target {
+            if let Some(value) = line.strip_prefix("checksum = ") {
+                return Some(value.trim_matches('"').to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn package_workspace(root: &Path, target: &Path, allow_dirty: bool) -> Result<(), String> {
@@ -493,6 +507,24 @@ fn verify_unpacked_packages(
         false,
     )?;
 
+    // Cross-target checks are `--lib`, not `--all-targets`, and that is a
+    // deliberate narrowing rather than an oversight.
+    //
+    // Anything beyond the library — tests, benches, even examples — puts
+    // dev-dependencies into the build graph, and the TLS tests depend on
+    // `ring`, whose build script compiles C. Cross-compiling that to
+    // `aarch64-apple-darwin` or `x86_64-pc-windows-msvc` from a Linux runner
+    // needs a C toolchain for those platforms, which is not something CI or a
+    // developer machine can reasonably be expected to have. It is not a matter
+    // of installing one package.
+    //
+    // What is being verified here is the promise the published crate makes: the
+    // *library* builds for every supported target, its docs build, and it
+    // builds on the MSRV. A consumer depending on runite from crates.io never
+    // builds our tests, so cross-compiling them proved nothing about what we
+    // ship. Examples, tests and benches are still built and run for the host
+    // above, and the per-platform CI jobs build `--all-targets` natively on
+    // macOS and Windows, which is where that coverage actually belongs.
     for release_target in SUPPORTED_TARGETS {
         cargo_manifest(
             root,
@@ -502,7 +534,7 @@ fn verify_unpacked_packages(
                 "check",
                 "--target",
                 release_target.triple,
-                "--all-targets",
+                "--lib",
                 "--locked",
             ],
             &format!("check unpacked runite default ({})", release_target.triple),
@@ -516,7 +548,7 @@ fn verify_unpacked_packages(
                 "check",
                 "--target",
                 release_target.triple,
-                "--all-targets",
+                "--lib",
                 "--all-features",
                 "--locked",
             ],
@@ -638,6 +670,48 @@ mod tests {
         assert!(!patched.contains("registry+"));
         assert!(!patched.contains("checksum"));
         assert!(patched.contains("dependencies = []"));
+    }
+
+    #[test]
+    fn reads_the_proc_macro_checksum_from_the_packaged_lock() {
+        let lock = "version = 4\n\n[[package]]\nname = \"runite\"\nversion = \"0.3.0\"\nchecksum = \"not-this-one\"\n\n[[package]]\nname = \"runite-proc-macros\"\nversion = \"0.3.0\"\nsource = \"registry+https://example.invalid\"\nchecksum = \"abc123\"\n";
+        assert_eq!(
+            proc_macro_lock_checksum(lock).as_deref(),
+            Some("abc123"),
+            "the checksum must come from the proc-macro's own block"
+        );
+        let without =
+            "version = 4\n\n[[package]]\nname = \"runite-proc-macros\"\nversion = \"0.3.0\"\n";
+        assert_eq!(proc_macro_lock_checksum(without), None);
+    }
+
+    /// A packaged lock with no proc-macro checksum, or one naming a different
+    /// archive, means the artifact `release-verify` validated is not the
+    /// artifact `cargo publish` would upload.
+    #[test]
+    fn a_lock_that_does_not_name_the_packaged_macro_is_rejected() {
+        // Process-unique: a second checkout running this suite concurrently
+        // must not be reading the file while this one rewrites it.
+        let artifact = std::env::temp_dir().join(format!(
+            "runite-xtask-lock-check-{}.crate",
+            std::process::id()
+        ));
+        fs::write(&artifact, b"abc").expect("write probe artifact");
+        let digest = crate::sha256::hex_digest(b"abc");
+
+        let matching = format!(
+            "version = 4\n\n[[package]]\nname = \"runite-proc-macros\"\nversion = \"0.3.0\"\nsource = \"registry+x\"\nchecksum = \"{digest}\"\n"
+        );
+        assert!(verify_lock_records_packaged_macro(&matching, &artifact).is_ok());
+
+        let mismatched = "version = 4\n\n[[package]]\nname = \"runite-proc-macros\"\nversion = \"0.3.0\"\nsource = \"registry+x\"\nchecksum = \"0000\"\n";
+        assert!(verify_lock_records_packaged_macro(mismatched, &artifact).is_err());
+
+        let absent =
+            "version = 4\n\n[[package]]\nname = \"runite-proc-macros\"\nversion = \"0.3.0\"\n";
+        assert!(verify_lock_records_packaged_macro(absent, &artifact).is_err());
+
+        fs::remove_file(&artifact).expect("remove probe artifact");
     }
 
     #[test]

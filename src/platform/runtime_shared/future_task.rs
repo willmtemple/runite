@@ -27,6 +27,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::LocalBoxFuture;
 use super::handles::ThreadHandle;
+use super::scheduler::{trace_runtime_id, trace_turn_id};
 use super::state::{
     describe_panic, mark_teardown_panicked, try_with_installed_thread, with_installed_thread,
 };
@@ -83,13 +84,10 @@ impl FutureTask {
             });
             return;
         }
-        with_installed_thread(|state| {
-            super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
-            state.shared.ready_tasks.fetch_add(1, Ordering::AcqRel);
-        });
-
         let task = Rc::clone(self);
         with_installed_thread(|state| {
+            super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
+            state.shared.ready_tasks.fetch_add(1, Ordering::Relaxed);
             state
                 .local_microtasks
                 .borrow_mut()
@@ -99,19 +97,21 @@ impl FutureTask {
 
     fn poll(self: Rc<Self>) {
         self.queued.set(false);
-        with_installed_thread(|state| {
-            state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
-        });
 
         // An abort that landed while this task sat in the microtask queue has
-        // already taken the future; nothing left to poll.
-        let Some(mut future) = self.future.borrow_mut().take() else {
+        // already taken the future; nothing left to poll — but the task has
+        // still left the ready queue.
+        let taken = self.future.borrow_mut().take();
+        with_installed_thread(|state| {
+            state.shared.ready_tasks.fetch_sub(1, Ordering::Relaxed);
+            if taken.is_some() {
+                super::state::RuntimeCounters::bump(&state.shared.counters.task_polls);
+            }
+        });
+        let Some(mut future) = taken else {
             return;
         };
 
-        with_installed_thread(|state| {
-            super::state::RuntimeCounters::bump(&state.shared.counters.task_polls);
-        });
         let mut context = Context::from_waker(&self.waker);
         // Isolate task panics: a future that unwinds must not tear down the
         // event loop that is polling it. Catch the unwind here, report it, and
@@ -145,6 +145,8 @@ impl FutureTask {
                 tracing::error!(
                     target: trace_targets::ASYNC,
                     event = "task_panicked",
+                    runtime_id = trace_runtime_id(),
+                    turn_id = trace_turn_id(),
                     task_id = self.id,
                     panic = describe_panic(&*payload),
                     "spawned task panicked; isolating and reporting JoinError::Panicked to the joiner",
@@ -181,7 +183,7 @@ pub(crate) fn cancel_tasks_for_shutdown(mut tasks: Vec<Rc<FutureTask>>) {
             let join_waker = task.shared.mark_cancelled()?;
             if task.queued.replace(false) {
                 with_installed_thread(|state| {
-                    state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
+                    state.shared.ready_tasks.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             let future = task.future.borrow_mut().take();
@@ -216,6 +218,8 @@ fn wake_join_safely(waker: Option<Waker>, task_id: u64, terminal: &'static str) 
         tracing::error!(
             target: trace_targets::ASYNC,
             event = "join_waker_panicked",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             task_id,
             terminal,
             panic = describe_panic(&*payload),
@@ -230,6 +234,8 @@ fn drop_future_safely(future: LocalBoxFuture, task_id: u64, terminal: &'static s
         tracing::error!(
             target: trace_targets::ASYNC,
             event = "task_future_drop_panicked",
+            runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             task_id,
             terminal,
             panic = describe_panic(&*payload),

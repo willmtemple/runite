@@ -7,6 +7,87 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+/// A bare `async` body is driven by `block_on`, which installs the runtime
+/// before it polls anything, which is why a `Builder` here is refused — and why
+/// the settings have to be reachable from the attribute itself. Three of the
+/// four attribute shapes behave this way; the fourth is pinned by
+/// `entry_bare_sync_runtime_timing.rs`, which needs a binary to itself.
+#[runite::test]
+async fn a_builder_inside_the_attribute_is_too_late() {
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+/// A configured attribute must still produce a runtime that does real work,
+/// not merely one that was accepted. The ring size itself is checked against
+/// the mapped ring by the in-crate tests, which can read it back.
+#[cfg(target_os = "linux")]
+#[runite::test(ring_entries = 8)]
+async fn a_configured_test_attribute_drives_real_io() {
+    let contents = runite::fs::read_to_string("Cargo.toml")
+        .await
+        .expect("Cargo.toml should be readable");
+    assert!(contents.contains("runite"));
+
+    // The attribute built it, so this thread is already configured.
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+// Both its setter and its reader are Linux-only, for the same reason as
+// `DrainedTheLoop` below.
+#[cfg(target_os = "linux")]
+thread_local! {
+    /// Set by the task the synchronous configured body spawns.
+    static SYNC_BODY_TASK_RAN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Asserts from `Termination::report`, which libtest calls after the wrapper
+/// returns — the only point at which the attribute's `run()` has already
+/// happened. An assertion at the end of the body would run before it, which is
+/// why the drain was never observed.
+// Only its `ring_entries` user below exists, and that is Linux-only, so
+// elsewhere this is dead code under `-D warnings`.
+#[cfg(target_os = "linux")]
+struct DrainedTheLoop;
+
+#[cfg(target_os = "linux")]
+impl std::process::Termination for DrainedTheLoop {
+    fn report(self) -> std::process::ExitCode {
+        assert!(
+            SYNC_BODY_TASK_RAN.with(Cell::get),
+            "the attribute must drive its runtime after a synchronous body returns"
+        );
+        std::process::ExitCode::SUCCESS
+    }
+}
+
+/// The synchronous shape builds the runtime too, the body runs on it rather
+/// than on one installed lazily underneath it, and — the part that has no other
+/// coverage — the attribute drains that runtime afterwards. A `main` written
+/// this way would otherwise exit without running a single spawned task, and
+/// silently, since dropping a `JoinHandle` detaches.
+#[cfg(target_os = "linux")]
+#[runite::test(ring_entries = 8)]
+fn a_configured_sync_test_attribute_runs_on_the_runtime_it_built() -> DrainedTheLoop {
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+    // Drained by the attribute's `run()` after this body returns.
+    runite::spawn(async {
+        runite::time::sleep(Duration::from_millis(1)).await;
+        SYNC_BODY_TASK_RAN.with(|ran| ran.set(true));
+    });
+
+    DrainedTheLoop
+}
+
 /// The generated `#[test]` drives the async body to completion, including real
 /// async I/O (a timer).
 #[runite::test]

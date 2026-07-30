@@ -6,6 +6,7 @@
 //! `runtime.rs` modules can `pub use` them directly without any aliasing.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -201,7 +202,10 @@ impl TimeoutHandle {
     /// For a timeout whose lifetime belongs to a scope rather than to the
     /// program. See [`CancelOnDrop`].
     pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
-        CancelOnDrop { handle: self }
+        CancelOnDrop {
+            handle: self,
+            thread_affine: PhantomData,
+        }
     }
 }
 
@@ -241,7 +245,10 @@ impl IntervalHandle {
     /// runtime alive, so a leaked one prevents `run()` from ever returning.
     /// See [`CancelOnDrop`].
     pub fn cancel_on_drop(self) -> CancelOnDrop<Self> {
-        CancelOnDrop { handle: self }
+        CancelOnDrop {
+            handle: self,
+            thread_affine: PhantomData,
+        }
     }
 }
 
@@ -260,6 +267,14 @@ impl IntervalHandle {
 /// `Clone` — two owners of a cancel-on-drop guard would mean the first drop
 /// wins, which is not a useful contract.
 ///
+/// It is also **not** `Send`, unlike the tokens it wraps. Cancelling a timer
+/// from a thread other than the one that armed it is a documented no-op, which
+/// a caller who spelled out `handle.cancel()` can reason about — but a guard
+/// exists precisely so nobody spells the cancellation out. A guard moved to
+/// another thread would drop there, cancel nothing, and leave an interval
+/// keeping the original runtime alive forever. Use [`into_inner`](Self::into_inner)
+/// to get the `Send` token back if a token really is what you want to move.
+///
 /// # Examples
 ///
 /// ```
@@ -273,10 +288,25 @@ impl IntervalHandle {
 /// });
 /// runite::run();
 /// ```
+///
+/// # Thread affinity
+///
+/// Deliberately `!Send`, unlike the token it wraps. Cancelling a timer from a
+/// thread other than the one that created it is a documented no-op — the
+/// generation check fails — so a guard whose entire contract is "dropping this
+/// cancels" would silently do nothing if it were dropped elsewhere, leaving the
+/// timer armed and the runtime unable to go idle. The compiler refuses instead:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<runite::CancelOnDrop<runite::IntervalHandle>>();
+/// ```
 #[derive(Debug)]
 #[must_use = "the timer is cancelled as soon as this guard is dropped"]
 pub struct CancelOnDrop<H: TimerCancel> {
     handle: H,
+    /// Binds the guard to the thread that created it; see the type docs.
+    thread_affine: PhantomData<Rc<()>>,
 }
 
 impl<H: TimerCancel> CancelOnDrop<H> {
@@ -286,10 +316,13 @@ impl<H: TimerCancel> CancelOnDrop<H> {
     /// consumed, so nothing cancels, and the returned token behaves as it did
     /// before it was wrapped.
     pub fn into_inner(self) -> H {
+        // A type with a `Drop` impl cannot be destructured, so the guard is
+        // neutralised rather than taken apart: `ManuallyDrop` suppresses the
+        // cancellation and the token is cloned back out. That is what the
+        // `Clone` bound on `TimerCancel` buys — no `unsafe` here, and no
+        // `Option` field forcing a fallible `Deref` on the guard.
         let this = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `this` is not dropped, so `handle` is moved out exactly once
-        // and the `Drop` impl below never runs for it.
-        unsafe { std::ptr::read(&this.handle) }
+        this.handle.clone()
     }
 
     /// Cancels the timer now rather than at the end of the scope.
@@ -317,7 +350,12 @@ impl<H: TimerCancel> Drop for CancelOnDrop<H> {
 /// Sealed in practice: implemented only for [`TimeoutHandle`] and
 /// [`IntervalHandle`], whose `cancel` is idempotent and thread-safe by way of
 /// the generation check.
-pub trait TimerCancel {
+///
+/// `Clone` is a bound because a timer token only *names* a timer — duplicating
+/// one cannot change what cancelling does, which is why both handles are
+/// already `Clone` — and it is what lets [`CancelOnDrop::into_inner`] hand the
+/// token back out of a `Drop` type without `unsafe`.
+pub trait TimerCancel: Clone {
     /// Cancels the timer this token identifies.
     fn cancel_timer(&self);
 }
@@ -480,6 +518,12 @@ impl ThreadHandle {
         tracing::trace!(
             target: trace_targets::SCHEDULER,
             event = "queue_remote_task",
+            // Both ends, because a cross-thread post is the one event where
+            // "which runtime" has two answers. The sender is `None` when the
+            // posting thread has no runtime of its own.
+            runtime_id = super::scheduler::trace_runtime_id(),
+            turn_id = super::scheduler::trace_turn_id(),
+            to_runtime_id = self.shared.runtime_id.0,
             queue = "remote_macro",
             queued = result.is_ok(),
             "queueing remote macrotask"

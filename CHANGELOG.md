@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-07-30
 
 See the [0.2 → 0.3 migration guide](docs/MIGRATING-0.3.md) for required source
 changes.
@@ -23,8 +23,10 @@ changes.
   `std::os::unix::process::CommandExt::pre_exec`. This is the window in which
   a process acquires a controlling terminal (`setsid` then `TIOCSCTTY`), changes
   process group, or drops privileges. It takes `Fn` rather than `FnMut` because
-  a runite `Command` may be spawned more than once. An error from the hook
-  aborts the spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
+  a runite `Command` may be spawned more than once. Hooks compose the way std's
+  do: a second registration adds to the first rather than replacing it, every
+  hook runs in registration order, and the first to return an error aborts the
+  spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
 
   Together these remove the last reason for an otherwise all-runite application
   to reach for `std::process` — a terminal multiplexer can now start a shell on
@@ -40,9 +42,15 @@ changes.
   ([#44](https://github.com/willmtemple/runite/issues/44))
 
   On Unix the process must be a direct child, since reading an exit status
-  requires being its parent; Windows has no such restriction. Adopting a
+  requires being its parent; Windows has no such restriction. Nothing at
+  adoption time can tell parentage, so a non-child adopts successfully and then
+  `wait`, `try_wait` and `kill` all fail immediately with `ECHILD` — `wait` does
+  not watch for the exit, and `kill` does not send the signal. Adopting a
   process that does not exist fails at adoption rather than producing a handle
-  whose `wait` never completes.
+  whose `wait` never completes. Adoption is not an access check: on Windows it
+  asks for terminate rights but settles for synchronize and
+  query-limited-information, so a process the caller may wait on but not
+  terminate is adoptable and `kill` is what reports `ERROR_ACCESS_DENIED`.
 
 - `Child` implements `Debug`, reporting the process id and which standard
   streams are piped. ([#31](https://github.com/willmtemple/runite/issues/31))
@@ -65,6 +73,39 @@ changes.
   a synchronous path, or choose its own exit status. Only startup is fallible:
   an error produced by the future is returned inside `Ok`.
   ([#40](https://github.com/willmtemple/runite/issues/40))
+- `Builder`, which starts the calling thread's runtime explicitly rather than
+  as a side effect of the first entry point to be called, and returns the
+  driver's error instead of panicking on it. `build()` yields a `Runtime`: a
+  `!Send` token, not an owner, since a runtime *is* the thread's state — the
+  free functions keep working alongside it, dropping it shuts nothing down, and
+  its methods are the loop entry points minus their startup panic. A runtime
+  can only be configured by the call that creates it, so `build()` on a thread
+  that already has one reports `ErrorKind::AlreadyExists` rather than accepting
+  settings it cannot apply.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+- `runite::os::linux::BuilderExt::ring_entries` sets the io_uring
+  submission-queue size, default 256. Shrinking it is what lets a runite
+  program start alongside something else drawing on `RLIMIT_MEMLOCK` — a
+  profiler charges its sample buffers to the same budget, which is why
+  `perf record` could make startup fail outright. It is a Linux extension
+  rather than a portable `Builder` method because kqueue and IOCP have no
+  equivalent, and a knob that does nothing on two of three platforms is a bug
+  that only surfaces on the platform nobody tested. Worker threads inherit it,
+  transitively, since the budget is per process. A size the kernel would not
+  use verbatim — not a power of two, or outside `2..=32768` — is an error
+  rather than being rounded up or clamped in silence, because a ring sized
+  against a memory budget must not quietly come back bigger.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
+- `#[runite::main]` and `#[runite::test]` accept the runtime's settings:
+  `#[runite::main(ring_entries = 32)]` builds the runtime it names instead of
+  the default one. Without this the attributes install a runtime before user
+  code runs, which put `ring_entries` out of reach of the crate's headline
+  entry point — the program #40 is about is one that cannot start under `perf`,
+  and it is a `#[runite::main]` program. `ring_entries` is a compile error
+  naming the platform on macOS and Windows, for the same reason it is not on
+  the portable `Builder`, and an unknown key is an error naming the key. The
+  bare attributes are unchanged.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
 - `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
   iteration of the event loop, readable from a task poll or a microtask
   callback and `None` outside a turn. A consumer with its own diagnostics
@@ -76,6 +117,53 @@ changes.
   information about what the turn did; per-turn statistics belong to
   [#43](https://github.com/willmtemple/runite/issues/43).
   ([#52](https://github.com/willmtemple/runite/issues/52))
+- `current_runtime_id()` and `RuntimeId`: a process-unique name for one
+  thread's event loop, stable for that loop's whole life and never reused.
+  Nothing else in the diagnostic output was self-describing without it — task
+  ids and timer ids restart at 1 on every runtime thread and driver tokens are
+  per-driver and wrapping, so two threads reporting `timer_id = 3` were one row
+  in a merged timeline. Every `runite::scheduler`, `runite::timer` and
+  `runite::async` event now carries both `runtime_id` and `turn_id`; either is
+  absent rather than guessed when there is no honest answer, and a cross-thread
+  post also names its destination as `to_runtime_id`.
+  ([#50](https://github.com/willmtemple/runite/issues/50))
+- `time::monotonic_now()`, the clock runite arms its own deadlines against.
+  A consumer merging its records with runite's previously had to correlate
+  across two clocks it could not prove were the same one. The epoch is
+  documented: the origin is unspecified so only differences mean anything, but
+  every thread in the process — and every process on the same running system —
+  reads the same clock, and it does not survive a reboot or relate to
+  wall-clock time. ([#50](https://github.com/willmtemple/runite/issues/50))
+- A per-turn record on `runite::runtime` at `TRACE`, one `event = "turn"` per
+  iteration of the event loop, carrying why the loop woke, how long it was
+  parked in the driver, how long it then spent runnable, queue depths either
+  side, whether the microtask checkpoint dominated the turn or tripped the
+  starvation guard, and counts of the microtasks, macrotasks, task polls,
+  completions, timers, adopted cross-thread tasks and worker exits it drained.
+
+  A wake is classified from what the turn observed and nothing else. The causes
+  come from the driver's own readiness bits, so no counter that another thread
+  can move is allowed to name a wake; a turn that did not park reads `queued`
+  rather than borrowing whatever fired nearby, and a park the driver could not
+  explain reads `spurious`. A park is reported against the turn its wake
+  *begins*, so `wake` and `wait_ns` describe one event and `runnable_ns` never
+  counts sleeping as work.
+
+  The record is free when nothing is collecting — no clock read at all, no
+  queue-depth sampling, no lock on the cross-thread queue — and its counts are
+  differences of counters `runite::metrics` maintains anyway, so the record
+  itself adds nothing per task or per microtask. The dormant path counts the
+  samples and clock reads it takes under test and
+  `dormant_turn_records_cost_nothing` asserts the count is zero, so that half
+  fails a test rather than quietly becoming untrue; `cargo bench --bench
+  runtime`'s `turn/dormant` against `turn/collecting` puts a number on it. What
+  a dormant loop does still pay is the interest check and the counters
+  themselves, enumerated in `ARCHITECTURE.md` and measured under *Fixed* below.
+  The price of the gate is `metrics::snapshot`'s `microtask_bound_turns`, which
+  is derived from the turn timing and so advances only while turn records are
+  being collected. Turn records are selected by target and level, not by field
+  predicate: the guard is a separate callsite with no fields.
+  ([#50](https://github.com/willmtemple/runite/issues/50))
 - `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
   existed only as an inherent method on `File`. Validation happens once at end
   of input rather than per chunk, so a multi-byte character split across two
@@ -89,7 +177,133 @@ changes.
   runtime-backed writer in a pointer cannot silently make its writes
   cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
 
+- TLS, behind the new optional `rustls` feature. `tls::TlsConnector` and
+  `tls::TlsAcceptor` perform client and server handshakes over anything
+  implementing runite's `AsyncRead` + `AsyncWrite`, and hand back a `TlsStream`
+  that is itself such a transport — so a `TcpStream`, a Unix socket, or a test
+  duplex all work, and with the `hyper` feature also on, hyper speaks HTTPS.
+  Previously an application on runite could not reach an `https://` endpoint
+  without leaving the runtime: `hyper-rustls` depends on `tokio-rustls`, which
+  drags in a second reactor that nothing on this thread ever drives.
+  ([#48](https://github.com/willmtemple/runite/issues/48))
+
+  **The cryptographic provider is the application's choice.** runite depends on
+  `rustls` with no provider feature enabled, because picking `aws-lc-rs` or
+  `ring` has build, licensing, and certification consequences that are not a
+  runtime's to decide. An application that enables neither gets rustls's panic
+  about being unable to determine the process-level `CryptoProvider` when it
+  builds a config. Fix it with a direct dependency that turns exactly one
+  provider on —
+  `rustls = { version = "0.23", default-features = false, features = ["ring"] }`
+  — where `default-features = false` is what keeps rustls's own default
+  `aws-lc-rs` from being unioned back in and leaving rustls with two providers
+  and no way to choose. The `tls` module documentation has the details.
+  Trust anchors are left alone for the same reason: the module takes a finished
+  `ClientConfig` or `ServerConfig`. Note that neither provider is the option
+  that avoids a C toolchain — both compile C in a build script; `ring` needs a C
+  compiler, `aws-lc-rs` also wants CMake.
+
+  **`rustls` is re-exported as `runite::tls::rustls`.** The public signatures are
+  written in rustls's types, so they cannot be used without naming the exact
+  build runite links against; use that path rather than a `rustls` dependency of
+  your own that cargo may or may not unify. The consequence is that a `rustls`
+  0.24 is a breaking change for runite, and will land in a major release rather
+  than a patch.
+
+  Two details are worth knowing before use. Ciphertext is staged in a buffer the
+  stream owns and re-offered to the transport as the identical slice until it is
+  fully accepted, because a completion-based backend identifies a re-polled
+  write by exactly that; the cost is one copy per direction, and the benefit is
+  that a write future abandoned mid-record leaves no truncated record behind.
+  And `poll_close` sends `close_notify` before closing the transport's write
+  direction, which is what lets a peer tell the end of a message from a
+  truncation — a plain transport shutdown does not.
+
+  A write that reaches rustls reports its count even if the transport then
+  fails, because rustls has already encrypted those bytes and will not hand
+  them back; answering with an error would invite a retry that puts the same
+  plaintext in the stream twice. The failure arrives on the next write, flush,
+  or close.
+
 ### Fixed
+
+- The per-turn record added above does not read the clock on a dormant loop.
+  Earlier in this cycle it did: `TurnGuard` timed every turn and
+  `drain_microtasks` timed every microtask checkpoint — the latter whether or
+  not the queue had anything in it — outside the `tracing::enabled!` gate that
+  already covered the park timing and the queue-depth sampling. None of that
+  reached a release, but the numbers are worth recording, because they are what
+  the gate is worth. Marginal cost of one macrotask turn on x86_64 with a TSC
+  clocksource, `perf stat -r 5` over 100k and 400k turns: 1001 → 1784
+  instructions and ~790 → ~1425 cycles against 0.2.0, of which the four reads
+  are 466 and ~425. Gated, the same loop is 1318 instructions and ~1000 cycles.
+  Wall clock, min-of-9 over 2M turns pinned to one core, 506 → 662 → 545
+  ns/turn, and `cargo bench --bench runtime`'s `queueable/macrotask` goes from
+  809 µs to 569 µs per 1000 turns. On a host whose clocksource is `hpet` or
+  `acpi_pm` rather than the TSC each read is a real syscall, not a vDSO call,
+  and four per turn dominate the loop outright.
+
+  `metrics::snapshot`'s `microtask_bound_turns` is derived from those reads and
+  therefore now advances only while turn records are being collected. That is a
+  behaviour change to a counter, documented on the counter, and the honest
+  price of the gate: a classification that needs the turn timed cannot be
+  maintained on a path that reads no clock. Every other counter is unaffected.
+
+  Every timing site on the turn path now goes through one pair of helpers that
+  count themselves under `cfg(test)`, so removing the gate fails
+  `dormant_turn_records_cost_nothing` rather than only dropping a queue-depth
+  sample. `cargo bench --bench runtime` gains `turn/dormant` and
+  `turn/collecting`: one workload with the collector off and on, so the
+  dormant-path cost of the diagnostics is a number rather than a claim.
+
+- Maintaining the new counters costs less per unit of work than the first cut
+  of them did. `FutureTask`'s wake and poll paths made four separate
+  thread-local lookups where one would do, `with_current_thread` read the same
+  thread-local twice on the path behind `queue_microtask` and
+  `queue_macrotask`, and the microtask drain re-resolved the thread on every
+  microtask to reach a counter that lives on shared state. Marginally, 563 →
+  540 instructions and ~253 → ~242 cycles per microtask against 0.2.0's 520 and
+  ~226. Of the 20 that remain, the counters are ~3 and the `queue_microtask`
+  trace callsite is ~17 — 0.2.0 compiled that callsite out of release builds
+  behind `cfg(debug_assertions)` and 0.3 deliberately does not, which is a
+  diagnostics decision rather than an accident. Wall clock, min-of-7 over 4M
+  microtasks pinned to one core, does not separate the three: 105 ns on 0.2.0,
+  105 before this change, 103 after. No opt-out is offered — a feature flag or
+  a runtime switch would cost more in public API and in conditional paths than
+  three instructions per microtask save.
+
+  `ready_tasks` also drops from `AcqRel`/`Acquire` to `Relaxed`. Every write is
+  on a `!Send` `FutureTask` under `with_installed_thread` and the only readers
+  are on the same thread, so there was nothing to synchronize with; on aarch64
+  it was `ldaddal` where `ldadd` suffices. `pending_ops`, the adjacent field
+  that *does* need its ordering for the idle-commit protocol, now says so.
+
+- `CancellationToken::cancelled` no longer leaks a `Waker` for every future
+  that is polled and dropped. A `select!` arm drops one on every iteration, so
+  a long-lived task looping over `select! { _ = token.cancelled() => .., msg =
+  rx.recv() => .. }` grew the token's waiter list by one entry per message and
+  left `cancel` walking every stale one. Each waiter is now tagged and removes
+  its own registration on drop. A future re-polled by a different task also
+  registers the waker it was last polled with, rather than keeping the one from
+  its first poll.
+
+- Socket read and write deadlines no longer fail outright when the kernel
+  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
+  `recv_from_timeout`, and `connect_stream_timeout` submitted an
+  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
+  quietly switched to the readiness path an identical call carrying a deadline
+  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
+  their deadline-free siblings do, applying what is left of the deadline
+  through the runtime's timer the way the kqueue backend already did — the
+  linked timeout has already been running when the kernel rejects the opcode
+  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
+  The cost is a timer per call instead of a linked SQE, and only on the
+  fallback path; `send_timeout` caches whether the kernel accepts a
+  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
+  needs is paid once per thread rather than on every call. Found by masking the
+  opcode probe across the integration suite, which now runs under two
+  constrained profiles in `mise run capability-matrix`.
+  ([#19](https://github.com/willmtemple/runite/issues/19))
 
 - `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
   is inherited. It waits for the process-wide stdin reader to release the
@@ -111,6 +325,18 @@ changes.
   the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
   ([#26](https://github.com/willmtemple/runite/issues/26))
 
+  `TlsStream::into_parts` returns a `tls::TlsParts` rather than a
+  `(S, Connection)` pair, because those two are not everything the stream was
+  holding. Ciphertext read from the transport that rustls has not deframed yet,
+  and ciphertext rustls produced that the transport has not taken yet, are each
+  irrecoverable from the other two — a read returns as soon as rustls accepts
+  one batch of records, so a residue is the normal case on a busy stream, and
+  dropping it desynchronizes the record stream from the session by however many
+  bytes it held. That surfaces later as a decrypt failure that reads as the
+  peer's fault. `TlsParts` returns both alongside the transport and the session
+  and is `#[non_exhaustive]`, so another buffer would not have to be another
+  silent loss.
+
 - `Debug` on the 67 public types that lacked it, and
   `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
   cannot reopen. Coverage was inconsistent within single modules —
@@ -122,6 +348,7 @@ changes.
   guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
   on type parameters that frequently cannot have it.
   ([#31](https://github.com/willmtemple/runite/issues/31))
+
 
 - `fd::read_chunks`, which encapsulates the readiness loop that `wait_readable`
   otherwise asks every caller to write. The loop carries three pieces of
@@ -137,7 +364,12 @@ changes.
   drain. The returned `fd::Drain` says which of the two ended it: a consumer
   draining a pseudoterminal keys its teardown on end of input — that is how it
   learns the child exited — and must be able to tell that from its own byte
-  budget running out. One-shot readiness is deliberately kept rather than replaced by an
+  budget running out. A pty controller is also the one descriptor that does not
+  report its peer leaving as end of file — Linux reports `EIO` — so
+  `read_chunks` reports `EIO` from a terminal as `Drain::EndOfInput` rather than
+  leaving the exact case the type was built for to depend on whose pty it is.
+  `EIO` from a descriptor that is not a terminal is still returned as an error.
+  One-shot readiness is deliberately kept rather than replaced by an
   `AsyncRead` for descriptors: a consumer sharing its thread with a frame clock
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
@@ -197,16 +429,24 @@ changes.
   coalesced wakes, microtasks and macrotasks run, operations completed, tasks
   cancelled, microtask-bound turns, remote tasks rejected — whose useful
   quantity is the difference between two snapshots. Peaks are the highest each
-  gauge has reached, which answers "how bad did this get" after an incident and
-  survives the level falling back to zero.
+  *thread-local* gauge has reached, which answers "how bad did this get" after
+  an incident and survives the level falling back to zero.
+
+  `remote_macrotask_queue_depth` is the one gauge with no peak. Reading it takes
+  the mutex `ThreadHandle::queue_macrotask` contends on, and peaks are sampled
+  every turn, so a `Peaks` field for it would put a lock acquisition on every
+  iteration of every runite loop. Use `counters.remote_tasks_rejected` for the
+  question a remote-depth peak would answer: it counts the sends that actually
+  hit the bound.
 
   `microtask_bound_turns` counts turns whose microtask drain took longer than
   everything else in the turn combined, which is how a consumer learns the
   loop's time went to reactive work rather than to I/O or timers — a
-  distinction wake counts cannot make. It costs two clock reads per *turn*, not
-  per microtask, well below the driver poll that opens the same turn. Peaks are
-  sampled once per turn for the same reason, so a queue that spikes and drains
-  within a single turn can be missed.
+  distinction wake counts cannot make. It needs the turn and its microtask
+  checkpoint timed, which is four clock reads per turn, so it is the one
+  counter here that advances only while turn records are being collected.
+  Peaks are sampled once per turn rather than at every mutation, so a queue
+  that spikes and drains within a single turn can be missed.
 
   They are three types rather than one flat struct on purpose: a flat struct
   invites subtracting a gauge or reading a counter as a level, and a consumer
@@ -245,7 +485,19 @@ changes.
   It matters most for intervals, where an uncancelled timer keeps the runtime
   alive and a leaked one stops `run()` from ever returning. The guard is not
   `Clone`, and `into_inner` releases the timer to a longer-lived owner without
-  cancelling. ([#8](https://github.com/willmtemple/runite/issues/8))
+  cancelling. The `TimerCancel` trait the guard is generic over requires
+  `Clone`, which is what lets `into_inner` hand the token back with no `unsafe`
+  and without making the guard's `Deref` fallible.
+
+  cancelling.
+
+  It is also not `Send`, unlike the tokens it wraps. Cancelling a timer from a
+  thread other than the one that armed it fails the generation check and is
+  silently ignored — documented behaviour since 0.2, and readable at a call site
+  that spells `handle.cancel()` out. A guard has no such call site: moved to
+  another thread it would drop there, cancel nothing, and leave an interval
+  holding the original runtime's `run()` open with no error, warning, or panic.
+  ([#8](https://github.com/willmtemple/runite/issues/8))
 
 - `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
   worth retrying: `true` only for a momentarily full queue, `false` for a
@@ -255,20 +507,58 @@ changes.
   with the rest of the crate without a conversion at every seam.
   ([#46](https://github.com/willmtemple/runite/issues/46))
 
-- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
-  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
-  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
-  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
-  compiled without a warning.
-
-  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
-  Dropping a join handle detaches the task, which is a documented and intended
-  operation rather than a mistake — unlike an unawaited future, which does
-  nothing at all. Marking them flagged 141 call sites across this repository's
-  own tests and examples, essentially all of them correct.
-  ([#30](https://github.com/willmtemple/runite/issues/30))
-
 ### Fixed
+
+- Socket read and write deadlines no longer fail outright when the kernel
+  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
+  `recv_from_timeout`, and `connect_stream_timeout` submitted an
+  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
+  quietly switched to the readiness path an identical call carrying a deadline
+  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
+  their deadline-free siblings do, applying what is left of the deadline
+  through the runtime's timer the way the kqueue backend already did — the
+  linked timeout has already been running when the kernel rejects the opcode
+  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
+  The cost is a timer per call instead of a linked SQE, and only on the
+  fallback path; `send_timeout` caches whether the kernel accepts a
+  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
+  needs is paid once per thread rather than on every call. Found by masking the
+  opcode probe across the integration suite, which now runs under two
+  constrained profiles in `mise run capability-matrix`.
+  ([#19](https://github.com/willmtemple/runite/issues/19))
+
+- `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
+  is inherited. It waits for the process-wide stdin reader to release the
+  terminal, and that wait was unbounded — an interrupt frees a reader parked in
+  `poll`, but cannot un-issue a `read(2)` the reader has already entered, which
+  on an interactive terminal returns only when the user types. Spawning a child
+  could therefore hang the whole event loop until a keypress. The wait is now
+  bounded and reports `ErrorKind::WouldBlock` past that point, matching what
+  Windows already did, and the caller may retry.
+  ([#28](https://github.com/willmtemple/runite/issues/28))
+
+- `watch::Sender::send` could report success with no receivers. It checked the
+  receiver count under the book lock, released it, then wrote the value, so the
+  last `Receiver` dropping in that window left `send` consuming the value,
+  advancing the version, and returning `Ok(())` — contradicting its documented
+  contract. The check and the write now happen under one book lock. The
+  previous value is moved out rather than assigned over, so `T::drop` runs
+  after both locks are released: dropping it in place would run user code under
+  the book lock, which is the self-deadlock the 0.2 lock-order fix removed.
+  ([#26](https://github.com/willmtemple/runite/issues/26))
+
+- `Debug` on the 67 public types that lacked it, and
+  `missing_debug_implementations` is now denied in `Cargo.toml` so the gap
+  cannot reopen. Coverage was inconsistent within single modules —
+  `fs::Metadata` and `DirEntry` derived it while `File`, `OpenOptions` and
+  `ReadDir` did not; every channel error derived it while no channel `Sender`
+  or `Receiver` did — which poisoned `#[derive(Debug)]` on any downstream type
+  holding one. The impls are deliberately opaque
+  (`debug_struct(..).finish_non_exhaustive()`): most of these are futures and
+  guards holding `&mut R` where `R: ?Sized`, so a derive would demand `Debug`
+  on type parameters that frequently cannot have it.
+  ([#31](https://github.com/willmtemple/runite/issues/31))
+
 
 - `release-verify` no longer passes `--allow-dirty` to `cargo package`
   unconditionally. That flag writes `"dirty": true` into
@@ -279,6 +569,39 @@ changes.
   verifying an artifact the real release could never produce. The flag is now
   opt-in via `release-verify --allow-dirty`; without it, a dirty packaged file
   fails loudly instead. ([#29](https://github.com/willmtemple/runite/issues/29))
+
+- `release-verify` no longer packages the crates a second time in a separate
+  "publish shape". That path was added on the premise that
+  `cargo package --workspace` records the proc-macro dependency differently
+  from what `cargo publish` uploads; measured, the two archives are the same
+  bytes. The embedded `Cargo.lock` names the sibling `.crate` by checksum, and
+  that file *is* the one published, so the digest cargo writes before the
+  release is the digest crates.io reports after it. The release workflow
+  compares against the workspace artifacts again, and `release-verify` now
+  asserts the identity that makes this sound instead of leaving it implicit.
+  Removing the second path also closes a hole it opened: a rerun of a release
+  whose crates were already published aborted, because the artifact the
+  comparison wanted could only be built later in the same run.
+
+- `release-verify` requires `docs/MIGRATING-0.3.md` in both the packaged file
+  list and the unpacked archive. It shipped either way — `docs/` is included by
+  default — but only the 0.2 guide was asserted, so an edit to the `exclude`
+  list could have dropped this release's guide silently.
+
+- `time` is pinned to at least 0.3.47 in `[dev-dependencies]` rather than only
+  in `Cargo.lock`. The advisory is RUSTSEC-2026-0009 (a stack exhaustion in
+  RFC 2822 parsing; the ID given in the commit that first pinned it was wrong).
+  Nothing in the manifest held the floor, and the MSRV-aware resolver picks
+  0.3.45 unprompted, so any lock regeneration reverted the pin and turned the
+  advisory job red with a fix `cargo update -p time` cannot apply. `time` is
+  reached only through the `rcgen` dev-dependency, so no published consumer was
+  ever exposed.
+
+- CI's crypto-provider leak guard reports a `cargo tree` that fails outright as
+  a failure. It was a pipeline under a leading `!`, which inverted grep's
+  "nothing matched" into success and suppressed `set -e` — so a broken manifest
+  read as a clean dependency graph. `pipefail` does not fix that; capturing the
+  output first does.
 
 ### Documented
 
@@ -309,8 +632,115 @@ changes.
   the pending write, and is now documented as the escape, with a test pinning
   it. ([#27](https://github.com/willmtemple/runite/issues/27))
 
+- `Stdin`'s type documentation stated the pre-0.3 cancellation contract —
+  cancelling a pending read "removes only that handle's waiter" — which this
+  release inverted to retention. It was the only statement of the contract in
+  the module's rustdoc, so a reader had no way to discover the change from the
+  API docs. It now says what actually happens: the handle keeps the operation
+  and its waiter, the reader thread goes on filling the shared buffer, and the
+  handle's next read claims that same operation. The consequence a terminal
+  application has to plan for — input continuing to be consumed while nothing
+  awaits it — is stated too, and a test pins it. `ARCHITECTURE.md` stated the
+  same superseded contract in the same words and has been corrected with it.
+
+- The six socket `close_descriptor` methods promised, without qualification, to
+  submit the close through the ring rather than perform it inline.
+  Only Linux does that; macOS and Windows close synchronously. The caveat lived
+  only in `fs::File::close_descriptor`'s body, one link away, and that method's
+  own summary line was unqualified as well. All seven summaries now name Linux,
+  and each socket carries the platform sentence directly: the five shareable
+  ones still report `Closed` versus `StillShared` off-Linux, while
+  `UnixDatagram` — which owns its descriptor outright and never reports
+  `StillShared` — says plainly that on macOS it does what dropping does.
+
+- `fd::read_chunks` said a caller `Break` "returns `Ok(())`" seven lines above
+  the paragraph explaining the `Drain` it actually returns. It now names
+  `Drain::Stopped`.
+
+- `Runtime`'s teardown bullet said teardown happens when the thread exits,
+  without the Windows exception: thread exit there cannot run user code, so an
+  application-owned thread runs no `on_shutdown` hooks, cancels no tasks, and
+  leaks its runtime state unless it calls `shutdown`. The bullet now says so and
+  links `shutdown`.
+
+- `TlsAcceptor::accept`'s `# Errors` omitted the `InvalidInput` its own first
+  line produces for a `ServerConfig` rustls will not build a session from, which
+  a server matching exhaustively on the documented kinds would route into its
+  per-connection retry path. `TlsConnector::connect` already documented the
+  identical case. Added, with a test.
+
+- `Child::from_pid`'s `# Errors` omitted the `InvalidInput` Unix returns for a
+  `pid` that is not a process identifier — zero, or beyond `pid_t` — which it
+  rejects before any syscall. Added, with a test.
+
+- The `Cargo.toml` line `runite::tls` hands you for choosing a crypto provider
+  works. `rustls = { version = "0.23", features = ["ring"] }` is additive to
+  rustls's defaults, which include `aws-lc-rs`, so it enabled *two* providers —
+  rustls then refuses to pick either and panics with the exact message the
+  section says it is avoiding, having also pulled in `aws-lc-sys` and its CMake
+  requirement. The snippet now sets `default-features = false`, matching what
+  runite uses for its own dev-dependencies, and a test holds the docs to naming
+  exactly one provider.
+
+- `mise run deny` checks licences and advisories the way CI does, and is part
+  of `mise run check`. cargo-deny was wired into no local task at all, and the
+  command `deny.toml` pointed at — a bare `cargo deny check` — resolves only
+  the default features, a graph containing no `rustls`, `ring`,
+  `rustls-webpki`, `untrusted` or `subtle`. It reported the ISC and
+  BSD-3-Clause allowances as unused and passed, so a contributor could clear
+  licences locally and still be failed by CI.
+
 ### Changed
 
+- Steady-state `tracing` events are emitted in release builds, not only in
+  debug. Twenty-one trace sites on `runite::driver`, `runite::runtime`,
+  `runite::scheduler`, `runite::timer` and `runite::async` were
+  `#[cfg(debug_assertions)]`, so a release build produced no per-turn,
+  per-task, per-timer or per-operation event on any target, and
+  `runite::timer` and `runite::async` had no vocabulary at all — the builds
+  worth profiling were the ones with nothing to see. With no subscriber
+  installed an event costs a relaxed load and a not-taken branch, and field
+  expressions are never evaluated.
+
+  Two consequences, both written up under "Profiling and observability" in
+  README.md. `macrotask_dequeued`'s `wait_ns` needs a clock stamp on every
+  macrotask push, so `MacroTask::queued_at` is now filled only while a
+  subscriber is accepting `runite::scheduler` at `TRACE`: tasks already queued
+  when a subscriber is installed are dequeued without it. And once anything
+  installs a global default, every event site consults its interest cache — a
+  filter that answers "sometimes" rather than a definite no makes hot sites
+  like `queue_microtask` pay a thread-local read and a virtual call per
+  emission, so filter runite's targets off explicitly if you are collecting
+  something else.
+
+  `runite::signal` is now a `trace_targets` constant like the other five,
+  where it had been an undocumented string literal at its one call site.
+
+- `#[must_use]` on the futures and guards that were missing it: `time::Sleep`,
+  `YieldNow`, `RwLockReadFuture`, `RwLockWriteFuture`, `MutexGuard`,
+  `RwLockReadGuard`, `RwLockWriteGuard`, `SemaphorePermit` and `watch::Ref`.
+  `sleep(d);` and `let _ = semaphore.acquire().await;` were silent no-ops that
+  compiled without a warning.
+
+  `JoinHandle` and `BlockingJoinHandle` are deliberately **not** marked.
+  Dropping a join handle detaches the task, which is a documented and intended
+  operation rather than a mistake — unlike an unawaited future, which does
+  nothing at all. Marking them flagged 141 call sites across this repository's
+  own tests and examples, essentially all of them correct.
+  ([#30](https://github.com/willmtemple/runite/issues/30))
+
+- The public API report now covers what it previously left out. Types
+  re-exported from a private implementation module render as a bare `pub use`,
+  so `docs/public-api.md` listed ten of them — `ThreadHandle`, `JoinHandle`,
+  `CancelOnDrop` and their neighbours — with none of their roughly twenty
+  inherent methods, five of which are new in this release. Those members are
+  now compiled into `xtask api-report`'s contract probe for every target and
+  feature set, which is what makes them gated surface rather than an
+  unwitnessed promise. Auto-trait and derived impls, which the report omitted
+  for readability and therefore could not diff, are rendered into a companion
+  `docs/public-api-traits.md`; the same private-module blind spot applies
+  there, so the auto traits that carry a contract are gated by `trybuild` cases
+  under `tests/ui/` instead.
 - Fixed two intra-doc links on `TcpStream` that pointed at inherent
   `read_exact`/`write_all` methods removed in this release; they now name the
   extension-trait methods.
@@ -401,8 +831,8 @@ changes.
   relied on passing a `Stdio` by copy should construct one per call, and code
   that cloned a `Command` should build it twice or wrap it.
 
-  Note that the public API report does not track derived trait impls, so this
-  change does not appear in `docs/public-api.md`.
+  Derived impls are tracked from 0.3 on, in `docs/public-api-traits.md`; this
+  particular removal predates that file, so it shows up in neither report.
 
 ## [0.2.0] — 2026-07-27
 
@@ -594,6 +1024,7 @@ microtask/macrotask scheduling, local `!Send` futures, explicit worker
 runtimes, async filesystem/network/process/stdio services, timers, channels,
 and synchronization primitives.
 
-[Unreleased]: https://github.com/willmtemple/runite/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/willmtemple/runite/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/willmtemple/runite/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/willmtemple/runite/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/willmtemple/runite/releases/tag/v0.1.0

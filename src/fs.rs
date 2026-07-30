@@ -589,8 +589,8 @@ impl<T> ReadDirObserver<T> {
 }
 
 impl File {
-    /// Closes the descriptor, ordering the close behind operations already
-    /// submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// Dropping a handle closes its descriptor too, and for most code that is
     /// the right thing. This exists for the case dropping cannot serve: on
@@ -612,6 +612,14 @@ impl File {
     /// to add `File::close` to the standard library on the grounds that
     /// `close(2)` error reporting is too unreliable to build portable APIs on,
     /// and that reasoning applies here: use `sync_all` if durability matters.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping this future does not call the close off. A submitted close
+    /// cannot be retracted, so on Linux it still runs and its outcome is
+    /// discarded; the descriptor is closed exactly once either way, and is
+    /// never left open. What a caller loses by cancelling is the report, not
+    /// the close — so there is no state to recover and nothing to retry.
     ///
     /// # Errors
     ///

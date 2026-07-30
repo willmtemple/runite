@@ -4,7 +4,7 @@ members = ["./", "./proc_macros", "./xtask"]
 
 [package]
 name = "runite"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An event-loop-per-thread async runtime built on io_uring (Linux), kqueue (macOS), and IOCP (Windows)"
@@ -27,6 +27,7 @@ exclude = [
   "/proc_macros",
   "/xtask",
   "/docs/public-api.md",
+  "/docs/public-api-traits.md",
   "CONTRIBUTING.md",
   "SECURITY.md",
   "mise.toml",
@@ -38,6 +39,13 @@ exclude = [
 
 [lints.rust]
 missing_debug_implementations = "deny"
+# `runite_opcode_injection` compiles in the RUNITE_IO_URING_DISABLE_OPCODES seam
+# (src/platform/linux/uring.rs). Only `mise run capability-matrix` sets it; a
+# `cargo build` of a dependent application never does, so a released binary has
+# no code that reads the variable. See CONTRIBUTING.md.
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(runite_opcode_injection)',
+] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -55,6 +63,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 hyper = ["dep:hyper"]
 futures-compat = ["dep:futures-io"]
+rustls = ["dep:rustls"]
 
 [dependencies]
 futures-io = { version = "0.3", optional = true }
@@ -64,7 +73,18 @@ hyper = { version = "1.8", default-features = false, features = [
   "http1",
   "http2",
 ], optional = true }
-runite-proc-macros = { package = "runite-proc-macros", version = "=0.2.0", path = "./proc_macros" }
+runite-proc-macros = { package = "runite-proc-macros", version = "=0.3.0", path = "./proc_macros" }
+# rustls's own defaults minus the crypto provider. Which implementation performs
+# the cryptography is the application's decision -- both `aws-lc-rs` and `ring`
+# compile C in a build script, and they differ in how much build tooling that
+# takes plus the licensing and certification consequences a runtime has no
+# business choosing. Re-exported as `runite::tls::rustls`, so a major bump here
+# is a breaking change for runite. See `src/tls/mod.rs`.
+rustls = { version = "0.23", default-features = false, features = [
+  "logging",
+  "std",
+  "tls12",
+], optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -87,6 +107,26 @@ windows-sys = { version = "0.61", features = [
 bytes = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 http-body-util = "0.1"
+# The TLS tests generate their own certificate chain and pick `ring` as the
+# provider, which is exactly what an application has to do: the library above
+# picks none.
+rcgen = { version = "0.14", default-features = false, features = [
+  "crypto",
+  "ring",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "logging",
+  "ring",
+  "std",
+  "tls12",
+] }
+# Not used directly -- this is a floor. `rcgen` reaches `time` twice, and
+# everything at or below 0.3.45 has RUSTSEC-2026-0009, a stack exhaustion when
+# parsing RFC 2822 input. The MSRV-aware resolver picks 0.3.45 on its own, so
+# pinning 0.3.47 in `Cargo.lock` alone lasted exactly until the next
+# regeneration; only a requirement here survives one. Nothing published depends
+# on it: `time` is dev-only, so this bounds a test-time hazard, not a consumer's.
+time = "0.3.47"
 trybuild = "1"
 
 [[example]]

@@ -27,6 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
+pub(crate) mod config;
 pub(crate) mod driver_backend;
 pub(crate) mod future_task;
 pub(crate) mod handles;
@@ -48,6 +49,7 @@ pub(crate) const MICROTASK_STARVATION_THRESHOLD: u64 = 1000;
 pub(crate) type LocalTaskQueue = VecDeque<LocalTask>;
 pub(crate) type MacroTaskQueue<T> = VecDeque<T>;
 
+pub(crate) use config::RuntimeConfig;
 pub use driver_backend::{DriverBackend, Notifier, ReadyEvents};
 #[allow(unused_imports)]
 pub(crate) use future_task::{FutureTask, JoinState};
@@ -56,10 +58,12 @@ pub use handles::{
     TimerCancel, WorkerHandle, YieldNow,
 };
 pub use scheduler::{
-    Runtime, TurnId, block_on, current_thread_handle, current_turn, interval, on_shutdown,
-    queue_future, queue_microtask, queue_task, run, run_ready_tasks, run_until_stalled, shutdown,
-    spawn_worker, timeout, try_block_on, yield_now,
+    Runtime, TurnId, block_on, build_runtime, current_runtime_id, current_thread_handle,
+    current_turn, interval, monotonic_now, on_shutdown, queue_future, queue_microtask, queue_task,
+    run, run_ready_tasks, run_until_stalled, shutdown, spawn_worker, timeout, try_block_on,
+    yield_now,
 };
 pub(crate) use scheduler::{try_current_thread_handle, with_current_driver_any};
+pub use state::RuntimeId;
 #[allow(unused_imports)]
 pub(crate) use state::{ChildWorker, MacroTask, ThreadShared, ThreadState, WorkerCompletion};

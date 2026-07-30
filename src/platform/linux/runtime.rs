@@ -16,20 +16,25 @@ use std::io;
 use std::time::Duration;
 
 use super::driver::{self, Driver};
+use super::uring::DEFAULT_RING_ENTRIES;
 use crate::platform::runtime_shared as shared;
+use crate::platform::runtime_shared::RuntimeConfig;
 
 pub use shared::{
-    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, on_shutdown, shutdown, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
+    TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, current_runtime_id, current_turn,
+    on_shutdown, shutdown, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
 pub(crate) struct LinuxRuntime;
 
 impl shared::Runtime for LinuxRuntime {
-    fn create_driver_pair()
-    -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
-        let (driver, notifier) = driver::create_driver()?;
+    fn create_driver_pair(
+        config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
+        let (driver, notifier) =
+            driver::create_driver(config.ring_entries.unwrap_or(DEFAULT_RING_ENTRIES))?;
         Ok((Box::new(driver), Box::new(notifier)))
     }
 
@@ -106,6 +111,10 @@ where
     shared::spawn_worker::<LinuxRuntime, Init, Exit>(initial_task, on_exit)
 }
 
+pub fn build_runtime(config: RuntimeConfig) -> io::Result<()> {
+    shared::build_runtime::<LinuxRuntime>(config)
+}
+
 pub fn run() {
     shared::run::<LinuxRuntime>()
 }
@@ -132,13 +141,112 @@ pub fn run_ready_tasks() {
     shared::run_ready_tasks::<LinuxRuntime>()
 }
 
+pub fn monotonic_now() -> Duration {
+    shared::monotonic_now::<LinuxRuntime>()
+}
+
 #[cfg(all(test, not(miri)))]
 mod tests {
-    use super::{LinuxRuntime, current_thread_handle, run_until_stalled};
+    use super::{LinuxRuntime, current_thread_handle, run_until_stalled, with_current_driver};
     use crate::op::fs::FsOp;
+    use crate::os::linux::BuilderExt;
     use crate::platform::runtime_shared::test_support;
-    use crate::{QueueError, spawn};
+    use crate::{Builder, QueueError, spawn};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// Submission-queue entries the kernel gave the calling thread's ring.
+    fn current_sq_entries() -> u32 {
+        with_current_driver(|driver| driver.ring_sq_entries())
+    }
+
+    #[test]
+    fn an_unconfigured_thread_gets_the_default_ring() {
+        std::thread::spawn(|| {
+            let runtime = Builder::new().build().expect("runtime should start");
+            runtime.run();
+            assert_eq!(current_sq_entries(), 256);
+        })
+        .join()
+        .expect("runtime thread should not panic");
+    }
+
+    #[test]
+    fn a_configured_ring_size_reaches_the_kernel() {
+        std::thread::spawn(|| {
+            let runtime = Builder::new()
+                .ring_entries(8)
+                .build()
+                .expect("an 8-entry ring should be available");
+            // Real I/O through the small ring, so this covers submission and
+            // completion rather than only the setup syscall.
+            let read = runtime.block_on(crate::fs::read_to_string("Cargo.toml"));
+            assert!(
+                read.expect("Cargo.toml should be readable")
+                    .contains("runite")
+            );
+            assert_eq!(current_sq_entries(), 8);
+        })
+        .join()
+        .expect("runtime thread should not panic");
+    }
+
+    /// The entry-point attributes install the runtime before user code runs,
+    /// so a setting they do not carry is a setting no `#[runite::main]`
+    /// program can ever apply. This reads the count back out of the mapped
+    /// ring, so it proves the attribute's value reached the kernel.
+    // Arguments in the opposite order to the one the parser reads first, so
+    // this also pins that they are order-independent.
+    #[runite_proc_macros::test(ring_entries = 8, crate = "crate")]
+    async fn the_test_attribute_configures_the_ring_it_names() {
+        let read = crate::fs::read_to_string("Cargo.toml").await;
+        assert!(
+            read.expect("Cargo.toml should be readable")
+                .contains("runite")
+        );
+        assert_eq!(current_sq_entries(), 8);
+    }
+
+    /// The synchronous shape is a separate arm of the attribute's expansion —
+    /// the one a `#[runite::main(ring_entries = ..)] fn main()` uses — so it
+    /// gets the same readback.
+    #[runite_proc_macros::test(ring_entries = 8, crate = "crate")]
+    fn the_sync_test_attribute_configures_the_ring_it_names() {
+        assert_eq!(current_sq_entries(), 8);
+    }
+
+    /// The bare attribute must keep installing the default runtime.
+    #[runite_proc_macros::test(crate = "crate")]
+    async fn the_bare_test_attribute_leaves_the_ring_at_its_default() {
+        assert_eq!(current_sq_entries(), 256);
+    }
+
+    #[test]
+    fn a_worker_inherits_the_spawning_threads_ring_size() {
+        std::thread::spawn(|| {
+            let runtime = Builder::new()
+                .ring_entries(8)
+                .build()
+                .expect("an 8-entry ring should be available");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = crate::spawn_worker(
+                move || {
+                    tx.send(current_sq_entries())
+                        .expect("test should still be listening");
+                },
+                || {},
+            );
+            runtime
+                .block_on(worker.join())
+                .expect("worker should exit normally");
+            assert_eq!(
+                rx.recv().expect("worker should report its ring size"),
+                8,
+                "a worker's ring is rebuilt on its own thread and must keep the inherited size"
+            );
+        })
+        .join()
+        .expect("runtime thread should not panic");
+    }
 
     #[test]
     fn runtime_executes_local_and_remote_work() {
@@ -153,6 +261,16 @@ mod tests {
     #[test]
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<LinuxRuntime>();
+    }
+
+    #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<LinuxRuntime>();
+    }
+
+    #[test]
+    fn microtask_bound_turns_follow_the_turn_record_gate() {
+        test_support::microtask_bound_turns_follow_the_turn_record_gate::<LinuxRuntime>();
     }
 
     #[test]

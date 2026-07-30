@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use super::config::RuntimeConfig;
 use super::driver_backend::{DriverBackend, Notifier};
 use super::future_task::{FutureTask, cancel_tasks_for_shutdown};
 use super::handles::{QueueError, WorkerJoinError};
@@ -27,6 +28,12 @@ use crate::trace_targets;
 /// with a freshly installed state — even one that happens to land at the
 /// same address as the torn-down one.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Process-wide source of runtime identifiers. Starts at 1 so a zero can never
+/// be mistaken for a real runtime. One relaxed increment per runtime *thread*,
+/// taken when its shared state is created.
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
 static REMOTE_QUEUE_CAPACITY: OnceLock<usize> = OnceLock::new();
 
 const DEFAULT_REMOTE_QUEUE_CAPACITY: usize = 65_536;
@@ -131,14 +138,21 @@ pub(crate) struct MacroTask {
     /// report queue-wait time when the task is dequeued.
     ///
     /// `None` unless a subscriber was actually collecting scheduler traces at
-    /// the moment of the push. Reading the clock is a real syscall — around
-    /// 20-30ns on every backend — and this is per macrotask, so it must not
+    /// the moment of the push. Reading the clock is a vDSO call at best —
+    /// around 20-30ns on every backend — and a real syscall on a host whose
+    /// clocksource is not the TSC, and this is per macrotask, so it must not
     /// happen just because the build has tracing linked in. The check that
     /// produces this is the same not-taken branch every other trace site pays.
     ///
     /// The consequence is that queue-wait timing begins once a subscriber is
     /// installed rather than retroactively: tasks already queued at that
     /// moment are dequeued without it.
+    ///
+    /// The `Option` is present in release builds, where 0.2's
+    /// `cfg(debug_assertions)` `Duration` was absent, which takes `MacroTask`
+    /// from 16 bytes to 32. That is the price of not having a
+    /// `cfg`-divergent layout, and it buys removing a clock read per macrotask
+    /// push that no gate covered.
     pub(crate) queued_at: Option<Duration>,
 }
 
@@ -165,6 +179,24 @@ impl RemoteQueue {
     }
 }
 
+/// Identifies one runtime — one thread's event loop — for the life of the
+/// process.
+///
+/// See [`crate::current_runtime_id`]. The [`Display`](std::fmt::Display)
+/// rendering is the same text that appears in the `runtime_id` field of
+/// runite's trace events, which is what lets application records be joined
+/// against runite's; that correspondence is the promise, not the numbering
+/// behind it. Nothing else about the value is specified — do not read
+/// ordering, density, or a thread's spawn order out of it.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RuntimeId(pub(crate) u64);
+
+impl std::fmt::Display for RuntimeId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// Cumulative, monotonic activity counts for one runtime thread.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCounters {
@@ -173,8 +205,16 @@ pub(crate) struct RuntimeCounters {
     pub(crate) tasks_cancelled: AtomicU64,
     pub(crate) coalesced_wakes: AtomicU64,
     /// Turns whose microtask drain took more of the turn than everything else
-    /// put together. Two clock reads per *turn* — not per microtask — which is
-    /// far below the driver poll that opens the same turn.
+    /// put together.
+    ///
+    /// The odd one out: every other counter here is maintained
+    /// unconditionally, and this one advances only while something is
+    /// collecting turn records. It is derived from four clock reads per turn,
+    /// which measured ~465 instructions against ~1320 for an entire dormant
+    /// turn, so maintaining it on the dormant path was most of the turn
+    /// machinery's cost. See [`Counters::microtask_bound_turns`].
+    ///
+    /// [`Counters::microtask_bound_turns`]: crate::metrics::Counters::microtask_bound_turns
     pub(crate) microtask_bound_turns: AtomicU64,
     pub(crate) task_polls: AtomicU64,
     pub(crate) task_wakes: AtomicU64,
@@ -271,6 +311,10 @@ pub(crate) struct ThreadState {
     /// `IntervalHandle` references after the originating state was torn down
     /// (or after a handle is presented to a different runtime thread).
     pub(crate) generation: u64,
+    /// Configuration the driver above was created from. Retained so
+    /// [`spawn_worker`](super::scheduler::spawn_worker) can hand the same
+    /// configuration to the child it creates.
+    pub(crate) config: RuntimeConfig,
 }
 
 impl ThreadState {
@@ -279,6 +323,7 @@ impl ThreadState {
         driver: Box<dyn DriverBackend>,
         worker_completion: Option<Arc<WorkerCompletion>>,
         generation: u64,
+        config: RuntimeConfig,
     ) -> Self {
         Self {
             driver,
@@ -298,6 +343,7 @@ impl ThreadState {
             teardown_panicked: Cell::new(false),
             children: RefCell::new(Vec::new()),
             generation,
+            config,
         }
     }
 
@@ -322,7 +368,7 @@ impl ThreadState {
 
     /// Tasks queued for polling but not yet polled.
     pub(crate) fn ready_tasks(&self) -> usize {
-        self.shared.ready_tasks.load(Ordering::Acquire)
+        self.shared.ready_tasks.load(Ordering::Relaxed)
     }
 
     /// Records the peaks of gauges that are cheapest to sample at a turn
@@ -347,11 +393,29 @@ impl ThreadState {
 }
 
 pub(crate) struct ThreadShared {
+    /// Process-unique identity of this runtime thread.
+    ///
+    /// Task and timer ids restart at 1 on every runtime thread, and driver
+    /// tokens are per-driver and wrapping, so without this two threads that
+    /// both report `timer_id = 3` collapse into one row in a merged timeline.
+    /// It lives on the shared state rather than on `ThreadState` so a
+    /// `ThreadHandle` held by another thread can still name its target.
+    pub(crate) runtime_id: RuntimeId,
     notifier: Box<dyn Notifier>,
     // The microtask queue is strictly thread-local; only macrotasks may be
     // enqueued from remote threads, keeping the microtask queue free from
     // cross-thread interference.
     pub(crate) remote_macrotasks: RemoteQueue,
+    /// Driver operations submitted and not yet terminally completed.
+    ///
+    /// `AcqRel`/`Acquire` throughout, and load-bearing: this is the other half
+    /// of the idle-commit protocol in
+    /// [`commit_idle`](super::scheduler::commit_idle). A cross-thread
+    /// completion enqueues its wake under the remote-queue lock and only then
+    /// decrements this, so the release here is what makes that enqueue visible
+    /// to the acquiring idle check. Unlike [`Self::counters`] and
+    /// [`Self::ready_tasks`], a stale read decides whether live tasks get
+    /// cancelled.
     pub(crate) pending_ops: AtomicUsize,
     /// Cumulative activity counters. Maintained at the mutation sites that
     /// perform the work, so reading them walks nothing. Relaxed throughout:
@@ -363,6 +427,13 @@ pub(crate) struct ThreadShared {
     /// Maintained rather than derived: counting them would mean walking the
     /// task registry, and a snapshot that walks is work that distorts the idle
     /// measurement it exists to take.
+    ///
+    /// Relaxed, for the same reason as [`Self::counters`] and unlike
+    /// [`Self::pending_ops`]: every write is inside `with_installed_thread` on
+    /// a `!Send` `FutureTask`, so writer and reader are the same thread and
+    /// there is nothing to synchronize *with*. It is an atomic only because it
+    /// lives on shared state. On aarch64 the difference is `ldadd` against
+    /// `ldaddal` on the wake and poll paths.
     pub(crate) ready_tasks: AtomicUsize,
     /// High-water marks for the gauges worth knowing the worst case of.
     ///
@@ -389,6 +460,7 @@ impl ThreadShared {
 
     pub(crate) fn with_remote_capacity(notifier: Box<dyn Notifier>, capacity: usize) -> Self {
         Self {
+            runtime_id: RuntimeId(NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
             notifier,
             remote_macrotasks: RemoteQueue::new(capacity),
             pending_ops: AtomicUsize::new(0),
@@ -459,6 +531,12 @@ impl ThreadShared {
                 tracing::warn!(
                     target: trace_targets::SCHEDULER,
                     event = "remote_queue_full",
+                    // Both ends, as on `queue_remote_task`: the rejection is a
+                    // property of the destination, but a collector chasing a
+                    // backlog needs to know which sender hit it.
+                    runtime_id = super::scheduler::trace_runtime_id(),
+                    turn_id = super::scheduler::trace_turn_id(),
+                    to_runtime_id = self.runtime_id.0,
                     capacity = self.remote_macrotasks.capacity,
                     "cross-thread macrotask queue is full; rejecting remote task"
                 );
@@ -903,10 +981,22 @@ fn remote_queue_capacity() -> usize {
 /// Panics if the platform driver cannot be created. Entry points that want to
 /// report that failure instead use [`try_ensure_current_thread`] first.
 pub(crate) fn with_current_thread<R: Runtime, T>(f: impl FnOnce(&ThreadState) -> T) -> T {
-    if let Err(error) = try_ensure_current_thread::<R>() {
-        panic!("runtime driver should initialize: {error:?}");
+    // One thread-local lookup on the already-installed path, which is every
+    // call after the first. `try_ensure_current_thread` followed by
+    // `with_installed_thread` reads the same `Cell` twice, and this is the
+    // accessor behind `queue_microtask` and `queue_macrotask`.
+    let mut ptr = current_thread_ptr();
+    if ptr.is_null() {
+        if let Err(error) = install_lazy_state::<R>(RuntimeConfig::default()) {
+            panic!("runtime driver should initialize: {error:?}");
+        }
+        ptr = current_thread_ptr();
+        assert!(!ptr.is_null(), "runtime state not installed on this thread");
     }
-    with_installed_thread(f)
+    // SAFETY: `ptr` is non-null per the lazy-init branch above and points to a
+    // `ThreadState` owned by this thread until final TLS teardown. The borrow
+    // is confined to `f`.
+    unsafe { f(&*ptr) }
 }
 
 /// Installs this thread's runtime state if it is not installed already,
@@ -918,14 +1008,38 @@ pub(crate) fn try_ensure_current_thread<R: Runtime>() -> io::Result<()> {
     if !current_thread_ptr().is_null() {
         return Ok(());
     }
+    install_lazy_state::<R>(RuntimeConfig::default())
+}
+
+/// Installs this thread's runtime state from an explicit configuration.
+///
+/// Unlike [`try_ensure_current_thread`] this is *not* idempotent: a thread that
+/// already has a runtime reports [`io::ErrorKind::AlreadyExists`]. The driver
+/// described by `config` was created when the existing state was installed, so
+/// there is nothing left for a second configuration to affect, and quietly
+/// accepting one would be the silently-ignored knob that
+/// [`crate::Builder`] is shaped to prevent.
+pub(crate) fn try_install_configured_thread<R: Runtime>(config: RuntimeConfig) -> io::Result<()> {
+    if !current_thread_ptr().is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "this thread already has a runite runtime; it can only be configured before it starts",
+        ));
+    }
+    install_lazy_state::<R>(config)
+}
+
+fn install_lazy_state<R: Runtime>(config: RuntimeConfig) -> io::Result<()> {
     assert!(
         matches!(thread_phase(), ThreadPhase::Empty),
         "runite: runtime state is unavailable during thread teardown"
     );
-    let (driver, notifier) = R::create_driver_pair()?;
+    let (driver, notifier) = R::create_driver_pair(config)?;
     let shared = Arc::new(ThreadShared::new(notifier));
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    install_owned_state(Box::new(ThreadState::new(shared, driver, None, generation)));
+    install_owned_state(Box::new(ThreadState::new(
+        shared, driver, None, generation, config,
+    )));
     Ok(())
 }
 
@@ -969,6 +1083,7 @@ pub(crate) fn install_thread(
     shared: Arc<ThreadShared>,
     driver: Box<dyn DriverBackend>,
     worker_completion: Option<Arc<WorkerCompletion>>,
+    config: RuntimeConfig,
 ) {
     debug_assert!(
         current_thread_ptr().is_null(),
@@ -984,6 +1099,7 @@ pub(crate) fn install_thread(
         driver,
         worker_completion,
         generation,
+        config,
     )));
 }
 
@@ -1056,7 +1172,12 @@ pub(crate) fn shutdown_current_thread() -> bool {
     if !installed {
         return false;
     }
-    let _ = teardown_owned_thread(true);
+    // Not a final exit: the thread outlives this call and goes on running its
+    // own code, so it is left in the same phase it started in. Marking it
+    // terminated here would make the next runtime call — `block_on`,
+    // `try_block_on`, `Builder::build` — assert instead of installing a fresh
+    // runtime, which is the reuse `shutdown` documents.
+    let _ = teardown_owned_thread(false);
     true
 }
 
@@ -1089,10 +1210,24 @@ fn finalize_thread(state: Rc<ThreadState>, final_exit: bool) -> Result<(), Threa
         // Before anything is torn down: hooks exist to observe a live runtime
         // one last time, and running them after the tasks are cancelled would
         // hand them a runtime that can no longer do anything.
-        let hooks = std::mem::take(&mut *state.shutdown_hooks.borrow_mut());
-        for hook in hooks {
-            if run_shutdown_hook(hook) {
-                teardown_failed.set(true);
+        // Drained to a fixed point, not once. A hook may register another —
+        // one that shuts a subsystem down and lets that subsystem register its
+        // own cleanup is an ordinary shape — and a single `take` would leave
+        // those in a list nobody looks at again, running them silently never.
+        //
+        // A hook that registers a hook forever does stall shutdown, but so does
+        // one that simply never returns, and neither is something the runtime
+        // can distinguish from work in progress. Running everything registered
+        // is the behaviour that is explicable; stopping after one pass is not.
+        loop {
+            let hooks = std::mem::take(&mut *state.shutdown_hooks.borrow_mut());
+            if hooks.is_empty() {
+                break;
+            }
+            for hook in hooks {
+                if run_shutdown_hook(hook) {
+                    teardown_failed.set(true);
+                }
             }
         }
         cancel_all_registered_tasks(&state);

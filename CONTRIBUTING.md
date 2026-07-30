@@ -9,7 +9,7 @@ a change merged.
 
 ```sh
 mise install      # installs the pinned Rust toolchain and dev tools
-mise run check    # fmt + clippy + tests + workflow lint — the full local gate
+mise run check    # fmt + clippy + tests + workflow lint + licences — the full local gate
 ```
 
 If you do not use mise, a recent stable Rust toolchain (matching the `rust-version` /
@@ -47,7 +47,7 @@ Linux jobs are available locally:
 | `mise run miri` | Mock-driver scheduler, task, timer, channel, sync, waker, and pending-state logic. |
 | `mise run asan` | Cancellation/drop, resource churn, and normal io_uring teardown on Linux. |
 | `mise run tsan` | Mock-driver channel, watch, waker, worker, and concurrent completion logic. |
-| `mise run capability-matrix` | Injected constrained io_uring opcode sets and old timer flags. |
+| `mise run capability-matrix` | Injected constrained io_uring opcode sets and old timer flags, then the io-facing tests and the doctests under two masked opcode profiles. |
 | `mise run stress-issue-6` | Repeated merged doctests and `spawn_blocking` runtime-liveness regressions. |
 | `mise run bench-io-uring-ab` | Immediate/deferred submission A/B data under `target/criterion/`. |
 
@@ -74,7 +74,25 @@ count with `RUNITE_STRESS_ITERATIONS=50 mise run stress-issue-6`.
   production dispatch seam. A container shares the GitHub runner's host kernel
   and cannot reliably provide an old io_uring implementation, so CI combines
   deterministic missing-opcode tests with one compatible Ubuntu kernel rather
-  than claiming to boot a limited kernel.
+  than claiming to boot a limited kernel. Injection proves the fallback
+  branches run and stay consistent with the rest of the runtime; it cannot
+  prove they are right about how a kernel that genuinely lacks the opcode
+  behaves. That needs a VM on an old kernel and is tracked separately.
+
+  Unit tests inject per test through a `#[cfg(test)]` thread-local. Integration
+  tests and doctests link the non-test build and cannot reach it, so they use
+  `RUNITE_IO_URING_DISABLE_OPCODES` (`above-5.6`, `all-optional`, or a
+  comma-separated list of opcode numbers) which masks the probe result for the
+  whole process. **That variable only exists in a build compiled with
+  `--cfg runite_opcode_injection`**, which `mise run capability-matrix` sets
+  and nothing else does. The gate is deliberately not `debug_assertions`: the
+  constrained passes must be runnable in release, and masking is not harmless
+  enough to ship — hiding an opcode with no fallback, such as
+  `IORING_OP_SENDMSG`, would make `send_to` fail outright. A build carrying the
+  cfg panics during ring setup if the variable is missing or unusable, and
+  `opcode_injection_cfg_and_env_agree_and_reach_the_ring` fails if the variable
+  reaches a build without the cfg, so a constrained pass cannot quietly
+  degrade into an unmasked one.
 - **Submission A/B** results are artifacts, not a pass/fail latency threshold.
   Hosted-runner hardware variance makes a wall-clock regression gate unsound.
 
@@ -101,7 +119,8 @@ GitHub issues and pull requests are limited to collaborators. Please start by
   Windows backends behind the existing `cfg` gates and mirror behavior where practical.
 - **Public API** changes should update doctests, the README, the CHANGELOG, and (for runtime
   semantics) ARCHITECTURE.md, and regenerate the public API snapshot with
-  `mise run api-report` (CI fails on a stale `docs/public-api.md`).
+  `mise run api-report` (CI fails on a stale `docs/public-api.md` or
+  `docs/public-api-traits.md`).
 
 ## Security issues
 

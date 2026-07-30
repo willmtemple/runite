@@ -67,6 +67,44 @@ pub(crate) const IORING_TIMEOUT_ABS: u32 = 1 << 0;
 pub(crate) const IOSQE_IO_LINK: u8 = 1 << 2;
 pub(crate) const IOSQE_CQE_SKIP_SUCCESS: u8 = 1 << 6;
 
+/// Submission-queue entries a runtime thread's ring gets when nothing asks for
+/// something else. Large enough that a burst of concurrent operations is
+/// submitted in one `io_uring_enter`, small enough that one ring per runtime
+/// thread stays well inside a default `RLIMIT_MEMLOCK`.
+pub(crate) const DEFAULT_RING_ENTRIES: u32 = 256;
+
+/// The smallest ring the runtime can operate. An operation submitted with a
+/// linked timeout is two SQEs published atomically, and `submit_pending`
+/// rejects a batch larger than the ring rather than tearing it apart.
+pub(crate) const MIN_RING_ENTRIES: u32 = 2;
+
+/// `IORING_MAX_ENTRIES`. The runtime always sets `IORING_SETUP_CLAMP`, so the
+/// kernel would silently reduce anything larger instead of failing.
+pub(crate) const MAX_RING_ENTRIES: u32 = 32_768;
+
+/// Rejects a submission-queue size the kernel would not use verbatim.
+///
+/// `io_uring_setup(2)` rounds its `entries` argument up to a power of two, and
+/// with `IORING_SETUP_CLAMP` it also caps it at [`MAX_RING_ENTRIES`] — both
+/// silently. Accepting those values would hand back a ring larger than the one
+/// that was asked for, and the reason to ask for a specific size in the first
+/// place is a locked-memory budget that something else in the process is also
+/// drawing on. Getting quietly more than requested is precisely the failure
+/// this knob exists to avoid, so a value the kernel would adjust is an error
+/// rather than a suggestion.
+pub(crate) fn check_ring_entries(entries: u32) -> io::Result<()> {
+    if !(MIN_RING_ENTRIES..=MAX_RING_ENTRIES).contains(&entries) || !entries.is_power_of_two() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "io_uring ring_entries must be a power of two between {MIN_RING_ENTRIES} and \
+                 {MAX_RING_ENTRIES}, not {entries}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 thread_local! {
     static CURRENT_SUBMITTER: Cell<*const IoUring> = const { Cell::new(ptr::null()) };
 }
@@ -169,6 +207,55 @@ struct IoUringProbe {
     ops: [IoUringProbeOp; 256],
 }
 
+// These are hand-written mirrors of `include/uapi/linux/io_uring.h`, and the
+// kernel reads and writes them through a shared mapping: nothing about a
+// mismatch is diagnosable at the point it goes wrong. An SQE field added or
+// reordered here would silently displace every field after it *and* resize the
+// SQE mmap, which `IoUring::new_with_profile` sizes with
+// `size_of::<IoUringSqe>()`. The numbers below are the kernel's, so a mirror
+// that drifts fails to compile.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<IoSqringOffsets>() == 40 && align_of::<IoSqringOffsets>() == 8);
+    assert!(size_of::<IoCqringOffsets>() == 40 && align_of::<IoCqringOffsets>() == 8);
+
+    assert!(size_of::<IoUringParams>() == 120 && align_of::<IoUringParams>() == 8);
+    assert!(offset_of!(IoUringParams, features) == 20);
+    assert!(offset_of!(IoUringParams, sq_off) == 40);
+    assert!(offset_of!(IoUringParams, cq_off) == 80);
+
+    assert!(size_of::<IoUringSqe>() == 64 && align_of::<IoUringSqe>() == 8);
+    assert!(offset_of!(IoUringSqe, opcode) == 0);
+    assert!(offset_of!(IoUringSqe, flags) == 1);
+    assert!(offset_of!(IoUringSqe, ioprio) == 2);
+    assert!(offset_of!(IoUringSqe, fd) == 4);
+    assert!(offset_of!(IoUringSqe, off) == 8);
+    assert!(offset_of!(IoUringSqe, addr) == 16);
+    assert!(offset_of!(IoUringSqe, len) == 24);
+    assert!(offset_of!(IoUringSqe, op_flags) == 28);
+    assert!(offset_of!(IoUringSqe, user_data) == 32);
+    assert!(offset_of!(IoUringSqe, buf_index) == 40);
+    assert!(offset_of!(IoUringSqe, personality) == 42);
+    assert!(offset_of!(IoUringSqe, file_index) == 44);
+    assert!(offset_of!(IoUringSqe, pad2) == 48);
+
+    assert!(size_of::<IoUringCqe>() == 16 && align_of::<IoUringCqe>() == 8);
+    assert!(offset_of!(IoUringCqe, user_data) == 0);
+    assert!(offset_of!(IoUringCqe, res) == 8);
+    assert!(offset_of!(IoUringCqe, flags) == 12);
+
+    assert!(size_of::<IoUringProbeOp>() == 8 && align_of::<IoUringProbeOp>() == 4);
+    assert!(offset_of!(IoUringProbeOp, op) == 0);
+    assert!(offset_of!(IoUringProbeOp, flags) == 2);
+
+    assert!(size_of::<IoUringProbe>() == 16 + 256 * 8);
+    assert!(offset_of!(IoUringProbe, ops) == 16);
+
+    assert!(size_of::<KernelTimespec>() == 16 && align_of::<KernelTimespec>() == 8);
+    assert!(offset_of!(KernelTimespec, tv_nsec) == 8);
+};
+
 impl Default for IoUringProbe {
     fn default() -> Self {
         Self {
@@ -247,6 +334,165 @@ impl SupportedOps {
             probe_supported: true,
         }
     }
+
+    /// Removes `opcodes` from the probed set.
+    ///
+    /// Masking is the only direction the `RUNITE_IO_URING_DISABLE_OPCODES`
+    /// seam moves in: it can force a fallback the kernel would not have
+    /// needed, never claim an opcode the kernel does not have.
+    #[cfg(any(test, runite_opcode_injection))]
+    fn without(mut self, opcodes: impl IntoIterator<Item = u8>) -> Self {
+        // A kernel too old to answer IORING_REGISTER_PROBE reports every
+        // opcode as supported regardless of `ops`; the mask has to switch the
+        // array back on to mean anything.
+        self.probe_supported = true;
+        for opcode in opcodes {
+            self.ops[opcode as usize] = false;
+        }
+        self
+    }
+}
+
+/// Opcodes runite issues that postdate the 5.6 kernel floor documented in the
+/// crate root, each with the release that introduced it. A kernel sitting
+/// exactly on the floor has none of them and reaches a fallback for every one.
+#[cfg(any(test, runite_opcode_injection))]
+const OPCODES_ABOVE_5_6: [u8; 9] = [
+    IORING_OP_SHUTDOWN,  // 5.11
+    IORING_OP_RENAMEAT,  // 5.11
+    IORING_OP_UNLINKAT,  // 5.11
+    IORING_OP_MKDIRAT,   // 5.15
+    IORING_OP_MSG_RING,  // 5.18
+    IORING_OP_SOCKET,    // 5.19
+    IORING_OP_FTRUNCATE, // 6.9
+    IORING_OP_BIND,      // 6.11
+    IORING_OP_LISTEN,    // 6.11
+];
+
+/// Every opcode runite can lose without losing public API: the above-5.6 set
+/// plus the four socket opcodes a 5.6 kernel does provide but that carry
+/// fallbacks anyway. Turning all of these off is the widest constraint the
+/// runtime survives — `POLL_ADD`, `TIMEOUT`, `TIMEOUT_REMOVE`, `LINK_TIMEOUT`,
+/// `ASYNC_CANCEL`, `OPENAT`, `READ`, `WRITE`, `FSYNC`, `STATX`, `SENDMSG` and
+/// `RECVMSG` have no alternative implementation, which is exactly why the
+/// floor is 5.6 and not lower.
+#[cfg(any(test, runite_opcode_injection))]
+const OPTIONAL_OPCODES: [u8; 13] = [
+    IORING_OP_ACCEPT,  // 5.5
+    IORING_OP_CONNECT, // 5.5
+    IORING_OP_SEND,    // 5.6
+    IORING_OP_RECV,    // 5.6
+    IORING_OP_SHUTDOWN,
+    IORING_OP_RENAMEAT,
+    IORING_OP_UNLINKAT,
+    IORING_OP_MKDIRAT,
+    IORING_OP_MSG_RING,
+    IORING_OP_SOCKET,
+    IORING_OP_FTRUNCATE,
+    IORING_OP_BIND,
+    IORING_OP_LISTEN,
+];
+
+/// Names the `RUNITE_IO_URING_DISABLE_OPCODES` profile that hides everything
+/// introduced after the documented 5.6 floor.
+#[cfg(any(test, runite_opcode_injection))]
+const DISABLE_PROFILE_ABOVE_5_6: &str = "above-5.6";
+
+/// Names the `RUNITE_IO_URING_DISABLE_OPCODES` profile that hides every opcode
+/// runite has a fallback for.
+#[cfg(any(test, runite_opcode_injection))]
+const DISABLE_PROFILE_ALL_OPTIONAL: &str = "all-optional";
+
+/// Test-harness seam: masks the kernel's real opcode set so CI can drive the
+/// whole suite — integration tests included — down the fallback paths that
+/// otherwise only run on kernels no hosted runner offers.
+///
+/// Only a build compiled with `--cfg runite_opcode_injection` reads this. That
+/// cfg is set by `mise run capability-matrix` and by nothing else, so a
+/// dependent application built with a plain `cargo build` contains no code that
+/// looks the variable up, in debug or release. The gate is a cfg rather than
+/// `debug_assertions` because the constrained passes must be runnable in
+/// release, and it is a cfg rather than nothing because masking an opcode
+/// changes real behaviour: `RUNITE_IO_URING_DISABLE_OPCODES=9` would make every
+/// `send_to` fail, since `IORING_OP_SENDMSG` has no fallback.
+///
+/// Accepts one of the two profile names above, or a comma-separated list of
+/// decimal opcode numbers drawn from [`OPTIONAL_OPCODES`].
+#[cfg(any(test, runite_opcode_injection))]
+const DISABLE_OPCODES_ENV: &str = "RUNITE_IO_URING_DISABLE_OPCODES";
+
+/// Reads the mask for a build compiled with `--cfg runite_opcode_injection`.
+///
+/// Every failure here is a panic rather than a shrug. A build carrying that cfg
+/// is a constrained CI pass and nothing else, so a missing or unparseable value
+/// means the pass is about to run unmasked against a modern kernel and report
+/// the fallback paths as covered when nothing exercised them. Failing ring
+/// setup is the only outcome that cannot be mistaken for success.
+#[cfg(runite_opcode_injection)]
+fn mask_disabled_opcodes(probed: SupportedOps) -> SupportedOps {
+    let requested = std::env::var(DISABLE_OPCODES_ENV).unwrap_or_else(|_| {
+        panic!(
+            "this build was compiled with --cfg runite_opcode_injection, which exists only \
+             for the constrained-opcode CI passes, but {DISABLE_OPCODES_ENV} did not reach \
+             this process"
+        )
+    });
+    let disabled = parse_disabled_opcodes(&requested)
+        .unwrap_or_else(|reason| panic!("{DISABLE_OPCODES_ENV}={requested:?}: {reason}"));
+
+    tracing::warn!(
+        target: crate::trace_targets::DRIVER,
+        event = "io_uring_opcodes_disabled",
+        variable = DISABLE_OPCODES_ENV,
+        count = disabled.len(),
+        "masking probed io_uring opcode support; fallback paths will run \
+         in place of native operations"
+    );
+    probed.without(disabled)
+}
+
+#[cfg(not(runite_opcode_injection))]
+fn mask_disabled_opcodes(probed: SupportedOps) -> SupportedOps {
+    probed
+}
+
+/// Expands a `RUNITE_IO_URING_DISABLE_OPCODES` value, or explains why it is not
+/// a usable mask.
+///
+/// Numeric entries are restricted to [`OPTIONAL_OPCODES`] because every other
+/// opcode runite issues has no fallback: hiding one does not exercise a
+/// recovery path, it just makes the operation fail.
+#[cfg(any(test, runite_opcode_injection))]
+fn parse_disabled_opcodes(value: &str) -> Result<Vec<u8>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("names no opcode".to_owned());
+    }
+    if value == DISABLE_PROFILE_ABOVE_5_6 {
+        return Ok(OPCODES_ABOVE_5_6.to_vec());
+    }
+    if value == DISABLE_PROFILE_ALL_OPTIONAL {
+        return Ok(OPTIONAL_OPCODES.to_vec());
+    }
+
+    let mut opcodes = Vec::new();
+    for token in value.split(',') {
+        let token = token.trim();
+        let opcode = token.parse::<u8>().map_err(|_| {
+            format!(
+                "{token:?} is neither a profile name ({DISABLE_PROFILE_ABOVE_5_6}, \
+                 {DISABLE_PROFILE_ALL_OPTIONAL}) nor an opcode number"
+            )
+        })?;
+        if !OPTIONAL_OPCODES.contains(&opcode) {
+            return Err(format!(
+                "opcode {opcode} has no fallback, so hiding it would break the operation \
+                 rather than exercise a recovery path"
+            ));
+        }
+        opcodes.push(opcode);
+    }
+    Ok(opcodes)
 }
 
 #[derive(Debug)]
@@ -640,6 +886,13 @@ impl IoUring {
 
     pub(crate) fn supported_ops(&self) -> SupportedOps {
         self.supported_ops
+    }
+
+    /// Submission-queue entries the kernel actually allocated, read from the
+    /// mapped ring rather than from what was requested.
+    #[cfg(test)]
+    pub(crate) fn sq_entries(&self) -> u32 {
+        load_u32(self.sq_ring_entries)
     }
 
     pub(crate) fn supports_submit_all(&self) -> bool {
@@ -1167,9 +1420,29 @@ impl IoUring {
 
 impl Drop for IoUring {
     fn drop(&mut self) {
-        // Close first: once the last duplicate is gone, the kernel quiesces
-        // operations before their completion-owned storage can be dropped.
-        // The mappings are then unmapped exactly once.
+        // This drop does not make in-flight operations safe, and closing the
+        // ring fd does not either: `close(2)` on an io_uring fd kills the
+        // context reference and queues the teardown work, then returns, so
+        // requests the kernel still holds are torn down afterwards, on its own
+        // schedule. Anything the kernel could still write into must therefore
+        // already be unreachable by the time we get here. `Driver::drop` is
+        // what establishes that — it releases the ring only when
+        // `quiesce_operations` has reaped every completion, and leaks both the
+        // ring and the callback storage when it cannot prove that. Outside the
+        // unit tests the only other drop is the pre-created ring in
+        // `recreate_ring_on_current_thread`, which has never carried a user
+        // submission; the process-wide fallback ring lives in a `static` and is
+        // never dropped at all.
+        //
+        // What is local to this impl is only the unmapping: each mapping is
+        // released exactly once, and the mappings outlive the close because the
+        // kernel holds its own reference to the ring pages.
+        //
+        // SAFETY: every pointer here came from a successful `mmap_ring` during
+        // construction and is unmapped at the length recorded alongside it;
+        // `ring_fd` came from `io_uring_setup`. `IoUring` is neither `Copy` nor
+        // `Clone`, so this runs once per ring, and under `IORING_FEAT_SINGLE_MMAP`
+        // the shared CQ pointer is deliberately not unmapped a second time.
         unsafe {
             libc::close(self.ring_fd);
             libc::munmap(self.sqes_ptr.cast(), self.sqes_size);
@@ -1415,7 +1688,7 @@ fn supported_ops_for_ring(ring_fd: RawFd) -> SupportedOps {
         return ops;
     }
 
-    *SUPPORTED_OPS.get_or_init(|| probe_supported_ops(ring_fd))
+    *SUPPORTED_OPS.get_or_init(|| mask_disabled_opcodes(probe_supported_ops(ring_fd)))
 }
 
 fn probe_supported_ops(ring_fd: RawFd) -> SupportedOps {
@@ -1488,10 +1761,12 @@ fn duration_to_kernel_timespec(duration: Duration) -> KernelTimespec {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::{
+        DISABLE_OPCODES_ENV, DISABLE_PROFILE_ABOVE_5_6, DISABLE_PROFILE_ALL_OPTIONAL,
         IORING_ENTER_GETEVENTS, IORING_OP_MSG_RING, IORING_OP_NOP, IORING_OP_POLL_ADD,
-        IORING_SETUP_DEFER_TASKRUN, IORING_SETUP_SINGLE_ISSUER, IOSQE_CQE_SKIP_SUCCESS, IoUring,
-        IoUringEnter, IoUringEnterCall, ScriptedIoUringEnter, SupportedOps,
-        is_unsupported_operation, load_u32, normalize_setup_error, override_supported_ops,
+        IORING_OP_READ, IORING_SETUP_DEFER_TASKRUN, IORING_SETUP_SINGLE_ISSUER,
+        IOSQE_CQE_SKIP_SUCCESS, IoUring, IoUringEnter, IoUringEnterCall, OPCODES_ABOVE_5_6,
+        OPTIONAL_OPCODES, ScriptedIoUringEnter, SupportedOps, is_unsupported_operation, load_u32,
+        normalize_setup_error, override_supported_ops, parse_disabled_opcodes,
         supported_ops_for_ring,
     };
     use std::fs::File;
@@ -1527,6 +1802,119 @@ mod tests {
         assert!(ops.probe_unavailable());
         assert!(ops.supports(IORING_OP_NOP));
         assert!(ops.supports(u8::MAX));
+    }
+
+    #[test]
+    fn masking_only_removes_support_never_grants_it() {
+        let probed = SupportedOps::only([IORING_OP_NOP]);
+        let masked = probed.without([IORING_OP_NOP]);
+
+        assert!(!masked.supports(IORING_OP_NOP));
+        assert!(
+            !masked.supports(IORING_OP_MSG_RING),
+            "an opcode the probe reported as missing must stay missing"
+        );
+    }
+
+    /// A kernel too old for `IORING_REGISTER_PROBE` claims every opcode. The
+    /// mask has to override that or the seam is a no-op exactly where the
+    /// fallbacks matter most.
+    #[test]
+    fn masking_a_permissive_bitmap_still_disables_the_named_opcodes() {
+        let masked = SupportedOps::permissive_after_probe_failure().without([IORING_OP_MSG_RING]);
+
+        assert!(!masked.supports(IORING_OP_MSG_RING));
+        assert!(masked.supports(IORING_OP_NOP));
+    }
+
+    #[test]
+    fn disable_opcode_profiles_expand_to_their_opcode_sets() {
+        assert_eq!(
+            parse_disabled_opcodes(DISABLE_PROFILE_ABOVE_5_6),
+            Ok(OPCODES_ABOVE_5_6.to_vec())
+        );
+        assert_eq!(
+            parse_disabled_opcodes(DISABLE_PROFILE_ALL_OPTIONAL),
+            Ok(OPTIONAL_OPCODES.to_vec())
+        );
+        assert_eq!(parse_disabled_opcodes(" 40 , 45 "), Ok(vec![40, 45]));
+    }
+
+    /// The seam is compiled out of a released build, so a bad value is a
+    /// mistake in the harness and never a user's misconfiguration. Rejecting it
+    /// is what stops a constrained pass from running unmasked.
+    #[test]
+    fn an_unusable_disable_opcodes_value_is_rejected_rather_than_shrugged_off() {
+        assert!(parse_disabled_opcodes("").is_err());
+        assert!(parse_disabled_opcodes("   ").is_err());
+        assert!(parse_disabled_opcodes("not-a-profile").is_err());
+        assert!(parse_disabled_opcodes("40,garbage").is_err());
+        assert!(parse_disabled_opcodes("above-5.6,45").is_err());
+        assert!(
+            parse_disabled_opcodes("9").is_err(),
+            "SENDMSG has no fallback; hiding it would only break send_to"
+        );
+        assert!(
+            parse_disabled_opcodes("22").is_err(),
+            "READ is below the 5.6 floor and has no fallback"
+        );
+    }
+
+    /// Every opcode the `above-5.6` profile hides must also be optional; the
+    /// two lists drifting apart would mean the floor profile disables
+    /// something the runtime cannot actually do without.
+    #[test]
+    fn the_floor_profile_is_a_subset_of_the_optional_opcodes() {
+        for opcode in OPCODES_ABOVE_5_6 {
+            assert!(
+                OPTIONAL_OPCODES.contains(&opcode),
+                "opcode {opcode} postdates 5.6 but is not listed as optional"
+            );
+        }
+    }
+
+    /// Proves the constrained CI passes are actually constrained, by reading
+    /// the bitmap the dispatch code will use rather than re-deriving one.
+    ///
+    /// The mask needs two independent things to line up: the crate has to be
+    /// compiled with `--cfg runite_opcode_injection`, and
+    /// `RUNITE_IO_URING_DISABLE_OPCODES` has to reach the test process. Losing
+    /// either one leaves a green run that exercised no fallback at all, so this
+    /// fails whenever one is present without the other, and then checks the
+    /// live `SUPPORTED_OPS` really lost the named opcodes.
+    #[test]
+    fn opcode_injection_cfg_and_env_agree_and_reach_the_ring() {
+        let requested = std::env::var(DISABLE_OPCODES_ENV).ok();
+
+        if !cfg!(runite_opcode_injection) {
+            assert!(
+                requested.is_none(),
+                "{DISABLE_OPCODES_ENV} is set but this build ignores it; the constrained \
+                 passes must also build with RUSTFLAGS=--cfg runite_opcode_injection"
+            );
+            return;
+        }
+
+        let requested = requested.expect(
+            "a --cfg runite_opcode_injection build panics during ring setup without \
+             the variable, so reaching this assertion means the seam was bypassed",
+        );
+        let disabled = parse_disabled_opcodes(&requested)
+            .unwrap_or_else(|reason| panic!("{DISABLE_OPCODES_ENV}={requested:?}: {reason}"));
+
+        let ring = IoUring::new(8).expect("ring should initialize");
+        let ops = ring.supported_ops();
+        for opcode in &disabled {
+            assert!(
+                !ops.supports(*opcode),
+                "{DISABLE_OPCODES_ENV} named opcode {opcode} but the ring still reports it \
+                 as supported, so this process ran unmasked"
+            );
+        }
+        assert!(
+            ops.supports(IORING_OP_READ),
+            "masking must leave the 5.6 base opcodes alone"
+        );
     }
 
     #[test]

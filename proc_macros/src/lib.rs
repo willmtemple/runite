@@ -33,8 +33,35 @@ mod keyword {
 /// A synchronous `fn main` runs its body, drives the event loop to drain any
 /// tasks it spawned via `runite::run`, then returns its value.
 ///
+/// # Configuring the runtime
+///
+/// The bare attribute starts the thread's runtime lazily and with the
+/// defaults. In an `async` body that still means the runtime exists before the
+/// body does — `runite::block_on` installs it — so a
+/// `runite::Builder::build()` there fails with
+/// [`AlreadyExists`](std::io::ErrorKind::AlreadyExists). A bare *synchronous*
+/// body is the exception: it runs before the trailing `runite::run()`, so a
+/// `build()` in it succeeds and that `run()` drives what it built. Pass the
+/// settings to the attribute instead, and it builds the runtime it names
+/// before the body runs, in either shape:
+///
+/// ```ignore
+/// #[runite::main(ring_entries = 32)]
+/// async fn main() { /* ... */ }
+/// ```
+///
+/// `ring_entries` is the io_uring submission-queue size; see
+/// `runite::os::linux::BuilderExt::ring_entries` for the accepted values and
+/// what they cost. It is **Linux-only**: on macOS or Windows the attribute is
+/// a compile error naming the platform, for the same reason the setter lives
+/// on a Linux extension trait rather than on the portable `Builder`.
+///
+/// A rejected setting is a startup panic here, since an entry point has
+/// nowhere to return an error to. Use `runite::Builder` directly to handle it.
+///
 /// To use a renamed `runite` dependency, pass the path:
-/// `#[runite::main(crate = "my_runite")]`.
+/// `#[runite::main(crate = "my_runite")]`. Arguments may be combined in either
+/// order: `#[runite::main(crate = "my_runite", ring_entries = 32)]`.
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, EntryKind::Main)
@@ -51,8 +78,25 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// likewise attached to the wrapper; lint scope then includes the nested async
 /// implementation.
 ///
+/// # Configuring the runtime
+///
+/// Accepts the same settings as [`#[runite::main]`](macro@main), so a
+/// configured runtime can be tested rather than only shipped:
+///
+/// ```ignore
+/// #[runite::test(ring_entries = 8)]
+/// async fn a_small_ring_still_reads_files() { /* ... */ }
+/// ```
+///
+/// This relies on libtest giving each test its own thread, which it does
+/// unless the suite is run with `--test-threads=1`. Under that flag a
+/// configured test that is not the first to touch the runtime panics with
+/// [`AlreadyExists`](std::io::ErrorKind::AlreadyExists) rather than quietly
+/// running on someone else's runtime.
+///
 /// To use a renamed `runite` dependency, pass the path:
-/// `#[runite::test(crate = "my_runite")]`.
+/// `#[runite::test(crate = "my_runite")]`. Arguments may be combined in either
+/// order: `#[runite::test(crate = "my_runite", ring_entries = 8)]`.
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr, item, EntryKind::Test)

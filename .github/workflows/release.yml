@@ -174,17 +174,14 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
-          # The publish-shaped artifacts, not the workspace-packaged ones. The
-          # workspace path rewrites the embedded Cargo.lock to reference the
-          # locally packaged proc-macro so the unpacked tree can be verified
-          # before upload; `cargo publish` resolves it from the registry
-          # instead. Comparing crates.io against the workspace artifact would
-          # compare a checksum the published crate can never have, and a
-          # mismatch here is detected only after the first upload and re-raised
-          # on every rerun.
+          # The artifacts the step above verified are the ones `cargo publish`
+          # uploads: the embedded Cargo.lock records the sibling proc-macro
+          # `.crate` by checksum, and that file is what gets published, so the
+          # registry ends up reporting the same digest. `release-verify`
+          # asserts that rather than assuming it.
           python3 - "$version" "$GITHUB_OUTPUT" \
-            "target/xtask-release/publish-shape/package/runite-${version}.crate" \
-            "target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate" \
+            "target/xtask-release/package/package/runite-${version}.crate" \
+            "target/xtask-release/package/package/runite-proc-macros-${version}.crate" \
             "${ALLOW_CHECKSUM_MISMATCH:-false}" <<'PY'
           import hashlib
           import json
@@ -255,8 +252,7 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
-          # Publish-shaped, for the same reason as the detection step above.
-          artifact="target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate"
+          artifact="target/xtask-release/package/package/runite-proc-macros-${version}.crate"
           python3 - "$version" "$artifact" <<'PY'
           import hashlib
           import json

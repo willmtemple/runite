@@ -1,5 +1,6 @@
-*This document describes the runtime as implemented for 0.2. Forward-looking
-work is tracked in the project's GitHub issues.*
+*This document describes the runtime as it is implemented on the current
+development branch, not as any published version behaves. Forward-looking work
+is tracked in the project's GitHub issues.*
 
 # Overview
 
@@ -53,6 +54,30 @@ Lazy initialization contract:
   `ThreadState` — on Linux, that includes an `io_uring` ring. Ordinary threads retain that state
   across sequential driver entries and release it at thread teardown; runtime-owned workers
   perform explicit teardown before their thread function returns.
+- `Builder::build()` is the same installation performed eagerly, from a `RuntimeConfig`
+  (`src/platform/runtime_shared/config.rs`) rather than the defaults, and returning the driver's
+  error instead of panicking on it. Because the driver is created during installation, the
+  configuration can only be supplied by the call that installs: a `build()` on a thread that
+  already has a `ThreadState` reports `ErrorKind::AlreadyExists` rather than accepting settings it
+  cannot apply. The `Runtime` it returns is a `!Send` token, not an owner — dropping it leaves the
+  thread's state installed, exactly as returning from `run()` does.
+- `#[runite::main]` and `#[runite::test]` (`proc_macros/src/entry.rs`) expand to `build()` when the
+  attribute carries settings, and to the lazy free functions when it does not. A configured
+  attribute installs the runtime before the annotated body runs, because otherwise the settings
+  would be unreachable from the crate's headline entry point. Because a proc macro cannot see the
+  target, the expansion picks between the configured and default builders with `cfg`, and emits
+  `compile_error!` naming the platform on the targets that lack the knob — the default builder is
+  still emitted there so that message is the only diagnostic.
+- The bare attributes stay lazy, so *when* the runtime appears differs by shape. A bare `async`
+  body is driven by `block_on`, which installs the runtime before polling it; a bare synchronous
+  body runs first and only then is drained by `run()`, so it is the one shape whose body executes
+  on a thread with no runtime yet. A `Builder::build()` there succeeds and the trailing `run()`
+  drives what it built. Everywhere else — either configured shape, or a bare `async` one — the
+  runtime already exists and `build()` reports `AlreadyExists`.
+- The config is stored on `ThreadState` and read by `spawn_worker`, which passes it to the worker's
+  driver and installs it on the worker thread, so it propagates down a worker tree. On Linux the
+  driver also retains its ring size, because a worker's ring is minted on the parent thread and
+  rebuilt on the worker in `bind_current_thread`.
 
 ## Scaling across cores
 
@@ -144,8 +169,67 @@ identifiers do not collide between runtime threads. Being globally unique matter
 dense: a consumer merging several threads into one profile joins on equality, and a per-thread
 counter would force it to carry a thread identity alongside. All four entry points (`run`,
 `block_on`, `run_until_stalled`, `run_ready_tasks`) drive turns, since a host embedding the runtime
-through the latter two needs the key as much as `run` does. The identifier is deliberately opaque
-and carries nothing about what the turn did.
+through the latter two needs the key as much as `run` does. It renders as the same text that
+appears in the `turn_id` trace field — that correspondence is what makes joining possible, and is
+the only thing promised about the value. It carries nothing about what the turn did, and the gap
+between two ids is not a count of turns, since every runtime thread draws from the same counter.
+
+What the turn *did* is a separate record, emitted once per turn on `runite::runtime` at `TRACE`
+(`event = "turn"`): why the loop woke, how long it was parked in the driver, how long it then spent
+runnable, queue depths either side, and what it drained. It is stamped with a `RuntimeId` as well as
+the `TurnId`, because task and timer ids restart at 1 on every runtime thread and driver tokens are
+per-driver and wrapping — without the runtime identity, a merged timeline collapses one thread's
+`timer_id = 3` onto another's.
+
+The `wake` classification is derived only from what the turn itself observed, because a diagnostic
+that guesses is worse than one that abstains. A turn that never parked was not woken at all, so it
+reports `queued` no matter what else was moving; the causes for a turn that did park come from the
+driver's `ReadyEvents`, never from a counter delta. `operations_completed` in particular is bumped
+by whichever thread terminalizes the operation, including a blocking-pool thread, so reading a wake
+out of it would label turns that neither parked nor polled a driver as I/O wakes.
+
+The cost constraint is what shapes the rest. A park belongs to the turn its wake begins, so
+`TurnGuard` carries the park duration across the turn boundary in a thread-local rather than
+splitting the wait from its cause across two records. Drained counts are differences of the
+cumulative counters the runtime already maintains, so nothing new happens per task or per microtask;
+only the quantities no counter covers — timers dispatched, cross-thread tasks adopted, worker exits,
+wake notifications — are accumulated per turn, and only by the sites that did the work. Everything
+that costs something at turn boundaries — the four clock reads that time the turn and its microtask
+checkpoint, sampling queue depths, locking the cross-thread queue, timing the driver park — sits
+behind a `tracing::enabled!` check: one when the turn opens, one at the microtask checkpoint, and
+one before the driver park, each covering the work about to be done rather than a decision cached
+from earlier in the turn.
+
+The clock reads are why those gates are not a nicety. 0.3 carried them ungated for a while, and
+they were the single largest cost in the loop: ~465 marginal instructions per turn against ~1320
+for an entire dormant turn once they are gone (~1000 for the same loop on 0.2.0, which timed
+nothing). On a host whose clocksource is `hpet` or `acpi_pm` rather than the TSC each one is a real
+syscall instead of a vDSO call. Gating them costs one thing, and it is a real cost:
+`metrics::snapshot`'s `microtask_bound_turns` is derived from those reads, so it advances only while
+something is collecting turn records. That is stated on the counter itself, because a counter that
+silently stops counting is its own defect.
+
+What an uninstrumented loop still pays per turn, stated exactly rather than as "nothing": those
+`enabled!` checks, a relaxed increment of the turn counter, two thread-local accesses to set the
+current turn id, the reset of the per-turn activity cells, one more thread-local take of the parked
+flag, and `observe_peaks` — six relaxed compare-exchange loops against `Arc<ThreadShared>` that
+short-circuit to a load whenever the gauge has not risen. The parked take is deliberately outside
+the gate: a park timed while a subscriber was installed must not be attributed to a much later turn
+if the subscriber goes away in between. Stubbing all of it out of a dormant loop recovers ~150
+instructions per turn, of which `observe_peaks` is ~50 — no clock read, no syscall, no allocation
+and no lock.
+
+That last property is the one worth defending, because the cross-thread queue depth is read under
+the very mutex `enqueue_macro` contends on, and because a clock read is neither thread-local nor
+free. Every timing site on the turn path goes through `turn_timestamp` / `turn_elapsed`, which under
+`cfg(test)` count themselves alongside the depth samples, and
+`dormant_turn_records_cost_nothing` asserts the count is zero for a loop that parks with no
+collector installed — so deleting the gate fails a test instead of silently putting a lock
+acquisition, or four clock reads, on every iteration of every runite loop. What that test cannot
+see is a *new* site calling `Instant::now` directly, which is how the four got there: the count is
+meaningful only for as long as those two helpers remain the turn path's only clock reads.
+`cargo bench --bench runtime` reports the cost as a number instead of a property: `turn/dormant`
+against `turn/collecting` is one workload with the collector off and on.
 
 Why this shape exists:
 
@@ -234,6 +318,28 @@ For `run`/`run_until_stalled`/`run_ready_tasks` that panic is absorbed by the pe
 (the offending task resolves to `JoinError::Panicked`); `block_on` is a direct driver, so it
 propagates to the caller.
 
+`shutdown()`:
+
+- Performs the thread's teardown on the caller's own stack instead of waiting for the thread to
+  exit: hooks registered with `on_shutdown` run, spawned tasks are cancelled, timers and queued
+  closures are dropped, and the driver is destroyed
+  (`shutdown_current_thread`/`finalize_thread`, `src/platform/runtime_shared/state.rs`).
+- Is not an entry point returning. `run_until_stalled` and `run_ready_tasks` return routinely — a
+  host driving the loop returns from one constantly and means nothing by it — so teardown is what
+  hooks are keyed to, and `shutdown` is how an application asks for it at a chosen moment.
+- Runs hooks **before** `cancel_all_registered_tasks`, because a hook exists to observe a live
+  runtime one last time; running it afterwards would hand it a runtime that can no longer do
+  anything.
+- Panics if called from inside a task or callback on the loop, or if teardown is already running.
+  On a thread with no runtime it does nothing, and after it returns the thread may install a fresh
+  runtime — including a reconfigured one through `Builder::build`, since the `AlreadyExists`
+  condition is gone.
+- Is the only way hooks run at all on an application-owned Windows thread: the TLS fallback there
+  runs under the loader lock, where executing arbitrary user code or closing a completion port can
+  deadlock process shutdown, so it publishes closure and retains the rest (see "Idle commit and
+  teardown ownership" below). Worker threads are unaffected on every platform; they tear down
+  explicitly before exiting.
+
 ## Panic isolation
 
 A panic must never tear down the event loop that observes it:
@@ -286,9 +392,12 @@ Runtime-state ownership is RAII (`THREAD_OWNER`), while `CURRENT_THREAD` is a
 scoped non-owning fast-path pointer. Unix ordinary threads finalize at TLS
 teardown. Windows TLS fallback runs under the loader lock, so it only publishes
 closure and retains unsafe-to-drop state; runtime-owned workers always use an
-explicit teardown guard outside loader lock. Teardown terminalizes tasks,
-timers, children, retry helpers, and the driver before worker completion can be
-published (`src/platform/runtime_shared/state.rs`).
+explicit teardown guard outside loader lock. Teardown runs the thread's
+`on_shutdown` hooks first, then terminalizes tasks, timers, children, retry
+helpers, and the driver before worker completion can be published
+(`src/platform/runtime_shared/state.rs`). The Windows fallback runs none of
+that, so an application-owned Windows thread must call `shutdown()` for its
+hooks to run at all.
 
 ## Worker observation
 
@@ -347,12 +456,24 @@ terminal stream error and also releases the iterator and runtime liveness (`src/
 
 `Stdin` has a separate process-wide contract. One lazily started dedicated
 reader owns a duplicate input handle and reads only while at least one waiter
-exists, into a bounded 64 KiB shared buffer. Cancelling one `Stdin` read removes
-that handle's waiter but never discards process bytes. Multiple handles compete
+exists, into a bounded 64 KiB shared buffer. Cancelling one `Stdin` read does
+not retract it — the handle keeps the operation and its waiter for its next read
+to claim, which is how cancellation avoids discarding process bytes, and which
+means the reader goes on filling the shared buffer with nothing awaiting it.
+Dropping the handle is what releases the waiter. Multiple handles compete
 for the same stream. An inherited child temporarily pauses the reader; Windows
 rejects an inherited-console spawn with `WouldBlock` while a console read is
 active because that host read cannot always be cancelled losslessly
 (`src/stdio.rs`, `src/stdio/stdin_reader.rs`).
+
+Drop is not the only cancellation mechanism the crate offers, but it is the
+only one the *backend* participates in. `sync::CancellationToken` is a
+cooperative signal between tasks: cloneable, `!Send` like the rest of `sync`,
+hierarchical through `child_token` (cancellation flows down only), and awaited
+with `cancelled()`. Nothing in the driver observes it. Where `AbortHandle`
+terminates a task at its next suspension point whether or not it is ready, a
+token is something a task chooses to poll, so work that must flush a buffer or
+release a lock before stopping can do so (`src/sync/cancellation.rs`).
 
 What Drop does not mean:
 
@@ -368,8 +489,33 @@ Implication for buffer ownership:
 - The current implementation satisfies this by moving owned staging buffers into completion/cancel
   guards as described below.
 
-An explicit `CancellationToken` remains a possible future addition for
-operations that need cancellation independent of future ownership.
+## Closing a descriptor on purpose
+
+Dropping a resource closes its descriptor with a synchronous `close(2)`, which
+is unordered with respect to SQEs already submitted against it: the kernel
+keeps the underlying file alive until those complete, but frees the descriptor
+*number* immediately, so a racing `open` elsewhere can be handed it while this
+resource's operations still name it. `close_descriptor` on `File`, `TcpStream`,
+`TcpListener`, `UdpSocket`, `UnixStream`, `UnixListener` and `UnixDatagram`
+exists for that ordering. On Linux it submits `IORING_OP_CLOSE`, which the ring
+sequences behind the earlier operations; macOS and Windows have no asynchronous
+close and gain only the outcome reporting.
+
+It returns `io::Result<io::CloseOutcome>`, where `StillShared` sits on the `Ok`
+side: a split half, a listener's `Incoming`, or an in-flight Windows operation
+can still hold the descriptor, and nothing leaks because the last holder closes
+it.
+
+The `OwnedFd` is **moved into the completion callback**, exactly as staging
+buffers are, and for the same reason: this future is cancellable, and dropping
+it must not run `OwnedFd::drop` while the SQE is live — cancelling only stages
+an `ASYNC_CANCEL`, which cannot retract an SQE the kernel already has. The
+callback decides from the CQE whether `close(2)` actually ran, biased towards
+assuming it did: guessing wrong the other way closes a descriptor number that
+may already belong to something else. `IORING_OP_CLOSE` is the one opcode where
+this matters, because it is absent from `duplicate_sqe_fd`'s `uses_descriptor`
+set and so names the caller's real descriptor rather than a duplicate
+(`src/sys/linux/fs.rs`).
 
 # I/O buffer ownership rules
 
@@ -424,6 +570,17 @@ This is sound for arbitrary borrowed buffers, but it is not zero-copy. A hot-pat
 ownership of a stable allocation to the operation (tokio-uring style) and registered buffers are
 tracked in the project's GitHub issues.
 
+The rule is about every resource the kernel operation owns, not only bytes.
+`close_descriptor` is the case where the resource *is* the descriptor:
+`IORING_OP_CLOSE` is the one opcode absent from `duplicate_sqe_fd`'s
+`uses_descriptor` set, so its SQE names the caller's real descriptor rather
+than a duplicate the ring can retire on its own. The `OwnedFd` is therefore
+moved into the completion callback like any staging buffer, and the callback
+decides from the CQE whether the kernel performed the close — releasing the
+descriptor only when it did not. Holding it in the future instead would run
+`OwnedFd::drop` on the cancellation path against a number the ring has already
+closed or is about to (`src/sys/linux/fs.rs`, `tests/close_cancel.rs`).
+
 # Subprocesses
 
 On Linux, child process exit is represented as fd readiness. `Command::spawn` opens a pidfd for the
@@ -444,20 +601,30 @@ There is no periodic timer and no blocking-pool offload for child exit on any pl
 
 `Child::from_pid` adopts a process runite did not spawn, using the same wait paths. Linux opens a
 fresh pidfd, macOS registers the same `EVFILT_PROC` filter, and Windows opens the process with
-`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE`. Because an adopted Windows
-process is a bare handle rather than a `std::process::Child`, the backend's process object is an
-enum over the two, and the adopted arm polls exit itself: it waits on the handle with a zero timeout
-and only reads `GetExitCodeProcess` once the object is signalled, since `STILL_ACTIVE` is
-indistinguishable from a process that genuinely exited with that value. Adoption validates the
-target up front on every platform, so a process that is already gone fails to adopt rather than
-producing a handle whose `wait` never completes. On Unix the target must be a direct child, because
-reading an exit status requires being its parent.
+`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION`, preferring to also get `PROCESS_TERMINATE` and
+retrying without it on `ERROR_ACCESS_DENIED`. Terminate is a write-class right the mandatory
+integrity policy refuses where the two observation rights are granted, so requiring it would refuse
+adoption of processes the caller may legitimately wait on; `kill` is left to report the missing
+right. Because an adopted Windows process is a bare handle rather than a `std::process::Child`, the
+backend's process object is an enum over the two, and the adopted arm polls exit itself: it waits on
+the handle with a zero timeout and only reads `GetExitCodeProcess` once the object is signalled,
+since `STILL_ACTIVE` is indistinguishable from a process that genuinely exited with that value.
+
+Adoption validates that the target exists on every platform, so a process that is already gone fails
+to adopt rather than producing a handle whose `wait` never completes. It is not an access check, and
+how much of one it incidentally performs differs: a pidfd needs no rights over the target, a signal-0
+probe can report `EPERM`, `OpenProcess` needs the mask above. On Unix the target must be a direct
+child, because reading an exit status requires being its parent — and nothing available at adoption
+time can tell parentage, so a non-child adopts successfully and every subsequent `waitpid` fails at
+once with `ECHILD`, including the one `kill` does first.
 
 A standard stream configured from a caller-owned descriptor (`Stdio::from`) is duplicated at each
 spawn rather than consumed, which keeps a `Command` reusable and leaves the caller's descriptor
-theirs. On Unix a `pre_exec` hook is stored behind an `Arc` and forwarded to
+theirs. On Unix `pre_exec` hooks are stored behind `Arc`s and forwarded to
 `std::os::unix::process::CommandExt::pre_exec` for the same reason — a runite `Command` may be
-spawned more than once, so the hook is `Fn` rather than std's `FnMut`.
+spawned more than once, so a hook is `Fn` rather than std's `FnMut`. They are kept in a `Vec` and
+registered with std one at a time, so std's own chaining decides the order and the short-circuit on
+error, and a second registration adds to the first instead of replacing it.
 
 Pipes attached to child stdin/stdout/stderr use the same platform byte-stream paths as other fds:
 Linux goes through the runtime-owned-buffer I/O path plus readiness where needed, macOS uses the
@@ -502,8 +669,13 @@ pre-5.18 kernels use the watched `eventfd` notifier instead of `MSG_RING`;
 data-path opcodes use nonblocking `IORING_OP_POLL_ADD` readiness. No fallback
 parks a runtime thread or a blocking-pool worker on socket data.
 
-On Linux, `Driver::create_driver` initializes an `io_uring` ring and records the
+On Linux, `Driver::create_driver` initializes an `io_uring` ring with 256 submission-queue entries
+by default, or the size set through `os::linux::BuilderExt::ring_entries`, and records the
 process-wide `IORING_REGISTER_PROBE` result from `src/platform/linux/uring.rs`.
+Sizes that are not a power of two in `2..=32768` are rejected by `Builder::build` rather than
+passed through: `io_uring_setup(2)` rounds up and, under the `IORING_SETUP_CLAMP` the runtime
+always sets, caps silently, and the reason to name a size is a locked-memory budget that a
+silently larger ring would blow.
 The supported-op bitmap is cached behind a `OnceLock` because kernel opcode support cannot change
 under a running process, and probing once per runtime thread would waste syscalls.
 
@@ -514,6 +686,16 @@ the driver logs one warning during cache initialization and uses a permissive bi
 then allowed to preserve compatibility with kernels that support io_uring but not probing. When a
 probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` values with
 `io::ErrorKind::Unsupported` before the SQE reaches the kernel.
+
+Hosted CI runners only ever offer recent kernels, so the bitmap is also maskable. Unit tests swap
+it per test through a `#[cfg(test)]` thread-local; integration tests and doctests, which link the
+non-test build, cannot reach that, so `RUNITE_IO_URING_DISABLE_OPCODES` subtracts opcodes from the
+probe result for the whole process instead. That variable is only read by a build compiled with
+`--cfg runite_opcode_injection`, which `mise run capability-matrix` sets and a `cargo build` never
+does — masking is a test instrument, not a supported knob, because hiding an opcode that has no
+fallback breaks the operation rather than exercising a recovery path. `mise run capability-matrix`
+uses it to run the io-facing tests against the 5.6 floor and against the widest constraint the
+runtime survives. See CONTRIBUTING.md for the full mechanism.
 
 # Platform parity matrix
 
@@ -527,7 +709,7 @@ probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` 
 | set_len | `IORING_OP_FTRUNCATE` (6.9+), inline `ftruncate(2)` fallback | blocking pool (`ftruncate`) | blocking pool (`SetFileInformationByHandle`) |
 | try_clone | inline `fcntl(F_DUPFD_CLOEXEC)` (never blocks) | blocking pool | inline `DuplicateHandle` (never blocks) |
 | read_dir | shared bounded, resumable blocking-pool batches (`getdents` can block, no io_uring opcode) | shared bounded, resumable blocking-pool batches | shared bounded, resumable blocking-pool batches |
-| close | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `close(2)` via `OwnedFd` `Drop` | synchronous `CloseHandle`/`closesocket` via owned-handle `Drop` (an awaitable close is tracked in the project's GitHub issues for every platform) |
+| close | `Drop`: synchronous `close(2)`. `close_descriptor`: `IORING_OP_CLOSE`, awaited rather than performed inline (not ordered against in-flight SQEs; each holds its own duplicate) | `Drop`: synchronous `close(2)`. `close_descriptor`: the same synchronous close — kqueue has no asynchronous close, so only the `Closed`/`StillShared` outcome is gained | `Drop`: synchronous `CloseHandle`/`closesocket`. `close_descriptor`: the same synchronous close, outcome only |
 | network ops | `io_uring` first; non-blocking control ops fall back inline, data-path ops fall back to a non-blocking readiness path (`IORING_OP_POLL_ADD`) on unsupported kernels — never the blocking pool | `kqueue` readiness plus synchronous nonblocking socket calls | overlapped `ConnectEx`/`AcceptEx`/`WSASend`/`WSARecv`/`WSASendTo`/`WSARecvFrom`; control ops inline |
 | Unix domain sockets | stream/datagram APIs reuse guarded send/recv paths plus readiness for path-addressed ops | stream/datagram APIs use the same guarded send/recv and readiness path | not provided (tracked in the project's GitHub issues) |
 | stdin | one demand-driven process-wide reader thread owns a duplicated fd and feeds a bounded shared buffer; inherited children pause it | same dedicated-reader design | synchronous console/file/pipe handles only; rejects overlapped handles and active-console inheritance |
@@ -548,7 +730,13 @@ Notes:
   the blocking pool, mirroring the macOS and Unix-domain-socket model (`src/sys/linux/net.rs`).
   The blocking pool is reserved for genuinely synchronous-only work (DNS resolution via
   `getaddrinfo`, `read_dir`/`getdents`). On a modern kernel the io_uring completion path always
-  wins; the readiness fallback is validated by a direct unit test that exercises it explicitly.
+  wins; the readiness fallback is validated both by direct unit tests and by running the io-facing
+  tests with those opcodes masked out. A socket operation carrying a deadline
+  (`set_read_timeout`, `set_write_timeout`, `TcpStream::connect_timeout`) normally rides an
+  `IORING_OP_LINK_TIMEOUT` paired with the main SQE; on the fallback path there is no SQE to pair
+  with, so the deadline comes from the runtime's timer instead, as it does on macOS. The fallback
+  gets what is left of the caller's deadline, not a fresh copy of it: when the kernel rejects the
+  opcode per-CQE rather than at submission, the linked timeout has already been running.
 - macOS has no io_uring equivalent. Its filesystem backend is entirely blocking-pool-based
   (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics
@@ -569,7 +757,8 @@ reserved for genuine platform concepts: descriptor readiness, Unix-domain
 sockets/signals and fd traits on Unix; Windows console signals,
 handle/socket traits, and `os::windows::fs` extensions on Windows. The
 generated `docs/public-api.md` records the portable intersection plus explicit
-target and feature deltas.
+target and feature deltas; `docs/public-api-traits.md` does the same for the
+auto-trait and derived impls the first file omits for readability.
 
 Adoption is fallible on every platform:
 
@@ -771,3 +960,35 @@ cursor, preventing acknowledged short writes from being split across cursor move
 `io::compat::FuturesCompat<T>` maps the corresponding
 `futures_io` traits back to the runtime and handles empty vectored operations
 without polling the foreign implementation.
+
+With the optional `rustls` feature, `tls::TlsStream<S>` implements the same four
+traits over any transport that implements them, driving a sans-I/O rustls
+connection. It is an adapter, not a second I/O path: the record layer is a state
+machine over memory, and the only runtime-shaped decisions are where the two
+ciphertext buffers live.
+
+Both exist for the buffer-ownership rule above. Records rustls produces are
+copied into a buffer the stream owns and offered to the transport as one slice,
+unchanged until the transport has accepted all of it — a completion-based
+backend tells a re-poll from a new write by that slice's address and length, so
+handing it a different one would let the same ciphertext be submitted twice.
+Nothing is appended to the buffer while any of it is outstanding, and no
+plaintext is accepted from the caller until it is empty. That ordering is also
+what makes an abandoned write safe: a write future dropped while a record is
+half-delivered has accepted no plaintext of its own, and the next writer resumes
+the same record. In the other direction, ciphertext read from the transport is
+held until rustls has taken every byte, because rustls's deframer consumes only
+what it can use.
+
+There is no third buffer for plaintext. Reads copy straight out of rustls's own
+receive buffer into the caller's, including hyper's cursor — which cannot be
+reached through `AsyncRead` at all, since it exposes uninitialized memory. The
+alternative, a scratch buffer between them, would have to be sized for a TLS
+record and would be paid for on every read poll of every connection.
+
+`poll_close` is not a transport shutdown. It sends `close_notify` and waits for
+the transport to accept it before closing the transport's write direction, which
+is what lets the peer distinguish the end of a message from a truncation;
+`poll_flush` never sends it and leaves the session writable. A transport EOF is
+reported to rustls as such, so a stream that ends without `close_notify` fails
+with `UnexpectedEof` rather than reading as a clean end of data.

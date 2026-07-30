@@ -19,18 +19,21 @@ use std::time::Duration;
 
 use super::driver::{self, Driver, FdReadinessToken, ProcessExitToken};
 use crate::platform::runtime_shared as shared;
+use crate::platform::runtime_shared::RuntimeConfig;
 
 pub use shared::{
-    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, on_shutdown, shutdown, yield_now,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
+    TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, current_runtime_id, current_turn,
+    on_shutdown, shutdown, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.
 pub(crate) struct MacosRuntime;
 
 impl shared::Runtime for MacosRuntime {
-    fn create_driver_pair()
-    -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
+    fn create_driver_pair(
+        _config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
         let (driver, notifier) = driver::create_driver()?;
         Ok((Box::new(driver), Box::new(notifier)))
     }
@@ -111,6 +114,10 @@ where
     shared::spawn_worker::<MacosRuntime, Init, Exit>(initial_task, on_exit)
 }
 
+pub fn build_runtime(config: RuntimeConfig) -> io::Result<()> {
+    shared::build_runtime::<MacosRuntime>(config)
+}
+
 pub fn run() {
     shared::run::<MacosRuntime>()
 }
@@ -137,6 +144,10 @@ pub fn run_ready_tasks() {
     shared::run_ready_tasks::<MacosRuntime>()
 }
 
+pub fn monotonic_now() -> Duration {
+    shared::monotonic_now::<MacosRuntime>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::MacosRuntime;
@@ -155,5 +166,15 @@ mod tests {
     #[test]
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<MacosRuntime>();
+    }
+
+    #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<MacosRuntime>();
+    }
+
+    #[test]
+    fn microtask_bound_turns_follow_the_turn_record_gate() {
+        test_support::microtask_bound_turns_follow_the_turn_record_gate::<MacosRuntime>();
     }
 }

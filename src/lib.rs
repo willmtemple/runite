@@ -96,9 +96,26 @@
 //! assert_eq!(total.get(), 6);
 //! ```
 //!
+//! Both of those start the thread's runtime as a side effect and panic if the
+//! machine will not have one. [`Builder`] makes that step explicit and
+//! recoverable, and is where a platform's tuning knobs are reached:
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> {
+//! let runtime = runite::Builder::new().build()?;
+//! runtime.run();
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! `build()` has to be the thread's first runtime call, so inside a
+//! `#[runite::main]` body it is already too late; the attribute takes the same
+//! settings directly, as `#[runite::main(ring_entries = 32)]`.
+//!
 //! # Where to look next
 //!
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
+//! - [`Builder`] and [`Runtime`] for configured, fallible startup
 //! - [`run`], [`queue_macrotask`], [`queue_microtask`], and [`spawn`] for
 //!   driving and feeding the event loop
 //! - [`spawn_worker`], [`WorkerHandle`], and [`ThreadHandle`] for multi-threaded work
@@ -124,8 +141,13 @@
 //! - `futures-compat` — adapters between `runite`'s I/O traits and the
 //!   `futures-io` ecosystem (see the `io::compat` module, enabled by this
 //!   feature).
+//! - `rustls` — TLS client and server streams over `runite` transports (see
+//!   the `tls` module, enabled by this feature). The cryptographic provider
+//!   is the application's to choose: runite depends on [`rustls`] with no
+//!   provider feature, so an application must enable one or install it itself.
 //!
 //! [`hyper`]: https://docs.rs/hyper
+//! [`rustls`]: https://docs.rs/rustls
 //!
 //! # Platform support
 //!
@@ -145,8 +167,13 @@
 //! The io_uring backend recommends **Linux 6.1 or newer**. The hard floor is
 //! 5.6; newer opcodes are selected opportunistically. CI runs on GitHub-hosted
 //! Ubuntu runners (currently 6.8+) without pinning a kernel version, so the
-//! fallback paths below are exercised by opcode-capability injection tests
-//! rather than against an actual older kernel.
+//! fallback paths below are exercised by opcode-capability injection rather
+//! than against an actual older kernel: unit tests inject per test, and the
+//! integration tests and doctests run against a masked probe result. Injection
+//! shows the fallback branches work and stay consistent with the rest of the
+//! runtime; it does not substitute for running on a kernel that genuinely
+//! lacks the opcode. The masking seam is a test instrument compiled out of any
+//! build a dependent application produces; see `CONTRIBUTING.md`.
 //!
 //! Hard requirements (no fallback — the runtime will not function without them):
 //! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
@@ -207,6 +234,12 @@ pub(crate) mod trace_targets {
     pub const SIGNAL: &str = "runite::signal";
 }
 
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
+mod builder;
 pub mod channel;
 #[cfg(unix)]
 pub mod fd;
@@ -226,6 +259,8 @@ pub mod sync;
 pub(crate) mod sys;
 pub mod task;
 pub mod time;
+#[cfg(feature = "rustls")]
+pub mod tls;
 
 #[cfg(test)]
 mod logic_safety_tests;
@@ -234,6 +269,14 @@ mod logic_safety_tests;
 pub mod macros;
 
 pub use runite_proc_macros::{main, test};
+
+// Explicit runtime construction; documentation lives at the definition site.
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", target_arch = "aarch64"),
+    windows
+))]
+pub use builder::{Builder, Runtime};
 
 #[cfg(any(
     target_os = "linux",
@@ -261,7 +304,7 @@ mod runtime_api {
     // Handle and marker types; their documentation lives at the definition site
     // and is inlined here through these plain (undocumented) re-exports.
     pub use crate::platform::current::runtime::{
-        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle,
+        AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
         TimeoutHandle, TimerCancel, TurnId, WorkerHandle, YieldNow, yield_now,
     };
     pub use crate::platform::runtime_shared::handles::{WorkerJoin, WorkerJoinError};
@@ -382,6 +425,10 @@ mod runtime_api {
     /// worker teardown with [`WorkerHandle::join`]. This is the building block
     /// for scaling across cores: start one worker per core. See the crate's
     /// architecture guide.
+    ///
+    /// The worker's runtime inherits the spawning thread's [`Builder`](crate::Builder)
+    /// configuration, transitively, so a process that trimmed its I/O backend
+    /// to fit a resource limit does not undo that with every worker it starts.
     ///
     /// # Panics
     ///
@@ -535,6 +582,9 @@ mod runtime_api {
     /// Only startup is fallible here. An error produced *by* the future is the
     /// future's own and is returned inside `Ok`.
     ///
+    /// [`Builder`](crate::Builder) is the same recovery story with configuration
+    /// attached, and separates starting the runtime from driving it.
+    ///
     /// # Panics
     ///
     /// Panics if the driver returns an unexpected error while running, or if
@@ -605,6 +655,12 @@ mod runtime_api {
     /// A hook that panics is reported and does not stop the remaining hooks or
     /// abort teardown: a half-torn-down runtime is worse than a reported panic.
     /// Hooks are `FnOnce` and `!Send`, and run on their own runtime thread.
+    ///
+    /// **A hook may register another.** Teardown drains to a fixed point, so a
+    /// hook that shuts a subsystem down and lets that subsystem register its
+    /// own cleanup works, however deep it goes. A hook that registers a hook
+    /// unconditionally will stall shutdown — but so will one that never
+    /// returns, and neither is distinguishable from work still in progress.
     ///
     /// # Teardown has to happen for a hook to run
     ///
@@ -699,6 +755,9 @@ mod runtime_api {
     ///
     /// runite::shutdown();
     /// assert!(released.get());
+    ///
+    /// // The thread is free again, so the reuse promised above is checked here.
+    /// assert_eq!(runite::block_on(async { 1 + 1 }), 2);
     /// ```
     pub fn shutdown() {
         imp::shutdown();
@@ -766,6 +825,49 @@ mod runtime_api {
     /// ```
     pub fn current_turn() -> Option<TurnId> {
         imp::current_turn()
+    }
+
+    /// Returns the identifier of the runtime installed on the calling thread.
+    ///
+    /// One runtime is one thread's event loop. [`RuntimeId`] is stable for that
+    /// runtime's whole life, unique for the life of the process, and never
+    /// reused — a thread that tears its runtime down and starts another gets a
+    /// new one, because the two share no task, timer, or operation ids.
+    ///
+    /// This is the identity everything else has to be read against. Task ids
+    /// and timer ids restart at 1 on every runtime thread, and driver tokens
+    /// are per-driver and wrapping, so `timer_id = 3` names nothing on its own:
+    /// in a timeline merged from several threads it is as many rows as there
+    /// are threads. Pair it with a [`RuntimeId`] and it names one timer.
+    ///
+    /// Returns `None` on a thread with no runtime installed — a
+    /// `std::thread::spawn`'d helper, a blocking-pool thread, a foreign
+    /// callback. It does not install one, so a diagnostic path can call it
+    /// anywhere.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::mpsc;
+    ///
+    /// assert!(
+    ///     std::thread::spawn(runite::current_runtime_id).join().unwrap().is_none(),
+    ///     "a thread with no runtime has no runtime identity"
+    /// );
+    ///
+    /// let here = runite::block_on(async { runite::current_runtime_id() });
+    /// let (tx, rx) = mpsc::channel();
+    /// let worker = runite::spawn_worker(
+    ///     move || { tx.send(runite::current_runtime_id()).unwrap(); },
+    ///     || {},
+    /// );
+    /// runite::block_on(worker.join()).expect("worker should exit normally");
+    ///
+    /// assert!(here.is_some());
+    /// assert_ne!(here, rx.recv().unwrap(), "each runtime thread is its own runtime");
+    /// ```
+    pub fn current_runtime_id() -> Option<RuntimeId> {
+        imp::current_runtime_id()
     }
 
     /// Runs only the tasks and microtasks that are ready right now, then returns.

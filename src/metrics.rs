@@ -7,10 +7,10 @@
 //! almost nothing else, and without numbers the only visible fact is a
 //! percentage of a core.
 //!
-//! # Two kinds of number, deliberately two types
+//! # Three kinds of number, deliberately three types
 //!
-//! A [`Snapshot`] carries [`Gauges`] and [`Counters`] separately, because they
-//! answer different questions and are combined differently:
+//! A [`Snapshot`] carries [`Gauges`], [`Counters`] and [`Peaks`] separately,
+//! because they answer different questions and are combined differently:
 //!
 //! - A **gauge** is a level read at an instant — live tasks, queue depth. It
 //!   is meaningful on its own and meaningless to subtract across two
@@ -18,10 +18,10 @@
 //! - A **counter** is monotonic and cumulative — polls, wakes, turns. The
 //!   individual value says little; the *difference* between two snapshots is
 //!   the quantity you want.
-//!
-//! - A **peak** is the highest a gauge has reached. Not a level, and
-//!   differencing two of them is meaningless; it answers "how bad did this
-//!   get", which is the question after an incident.
+//! - A **peak** is the highest a thread-local gauge has reached. Not a level,
+//!   and differencing two of them is meaningless; it answers "how bad did this
+//!   get", which is the question after an incident. [`Peaks`] says why the
+//!   cross-thread queue depth has none.
 //!
 //! Keeping them in one flat struct would invite exactly the mistake of
 //! subtracting a gauge or reading a counter as a level.
@@ -35,6 +35,19 @@
 //! Taking a snapshot reads counters that already exist and walks nothing. That
 //! matters more than it sounds: the act of measuring an idle runtime must not
 //! be work, or it becomes part of what is being measured.
+//!
+//! *Maintaining* them is not free, and the honest figures are small: one
+//! relaxed atomic increment at each mutation site, plus [`Peaks`] sampled once
+//! per turn — six relaxed compare-exchange loops that short-circuit to a load
+//! when nothing rose. Marginally, ~3 instructions per microtask against ~540
+//! for the microtask itself, and ~50 per turn against ~1320 for a whole
+//! dormant turn. So there is no opt-out and no feature flag: the switch would
+//! cost more in API surface than it saves.
+//!
+//! [`Counters::microtask_bound_turns`] is the exception in both directions. It
+//! needs the turn timed, which is four clock reads a dormant loop must not pay,
+//! so it advances only while something is collecting turn records
+//! (`runite::runtime` at `TRACE`). See its own documentation.
 
 use crate::platform::runtime_shared::state::try_with_installed_thread;
 
@@ -152,6 +165,21 @@ pub struct Counters {
     /// `queue_microtask` — rather than to I/O, timers, or macrotask handlers.
     /// That distinction is otherwise invisible: wake counts say something woke
     /// up, not what the wake then spent its time on.
+    ///
+    /// # This counter only advances while turn records are collected
+    ///
+    /// Unlike every other field here. Classifying a turn means timing it and
+    /// timing its microtask checkpoint — four clock reads per turn, which
+    /// measured ~465 instructions against ~1320 for an entire dormant turn,
+    /// and which are a real syscall rather than a vDSO call on a host whose
+    /// clocksource is not the TSC. A runtime that no one is watching does not
+    /// pay that, so on a dormant loop this stays where it was and `turns` keeps
+    /// rising past it.
+    ///
+    /// Install a subscriber that accepts `runite::runtime` at `TRACE` — the
+    /// same selection that produces the per-turn record — for the whole window
+    /// you intend to measure, and difference two snapshots taken inside it.
+    /// Turns before the subscriber arrives are not retroactively classified.
     pub microtask_bound_turns: u64,
     /// Cross-thread macrotasks refused because the remote queue was full.
     ///
@@ -161,7 +189,7 @@ pub struct Counters {
     pub remote_tasks_rejected: u64,
 }
 
-/// Highest value each gauge has reached on this runtime thread.
+/// Highest value each thread-local gauge has reached on this runtime thread.
 ///
 /// A peak is a third kind of number, and conflating it with either of the
 /// others is the mistake this separation exists to prevent. It is not a level
@@ -173,6 +201,14 @@ pub struct Counters {
 /// drains entirely within one turn can therefore be missed; catching that would
 /// mean instrumenting every push, which costs more on the hot path than the
 /// fidelity is worth.
+///
+/// [`Gauges::remote_macrotask_queue_depth`] deliberately has no counterpart
+/// here. Reading it takes the mutex
+/// [`ThreadHandle::queue_macrotask`](crate::ThreadHandle::queue_macrotask)
+/// contends on, and a peak is sampled every turn, so the field would put a lock
+/// acquisition on every iteration of every runite loop. For "how close did the
+/// cross-thread queue get to its bound", use
+/// [`Counters::remote_tasks_rejected`], which counts the sends that reached it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Peaks {
@@ -198,7 +234,7 @@ pub struct Snapshot {
     pub gauges: Gauges,
     /// Totals accumulated since this thread's runtime started.
     pub counters: Counters,
-    /// Worst case each gauge has reached.
+    /// Worst case each thread-local gauge has reached.
     pub peaks: Peaks,
 }
 
@@ -268,10 +304,12 @@ pub fn snapshot() -> Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, snapshot};
-    use crate::{queue_macrotask, run, spawn};
-    use std::cell::Cell;
+    use super::{Counters, Snapshot, snapshot};
+    use crate::{queue_macrotask, queue_microtask, run, spawn};
+    use std::cell::{Cell, RefCell};
+    use std::future::poll_fn;
     use std::rc::Rc;
+    use std::task::{Poll, Waker};
     use std::time::Duration;
 
     /// A thread with no runtime reads zero rather than panicking or installing
@@ -299,19 +337,32 @@ mod tests {
             spawn(async {});
             spawn(async {});
             seen.set(snapshot());
-            ticker.cancel();
+            // Cancelled from the next turn, not this one: peaks are sampled at
+            // the turn boundary, so a timer armed and cancelled inside one
+            // macrotask would never be seen by `peaks.armed_timers`.
+            queue_macrotask(move || ticker.cancel());
         });
         run();
 
-        let observed = observed.get().gauges;
+        let inside = observed.get().gauges;
         assert!(
-            observed.live_tasks >= 2,
+            inside.live_tasks >= 2,
             "both spawned tasks should be live, saw {}",
-            observed.live_tasks
+            inside.live_tasks
         );
         assert_eq!(
-            observed.armed_timers, 1,
+            inside.armed_timers, 1,
             "the interval should be armed exactly once"
+        );
+
+        let after = snapshot();
+        assert_eq!(
+            after.gauges.armed_timers, 0,
+            "the cancelled interval should leave the heap"
+        );
+        assert_eq!(
+            after.peaks.armed_timers, 1,
+            "the peak should remember the armed interval"
         );
     }
 
@@ -343,6 +394,7 @@ mod tests {
         spawn(async {
             crate::yield_now().await;
         });
+        queue_macrotask(|| {});
         run();
 
         let after = snapshot().counters;
@@ -359,61 +411,78 @@ mod tests {
             "a yielding task runs as microtasks"
         );
         assert!(
+            after.macrotasks_run > before.macrotasks_run,
+            "the queued macrotask should have run"
+        );
+        assert!(
             after.task_polls >= after.task_wakes,
             "a wake schedules at most one poll, so polls cannot trail wakes"
         );
     }
 
-    /// A wake that coalesces into an already-queued poll is not counted: it
-    /// caused no new work, and counting it would make coalescing look like
-    /// extra activity rather than less.
+    /// A coalesced wake is counted as coalesced and not as a wake. Both numbers
+    /// mean what they say only if the split holds, so this pins each side of it
+    /// exactly: the first wake schedules a poll and raises `task_wakes` alone,
+    /// the second finds that poll already queued and raises `coalesced_wakes`
+    /// alone.
     #[test]
-    fn coalesced_wakes_are_not_counted_twice() {
-        let before = snapshot().counters;
+    fn a_wake_arriving_while_a_poll_is_queued_is_counted_as_coalesced() {
+        let waker: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
+        let counts: Rc<Cell<[Counters; 3]>> = Rc::new(Cell::new(Default::default()));
 
-        let handle = spawn(async {
-            crate::yield_now().await;
-        });
-        // Extra wakes while the poll is already queued must not raise the
-        // count; the task is scheduled exactly once.
-        handle.abort_handle();
-        run();
-
-        let after = snapshot().counters;
-        assert!(
-            after.task_wakes >= before.task_wakes,
-            "wake counts never decrease"
-        );
-    }
-
-    /// A coalesced wake is counted as coalesced, not as a wake. Both numbers
-    /// mean what they say only if the split holds.
-    #[test]
-    fn coalesced_wakes_are_counted_separately_from_scheduled_ones() {
-        use crate::queue_microtask;
-
-        let before = snapshot().counters;
-
-        queue_macrotask(|| {
-            let handle = spawn(async {
-                crate::yield_now().await;
+        let parked = Rc::clone(&waker);
+        let observed = Rc::clone(&counts);
+        queue_macrotask(move || {
+            let slot = Rc::clone(&parked);
+            let polls = Cell::new(0u32);
+            spawn(async move {
+                poll_fn(move |context| {
+                    *slot.borrow_mut() = Some(context.waker().clone());
+                    if polls.replace(1) == 0 {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
             });
-            // The task is queued for its first poll right now. Waking it again
-            // before that poll runs must land in `coalesced_wakes`.
-            let waker = handle.abort_handle();
-            drop(waker);
-            queue_microtask(|| {});
+
+            // Runs a turn later, by which point the task has been polled once
+            // and parked: nothing is queued for it, so the first wake below
+            // schedules and the second cannot.
+            queue_macrotask(move || {
+                let waker = parked
+                    .borrow()
+                    .clone()
+                    .expect("the parked task should have left its waker");
+                let before = snapshot().counters;
+                waker.wake_by_ref();
+                let scheduled = snapshot().counters;
+                waker.wake_by_ref();
+                let coalesced = snapshot().counters;
+                observed.set([before, scheduled, coalesced]);
+            });
         });
         run();
 
-        let after = snapshot().counters;
-        assert!(
-            after.task_wakes > before.task_wakes,
-            "the task was scheduled at least once"
+        let [before, scheduled, coalesced] = counts.get();
+        assert_eq!(
+            scheduled.task_wakes,
+            before.task_wakes + 1,
+            "the first wake schedules a poll"
         );
-        assert!(
-            after.coalesced_wakes >= before.coalesced_wakes,
-            "coalesced wakes never decrease"
+        assert_eq!(
+            scheduled.coalesced_wakes, before.coalesced_wakes,
+            "a wake that schedules a poll is not a coalesced wake"
+        );
+        assert_eq!(
+            coalesced.task_wakes, scheduled.task_wakes,
+            "the second wake scheduled nothing, so it must not raise `task_wakes`"
+        );
+        assert_eq!(
+            coalesced.coalesced_wakes,
+            scheduled.coalesced_wakes + 1,
+            "the second wake found the poll already queued and must be counted as coalesced"
         );
     }
 
@@ -436,27 +505,54 @@ mod tests {
     /// Every driver operation ends exactly once, so completions rise while the
     /// outstanding gauge returns to zero. A gauge that does not fall while
     /// this does not rise is a leaked operation.
+    ///
+    /// Reads a file rather than sleeping: a timer is served from the timer heap
+    /// and submits nothing to the driver, so a sleeping task leaves both
+    /// numbers at zero and proves nothing about either.
     #[test]
     fn operations_complete_and_the_outstanding_gauge_returns_to_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "runite-metrics-ops-{}-{:?}.txt",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"payload").expect("scratch file should be writable");
+
         let before = snapshot().counters;
 
-        spawn(async {
-            crate::time::sleep(std::time::Duration::from_millis(1)).await;
+        let read_path = path.clone();
+        spawn(async move {
+            let contents = crate::fs::read(&read_path).await.expect("read should work");
+            assert_eq!(contents, b"payload");
         });
         run();
 
         let after = snapshot();
+        let _ = std::fs::remove_file(&path);
+
         assert!(
-            after.counters.operations_completed >= before.operations_completed,
-            "completions never decrease"
+            after.counters.operations_completed > before.operations_completed,
+            "the read should have completed at least one driver operation, saw {} then {}",
+            before.operations_completed,
+            after.counters.operations_completed
         );
         assert_eq!(
             after.gauges.outstanding_operations, 0,
             "nothing should remain outstanding once the loop drains"
         );
+        // Deliberately no assertion on `peaks.outstanding_operations` here.
+        // Peaks are sampled once per turn, not at every mutation, so an
+        // operation submitted and completed inside a single turn is invisible
+        // to them — which is what a small local file read does on a fast
+        // machine. `Peaks` documents that exact limitation. An assertion here
+        // passed on the machine it was written on and failed on both Linux CI
+        // architectures.
+        //
+        // Peak semantics are covered by `peaks_outlive_the_level_falling_back`,
+        // which uses a gauge it can hold at a known level rather than racing
+        // the sampling point.
     }
 
-    /// Aborting a task counts as a cancellation rather than a completion.
     #[test]
     fn aborting_a_task_counts_as_a_cancellation() {
         let before = snapshot().counters;
@@ -499,17 +595,22 @@ mod tests {
         );
     }
 
-    /// A turn spent overwhelmingly in the microtask checkpoint is classified as
-    /// microtask-bound, which is what tells a consumer the loop's time went to
-    /// reactive work rather than to I/O or timers.
+    /// `microtask_bound_turns` is the one counter that does not advance on a
+    /// dormant loop, because classifying a turn means timing it.
+    ///
+    /// The direction that matters is the zero: it is what a reader of
+    /// [`Counters::microtask_bound_turns`] is promised, and what says the turn
+    /// path really does read no clock. The positive direction is covered by
+    /// `microtask_bound_turns_follow_the_turn_record_gate`, which installs a
+    /// collector.
     #[test]
-    fn a_microtask_heavy_turn_is_classified_as_microtask_bound() {
+    fn a_microtask_heavy_turn_is_not_classified_with_nothing_collecting() {
         use crate::queue_microtask;
 
         let before = snapshot().counters;
 
         queue_macrotask(|| {
-            // Enough microtask work that the drain dominates its turn.
+            // Enough microtask work that the drain would dominate its turn.
             for _ in 0..2_000 {
                 queue_microtask(|| {
                     std::hint::black_box(0u64);
@@ -520,9 +621,57 @@ mod tests {
 
         let after = snapshot().counters;
         assert!(after.turns > before.turns, "turns should have advanced");
-        assert!(
-            after.microtask_bound_turns >= before.microtask_bound_turns,
-            "the classification never decreases"
+        assert_eq!(
+            after.microtask_bound_turns, before.microtask_bound_turns,
+            "a turn nothing timed cannot be classified"
         );
+    }
+
+    /// The queue-depth gauges are levels, and from outside the loop they read
+    /// zero because the loop has drained. A snapshot taken mid-turn is the only
+    /// thing that observes them at all — and the peaks are the only way to see
+    /// afterwards how deep they got.
+    #[test]
+    fn queue_depth_gauges_report_what_is_queued() {
+        let observed = Rc::new(Cell::new(Snapshot::default()));
+
+        let seen = Rc::clone(&observed);
+        queue_macrotask(move || {
+            for _ in 0..3 {
+                queue_microtask(|| {});
+            }
+            queue_macrotask(|| {});
+            queue_macrotask(|| {});
+            // Onto this thread's own cross-thread queue, which is drained at
+            // the start of the next turn rather than now.
+            crate::current_thread_handle()
+                .queue_macrotask(|| {})
+                .expect("the remote queue should accept one task");
+            for _ in 0..4 {
+                spawn(async {});
+            }
+            seen.set(snapshot());
+        });
+        run();
+
+        let inside = observed.get().gauges;
+        assert_eq!(
+            inside.microtask_queue_depth, 7,
+            "three microtasks plus one first poll for each of four spawned tasks"
+        );
+        assert_eq!(inside.local_macrotask_queue_depth, 2);
+        assert_eq!(inside.remote_macrotask_queue_depth, 1);
+        assert_eq!(
+            inside.ready_tasks, 4,
+            "every spawned task is queued to poll"
+        );
+
+        let peaks = snapshot().peaks;
+        assert_eq!(
+            peaks.microtask_queue_depth, 7,
+            "the peak should remember the checkpoint backlog"
+        );
+        assert_eq!(peaks.local_macrotask_queue_depth, 2);
+        assert_eq!(peaks.ready_tasks, 4);
     }
 }

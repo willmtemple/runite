@@ -1,0 +1,11 @@
+error: unknown runite test attribute `ring_entires`; expected `crate = "..."` or `ring_entries = N`
+ --> tests/ui/fail/entry_unknown_argument.rs:7:16
+  |
+7 | #[runite::test(ring_entires = 8)]
+  |                ^^^^^^^^^^^^
+
+error: unknown runite entry attribute `threads`; expected `crate = "..."` or `ring_entries = N`
+  --> tests/ui/fail/entry_unknown_argument.rs:10:16
+   |
+10 | #[runite::main(threads = 4)]
+   |                ^^^^^^^

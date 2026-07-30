@@ -17,16 +17,16 @@ use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
 use super::state::{teardown_thread, try_with_installed_thread};
 use super::{
-    DriverBackend, IntervalHandle, Notifier, ReadyEvents, Runtime, SendTask, block_on,
-    current_thread_handle, interval, queue_future, queue_microtask, queue_task, run, spawn_worker,
-    timeout, yield_now,
+    DriverBackend, IntervalHandle, Notifier, ReadyEvents, Runtime, RuntimeConfig, SendTask,
+    block_on, current_thread_handle, interval, queue_future, queue_microtask, queue_task, run,
+    spawn_worker, timeout, yield_now,
 };
 use crate::op::completion::completion_for_current_thread;
 
@@ -560,7 +560,7 @@ impl MockDriverControl {
         self.queue_mock_ready(MockReady {
             events: ReadyEvents {
                 wake: true,
-                timer: false,
+                ..ReadyEvents::default()
             },
             wakes: count,
             timers: 0,
@@ -572,8 +572,8 @@ impl MockDriverControl {
         assert!(count > 0, "timer count must be non-zero");
         self.queue_mock_ready(MockReady {
             events: ReadyEvents {
-                wake: false,
                 timer: true,
+                ..ReadyEvents::default()
             },
             wakes: 0,
             timers: count,
@@ -587,7 +587,12 @@ impl MockDriverControl {
         task: impl FnOnce() + Send + 'static,
     ) {
         self.queue_mock_ready(MockReady {
-            events: ReadyEvents::default(),
+            // A queued completion is exactly what `ReadyEvents::io` names: the
+            // driver dispatched an I/O completion this poll.
+            events: ReadyEvents {
+                io: true,
+                ..ReadyEvents::default()
+            },
             wakes: 0,
             timers: 0,
             completion: Some(MockCompletion {
@@ -1403,7 +1408,9 @@ impl MockRuntimeHarness {
 pub(crate) struct MockRuntime;
 
 impl Runtime for MockRuntime {
-    fn create_driver_pair() -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)> {
+    fn create_driver_pair(
+        _config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)> {
         let control = active_mock_factory()?.take_driver();
         Ok((
             Box::new(MockDriver {
@@ -1613,6 +1620,178 @@ pub fn zero_interval_fires_once_per_turn_without_spinning<R: Runtime>() {
     run::<R>();
 
     assert_eq!(count.get(), 5);
+}
+
+/// Answers `enabled` and nothing else, so a workload can be run with the turn
+/// record either wanted or declined.
+///
+/// `register_callsite` is left at its default, which answers definitively
+/// (`always`/`never`) from `enabled`. That answer is cached per callsite for
+/// the whole process and outlives this scoped dispatcher, so the two workloads
+/// below cannot rely on the cache: each calls
+/// [`settle_turn_record_gate`](super::scheduler::settle_turn_record_gate) to
+/// re-resolve it against the subscriber it just installed.
+struct TurnInterest {
+    collect: bool,
+}
+
+impl tracing::Subscriber for TurnInterest {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        if self.collect {
+            *metadata.level() <= tracing::Level::TRACE
+        } else {
+            *metadata.level() <= tracing::Level::WARN
+        }
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Interested in nothing, and never dropped.
+///
+/// While `tracing` has only one registered dispatcher it resolves callsite
+/// interest against whichever thread first reaches the callsite, so a
+/// concurrent test with no subscriber can cache a definitive answer for the
+/// turn-record gate that no scoped subscriber can then override. Registering a
+/// second dispatcher that stays alive forces `tracing` to combine every live
+/// dispatcher instead, which yields `sometimes` whenever the two disagree —
+/// and `sometimes` is resolved per event against the calling thread's own
+/// subscriber, which is what these two workloads need.
+struct Bystander;
+
+impl tracing::Subscriber for Bystander {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Runs a loop that parks in the driver and returns how many turn-record
+/// samples it took.
+fn turn_samples_for_parking_loop<R: Runtime>(collect: bool) -> u64 {
+    static BYSTANDER: OnceLock<tracing::Dispatch> = OnceLock::new();
+    BYSTANDER.get_or_init(|| tracing::Dispatch::new(Bystander));
+
+    tracing::subscriber::with_default(TurnInterest { collect }, || {
+        super::scheduler::settle_turn_record_gate(collect);
+        super::scheduler::reset_turn_samples();
+        // A pending timer is what makes `run` park rather than return idle, so
+        // this exercises the park-timing branch as well as the per-turn
+        // samples.
+        timeout::<R, _>(Duration::from_millis(5), || {});
+        run::<R>();
+        super::scheduler::turn_samples_taken()
+    })
+}
+
+/// With nothing collecting, the turn machinery must read no clock, sample no
+/// queue depth, and take no lock on the cross-thread queue.
+///
+/// This is the one property that has to be pinned rather than asserted in
+/// prose: the record runs on every iteration of every runite loop, the
+/// cross-thread queue depth is read under the very mutex `enqueue_macro`
+/// contends on, and `Instant::now` is a vDSO call that becomes a syscall on a
+/// host without a usable clocksource. Checking that no event was emitted would
+/// prove nothing — `tracing` filters the event on its own with the gate
+/// deleted entirely — so this counts the work instead.
+///
+/// 0.3 carried four ungated clock reads per turn — ~465 instructions against
+/// ~1320 for a whole dormant turn — precisely because the counter did not
+/// cover them. Every clock read on the turn path now goes through
+/// `turn_timestamp` / `turn_elapsed`, which count themselves, so removing the
+/// gate fails here. A new site calling `Instant::now` directly still would
+/// not, so the invariant this pins is narrow: the turn path's clock reads all
+/// go through those two, and those two are gated.
+pub fn dormant_turn_records_cost_nothing<R: Runtime>() {
+    // Positive control first: the same workload must reach the sample sites
+    // when something *is* collecting, so the zero below means "gated off"
+    // rather than "unreachable".
+    let collected = turn_samples_for_parking_loop::<R>(true);
+    assert!(
+        // Per turn: the opening and closing clock reads, the microtask drain's
+        // pair, and the two queue-depth samples. Plus two more for the park.
+        collected >= 8,
+        "a collecting loop samples six times per turn and twice per park, saw {collected}"
+    );
+
+    let dormant = turn_samples_for_parking_loop::<R>(false);
+    assert_eq!(
+        dormant, 0,
+        "a loop with no turn-record collector must take no samples at all"
+    );
+}
+
+/// `microtask_bound_turns` is derived from the turn's clock reads, so it
+/// advances only while something is collecting turn records — and it must
+/// still advance then.
+///
+/// The gating is the deliberate trade behind [`dormant_turn_records_cost_nothing`]:
+/// a counter that needs a clock cannot be maintained on a path that reads no
+/// clock. Pinned here because a silently-stuck counter is worse than an absent
+/// one, and because the zero half is the load-bearing direction — it is what
+/// says the four reads really are gone rather than merely gone from the record.
+pub fn microtask_bound_turns_follow_the_turn_record_gate<R: Runtime>() {
+    // Long enough that the drain unambiguously dominates a turn whose only
+    // other work is a driver poll, so the classification is not a coin flip.
+    fn dominate_a_turn_with_microtask_work<R: Runtime>() {
+        queue_task::<R, _>(|| {
+            queue_microtask::<R, _>(|| {
+                let until = std::time::Instant::now() + Duration::from_millis(20);
+                while std::time::Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+            });
+        });
+        run::<R>();
+    }
+
+    let dormant = tracing::subscriber::with_default(TurnInterest { collect: false }, || {
+        let before = crate::metrics::snapshot().counters;
+        dominate_a_turn_with_microtask_work::<R>();
+        let after = crate::metrics::snapshot().counters;
+        assert!(after.turns > before.turns, "the workload must drive turns");
+        after.microtask_bound_turns - before.microtask_bound_turns
+    });
+    assert_eq!(
+        dormant, 0,
+        "with nothing collecting, the turn is never timed and so is never classified"
+    );
+
+    let collected = tracing::subscriber::with_default(TurnInterest { collect: true }, || {
+        let before = crate::metrics::snapshot().counters;
+        dominate_a_turn_with_microtask_work::<R>();
+        let after = crate::metrics::snapshot().counters;
+        after.microtask_bound_turns - before.microtask_bound_turns
+    });
+    assert!(
+        collected >= 1,
+        "with a collector installed the same turn must be classified, saw {collected}"
+    );
 }
 
 #[cfg(test)]

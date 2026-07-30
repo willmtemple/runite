@@ -122,6 +122,47 @@ fn into_inner_releases_the_guard_without_cancelling() {
     );
 }
 
+/// Hooks registered from inside a running hook still run.
+///
+/// Teardown drains to a fixed point rather than taking the list once. A hook
+/// that shuts a subsystem down and lets that subsystem register its own cleanup
+/// is an ordinary shape, and a single pass would run the outer hook and discard
+/// the inner one silently.
+#[test]
+fn a_hook_registered_from_within_a_hook_still_runs() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let depth_reached = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&depth_reached);
+
+    std::thread::spawn(move || {
+        runite::queue_macrotask(move || {
+            runite::on_shutdown(move || {
+                observed.fetch_add(1, Ordering::AcqRel);
+                let second = Arc::clone(&observed);
+                runite::on_shutdown(move || {
+                    second.fetch_add(1, Ordering::AcqRel);
+                    let third = Arc::clone(&second);
+                    runite::on_shutdown(move || {
+                        third.fetch_add(1, Ordering::AcqRel);
+                    });
+                });
+            });
+        });
+        runite::run();
+        runite::shutdown();
+    })
+    .join()
+    .expect("runtime thread should not panic");
+
+    assert_eq!(
+        depth_reached.load(Ordering::Acquire),
+        3,
+        "every hook registered during teardown must run, however late"
+    );
+}
+
 /// A shutdown hook runs at teardown, and runs even though `run()` has already
 /// returned — which is the case `process::exit` was previously the only answer
 /// for.
