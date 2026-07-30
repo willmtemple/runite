@@ -172,4 +172,9 @@ mod tests {
     fn dormant_turn_records_cost_nothing() {
         test_support::dormant_turn_records_cost_nothing::<MacosRuntime>();
     }
+
+    #[test]
+    fn microtask_bound_turns_follow_the_turn_record_gate() {
+        test_support::microtask_bound_turns_follow_the_turn_record_gate::<MacosRuntime>();
+    }
 }

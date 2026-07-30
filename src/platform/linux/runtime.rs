@@ -261,6 +261,11 @@ mod tests {
     }
 
     #[test]
+    fn microtask_bound_turns_follow_the_turn_record_gate() {
+        test_support::microtask_bound_turns_follow_the_turn_record_gate::<LinuxRuntime>();
+    }
+
+    #[test]
     fn pending_read_teardown_quiesces_before_retained_handle_drops() {
         let mut fds = [0; 2];
         // SAFETY: pipe2 initializes both descriptor slots on success.

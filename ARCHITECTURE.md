@@ -187,21 +187,42 @@ splitting the wait from its cause across two records. Drained counts are differe
 cumulative counters the runtime already maintains, so nothing new happens per task or per microtask;
 only the quantities no counter covers — timers dispatched, cross-thread tasks adopted, worker exits,
 wake notifications — are accumulated per turn, and only by the sites that did the work. Everything
-that costs something at turn boundaries (sampling queue depths, locking the cross-thread queue,
-timing the driver park) sits behind one `tracing::enabled!` check taken when the turn opens.
+that costs something at turn boundaries — the four clock reads that time the turn and its microtask
+checkpoint, sampling queue depths, locking the cross-thread queue, timing the driver park — sits
+behind a `tracing::enabled!` check: one when the turn opens, one at the microtask checkpoint, and
+one before the driver park, each covering the work about to be done rather than a decision cached
+from earlier in the turn.
 
-What an uninstrumented loop still pays per turn, stated exactly rather than as "nothing": that
-`enabled!` check, a relaxed increment of the turn counter, two thread-local accesses to set the
-current turn id, the reset of the per-turn activity cells, and one more thread-local take of the
-parked flag. The last is deliberately outside the gate — a park timed while a subscriber was
-installed must not be attributed to a much later turn if the subscriber goes away in between.
-All of it is thread-local reads and writes with no syscall, no allocation and no lock.
+The clock reads are why those gates are not a nicety. 0.3 carried them ungated for a while, and
+they were the single largest cost in the loop: ~465 marginal instructions per turn against ~1320
+for an entire dormant turn once they are gone (~1000 for the same loop on 0.2.0, which timed
+nothing). On a host whose clocksource is `hpet` or `acpi_pm` rather than the TSC each one is a real
+syscall instead of a vDSO call. Gating them costs one thing, and it is a real cost:
+`metrics::snapshot`'s `microtask_bound_turns` is derived from those reads, so it advances only while
+something is collecting turn records. That is stated on the counter itself, because a counter that
+silently stops counting is its own defect.
+
+What an uninstrumented loop still pays per turn, stated exactly rather than as "nothing": those
+`enabled!` checks, a relaxed increment of the turn counter, two thread-local accesses to set the
+current turn id, the reset of the per-turn activity cells, one more thread-local take of the parked
+flag, and `observe_peaks` — six relaxed compare-exchange loops against `Arc<ThreadShared>` that
+short-circuit to a load whenever the gauge has not risen. The parked take is deliberately outside
+the gate: a park timed while a subscriber was installed must not be attributed to a much later turn
+if the subscriber goes away in between. Stubbing all of it out of a dormant loop recovers ~150
+instructions per turn, of which `observe_peaks` is ~50 — no clock read, no syscall, no allocation
+and no lock.
 
 That last property is the one worth defending, because the cross-thread queue depth is read under
-the very mutex `enqueue_macro` contends on. Under `cfg(test)` the gated sites count themselves, and
+the very mutex `enqueue_macro` contends on, and because a clock read is neither thread-local nor
+free. Every timing site on the turn path goes through `turn_timestamp` / `turn_elapsed`, which under
+`cfg(test)` count themselves alongside the depth samples, and
 `dormant_turn_records_cost_nothing` asserts the count is zero for a loop that parks with no
 collector installed — so deleting the gate fails a test instead of silently putting a lock
-acquisition on every iteration of every runite loop.
+acquisition, or four clock reads, on every iteration of every runite loop. What that test cannot
+see is a *new* site calling `Instant::now` directly, which is how the four got there: the count is
+meaningful only for as long as those two helpers remain the turn path's only clock reads.
+`cargo bench --bench runtime` reports the cost as a number instead of a property: `turn/dormant`
+against `turn/collecting` is one workload with the collector off and on.
 
 Why this shape exists:
 

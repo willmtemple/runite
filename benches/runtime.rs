@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::time_on_runtime;
+use common::{AcceptEverything, time_on_runtime, time_on_runtime_collecting};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use runite::channel::{mpsc, oneshot};
 use runite::time::sleep;
@@ -195,23 +195,52 @@ fn bench_queueables(c: &mut Criterion) {
     });
 
     group.bench_function("macrotask", |b| {
+        b.iter_custom(|iters| time_on_runtime(move || macrotask_batches(iters, BATCH)));
+    });
+
+    group.finish();
+}
+
+/// `batch` macrotask callbacks per iteration, each one its own turn, with a
+/// sentinel macrotask to park on.
+async fn macrotask_batches(iters: u64, batch: u64) {
+    let counter = Rc::new(Cell::new(0u64));
+    for _ in 0..iters {
+        counter.set(0);
+        let (tx, mut rx) = oneshot::channel::<()>();
+        for _ in 0..batch {
+            let counter = Rc::clone(&counter);
+            runite::queue_macrotask(move || counter.set(counter.get() + 1));
+        }
+        runite::queue_macrotask(move || {
+            let _ = tx.send(());
+        });
+        let _ = rx.recv().await;
+        debug_assert_eq!(counter.get(), batch);
+    }
+}
+
+/// What the per-turn record costs, as the same workload with nothing
+/// collecting and with a subscriber that accepts everything.
+///
+/// One macrotask callback is one turn, so `dormant` is the per-turn price an
+/// application that never installs a subscriber pays, and the gap to
+/// `collecting` is the record itself. It exists because 0.3 spent part of its
+/// development asserting the record was free when nothing collects while the
+/// turn path read the clock four times per turn regardless — the unit tests
+/// can only pin that structurally, and prose caught it not at all.
+fn bench_turn_records(c: &mut Criterion) {
+    const BATCH: u64 = 1_000;
+    let mut group = c.benchmark_group("turn");
+    group.throughput(Throughput::Elements(BATCH));
+
+    group.bench_function("dormant", |b| {
+        b.iter_custom(|iters| time_on_runtime(move || macrotask_batches(iters, BATCH)));
+    });
+
+    group.bench_function("collecting", |b| {
         b.iter_custom(|iters| {
-            time_on_runtime(move || async move {
-                let counter = Rc::new(Cell::new(0u64));
-                for _ in 0..iters {
-                    counter.set(0);
-                    let (tx, mut rx) = oneshot::channel::<()>();
-                    for _ in 0..BATCH {
-                        let counter = Rc::clone(&counter);
-                        runite::queue_macrotask(move || counter.set(counter.get() + 1));
-                    }
-                    runite::queue_macrotask(move || {
-                        let _ = tx.send(());
-                    });
-                    let _ = rx.recv().await;
-                    debug_assert_eq!(counter.get(), BATCH);
-                }
-            })
+            time_on_runtime_collecting(AcceptEverything, move || macrotask_batches(iters, BATCH))
         });
     });
 
@@ -228,5 +257,6 @@ criterion_group!(
     bench_spawn_many,
     bench_mpsc_throughput,
     bench_queueables,
+    bench_turn_records,
 );
 criterion_main!(benches);
