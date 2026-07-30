@@ -409,9 +409,10 @@ impl TcpSocket {
 }
 
 impl TcpStream {
-    /// Closes the descriptor, ordering the close behind operations already
-    /// submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
+    /// macOS and Windows have no asynchronous close and gain only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle, and why it is not a way to catch close errors.
     ///
@@ -951,9 +952,10 @@ impl std::fmt::Display for ReuniteError {
 impl std::error::Error for ReuniteError {}
 
 impl TcpListener {
-    /// Closes the descriptor, ordering the close behind operations already
-    /// submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
+    /// macOS and Windows have no asynchronous close and gain only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle, and why it is not a way to catch close errors.
     ///
@@ -1136,9 +1138,10 @@ impl Stream for Incoming {
 }
 
 impl UdpSocket {
-    /// Closes the descriptor, ordering the close behind operations already
-    /// submitted against it.
+    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
+    /// the close behind operations already submitted against it.
     ///
+    /// macOS and Windows have no asynchronous close and gain only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle, and why it is not a way to catch close errors.
     ///

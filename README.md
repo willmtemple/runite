@@ -284,14 +284,17 @@ cargo bench --bench runtime -- spawn_join
 `runite` emits [`tracing`](https://docs.rs/tracing) spans/events on these targets, usable for
 latency investigation with any `tracing` subscriber:
 
-| Target              | Covers                                              |
-| ------------------- | --------------------------------------------------- |
-| `runite::driver`    | io_uring / kqueue / IOCP submission and completions |
-| `runite::runtime`   | runtime and worker lifecycle                        |
-| `runite::scheduler` | task scheduling and cross-thread queueing           |
-| `runite::timer`     | timer arming/firing                                 |
-| `runite::async`     | future polling and cancellation                     |
-| `runite::signal`    | signal delivery (Windows only)                      |
+| Target              | Covers                                                            |
+| ------------------- | ----------------------------------------------------------------- |
+| `runite::driver`    | wake drains and driver failures; io_uring submission and completions (Linux only) |
+| `runite::runtime`   | runtime and worker lifecycle                                      |
+| `runite::scheduler` | task scheduling and cross-thread queueing                         |
+| `runite::timer`     | timer arming/firing                                               |
+| `runite::async`     | future polling and cancellation                                   |
+| `runite::signal`    | signal delivery (Windows only)                                    |
+
+The kqueue and IOCP backends do not instrument individual operations, so `runite::driver` is
+much sparser there. The other targets emit the same events on every platform they exist on.
 
 Every event is emitted in release builds as well as debug. Steady-state events used to be
 compiled out of release entirely, which meant the builds you would actually profile were the
