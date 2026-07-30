@@ -480,6 +480,11 @@ impl ThreadHandle {
         tracing::trace!(
             target: trace_targets::SCHEDULER,
             event = "queue_remote_task",
+            // Both ends, because a cross-thread post is the one event where
+            // "which runtime" has two answers. The sender is `None` when the
+            // posting thread has no runtime of its own.
+            runtime_id = super::scheduler::trace_runtime_id(),
+            to_runtime_id = self.shared.runtime_id.0,
             queue = "remote_macro",
             queued = result.is_ok(),
             "queueing remote macrotask"

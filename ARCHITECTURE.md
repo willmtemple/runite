@@ -147,6 +147,23 @@ counter would force it to carry a thread identity alongside. All four entry poin
 through the latter two needs the key as much as `run` does. The identifier is deliberately opaque
 and carries nothing about what the turn did.
 
+What the turn *did* is a separate record, emitted once per turn on `runite::runtime` at `TRACE`
+(`event = "turn"`): why the loop woke, how long it was parked in the driver, how long it then spent
+runnable, queue depths either side, and what it drained. It is stamped with a `RuntimeId` as well as
+the `TurnId`, because task and timer ids restart at 1 on every runtime thread and driver tokens are
+per-driver and wrapping — without the runtime identity, a merged timeline collapses one thread's
+`timer_id = 3` onto another's.
+
+The cost constraint is what shapes the implementation. A park belongs to the turn its wake begins,
+so `TurnGuard` carries the park duration across the turn boundary in a thread-local rather than
+splitting the wait from its cause across two records. Drained counts are differences of the
+cumulative counters the runtime already maintains, so nothing new happens per task or per microtask;
+only the quantities no counter covers — timers dispatched, cross-thread tasks adopted, worker exits,
+wake notifications — are accumulated per turn, and only by the sites that did the work. Everything
+that costs something at turn boundaries (sampling queue depths, locking the cross-thread queue,
+timing the driver park) sits behind one `tracing::enabled!` check taken when the turn opens, so an
+uninstrumented loop pays a not-taken branch.
+
 Why this shape exists:
 
 - It gives a deterministic flush point between input handling and rendering.

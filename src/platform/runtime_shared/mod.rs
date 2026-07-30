@@ -56,10 +56,15 @@ pub use handles::{
     TimerCancel, WorkerHandle, YieldNow,
 };
 pub use scheduler::{
-    Runtime, TurnId, block_on, current_thread_handle, current_turn, interval, on_shutdown,
-    queue_future, queue_microtask, queue_task, run, run_ready_tasks, run_until_stalled, shutdown,
-    spawn_worker, timeout, try_block_on, yield_now,
+    Runtime, TurnId, block_on, current_runtime_id, current_thread_handle, current_turn, interval,
+    monotonic_now, on_shutdown, queue_future, queue_microtask, queue_task, run, run_ready_tasks,
+    run_until_stalled, shutdown, spawn_worker, timeout, try_block_on, yield_now,
 };
+/// Identity stamps for trace events. Backend drivers use these so a merged
+/// timeline can attribute a completion to the runtime and turn that saw it.
+#[allow(unused_imports)]
+pub(crate) use scheduler::{trace_runtime_id, trace_turn_id};
 pub(crate) use scheduler::{try_current_thread_handle, with_current_driver_any};
+pub use state::RuntimeId;
 #[allow(unused_imports)]
 pub(crate) use state::{ChildWorker, MacroTask, ThreadShared, ThreadState, WorkerCompletion};

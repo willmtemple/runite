@@ -27,6 +27,12 @@ use crate::trace_targets;
 /// with a freshly installed state — even one that happens to land at the
 /// same address as the torn-down one.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Process-wide source of runtime identifiers. Starts at 1 so a zero can never
+/// be mistaken for a real runtime. One relaxed increment per runtime *thread*,
+/// taken when its shared state is created.
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
 static REMOTE_QUEUE_CAPACITY: OnceLock<usize> = OnceLock::new();
 
 const DEFAULT_REMOTE_QUEUE_CAPACITY: usize = 65_536;
@@ -162,6 +168,21 @@ impl RemoteQueue {
             capacity: capacity.clamp(1, MAX_REMOTE_QUEUE_CAPACITY),
             warned_full: AtomicBool::new(false),
         }
+    }
+}
+
+/// Identifies one runtime — one thread's event loop — for the life of the
+/// process.
+///
+/// See [`crate::current_runtime_id`]. Opaque for the same reason
+/// [`TurnId`](crate::TurnId) is: consumers join records on equality, and a
+/// private numbering scheme stays changeable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RuntimeId(pub(crate) u64);
+
+impl std::fmt::Display for RuntimeId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
     }
 }
 
@@ -347,6 +368,14 @@ impl ThreadState {
 }
 
 pub(crate) struct ThreadShared {
+    /// Process-unique identity of this runtime thread.
+    ///
+    /// Task and timer ids restart at 1 on every runtime thread, and driver
+    /// tokens are per-driver and wrapping, so without this two threads that
+    /// both report `timer_id = 3` collapse into one row in a merged timeline.
+    /// It lives on the shared state rather than on `ThreadState` so a
+    /// `ThreadHandle` held by another thread can still name its target.
+    pub(crate) runtime_id: RuntimeId,
     notifier: Box<dyn Notifier>,
     // The microtask queue is strictly thread-local; only macrotasks may be
     // enqueued from remote threads, keeping the microtask queue free from
@@ -389,6 +418,7 @@ impl ThreadShared {
 
     pub(crate) fn with_remote_capacity(notifier: Box<dyn Notifier>, capacity: usize) -> Self {
         Self {
+            runtime_id: RuntimeId(NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
             notifier,
             remote_macrotasks: RemoteQueue::new(capacity),
             pending_ops: AtomicUsize::new(0),
