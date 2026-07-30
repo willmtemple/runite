@@ -20,13 +20,15 @@
 //!
 //! `Stdin` uses one dedicated blocking reader thread on every platform. That
 //! thread owns a duplicate of the process input handle and, only while a read
-//! is pending, reads ahead into a bounded 64 KiB process-wide buffer. Runtime
-//! tasks only wait for buffered availability, so cancelling a read never loses
-//! bytes or strands a shared blocking-pool worker. Spawning a runite child with
-//! inherited stdin pauses the reader until that child's exit is observed or
-//! its handle is dropped. Windows rejects an inherited-console spawn while a
-//! parent console read is active because console-host reads cannot always be
-//! cancelled strongly enough to guarantee a lossless handoff.
+//! is outstanding, reads ahead into a bounded 64 KiB process-wide buffer.
+//! Runtime tasks only wait for buffered availability, so cancelling a read
+//! never loses bytes or strands a shared blocking-pool worker — but cancelling
+//! does not end the read either; see [`Stdin`] for what it leaves outstanding.
+//! Spawning a runite child with inherited stdin pauses the reader until that
+//! child's exit is observed or its handle is dropped. Windows rejects an
+//! inherited-console spawn while a parent console read is active because
+//! console-host reads cannot always be cancelled strongly enough to guarantee a
+//! lossless handoff.
 //!
 //! # Terminal UIs
 //!
@@ -142,8 +144,14 @@ impl Drop for InheritedStdinHandoff {
 /// contains no raw handle.
 ///
 /// Multiple handles compete for the same byte stream. A completed read removes
-/// bytes exactly once; cancelling a pending read removes only that handle's
-/// waiter.
+/// bytes exactly once. Cancelling a pending read does not retract it: the
+/// handle keeps the operation and its waiter, so the reader thread goes on
+/// filling the shared buffer up to its 64 KiB bound, and the handle's next read
+/// claims that same operation. That retention is what keeps a cancelled read
+/// from losing bytes, and it matches every other runite reader. The cost is
+/// that input keeps being consumed while nothing awaits it, which matters to
+/// code that reads the terminal outside runite or switches it to raw mode.
+/// Dropping the handle releases the waiter and lets the reader go idle.
 ///
 /// `next_line` keeps partial lines on the handle but leaves bytes after a
 /// newline in the shared process buffer.
@@ -1113,6 +1121,50 @@ mod tests {
         assert!(matches!(pending.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
         drop(pending);
         assert_eq!(&byte, b"x");
+
+        drop(writer);
+        assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));
+    }
+
+    /// The `Stdin` type doc promises retention, and specifically that the
+    /// reader goes on consuming input with nothing awaiting it — the part a
+    /// terminal application taking the tty over has to plan for. Pre-0.3 the
+    /// doc promised the opposite, so pin the behaviour the words now describe.
+    #[test]
+    fn a_cancelled_stdin_read_keeps_the_reader_consuming_input() {
+        let (mut input, reader, mut writer) = test_stdin(stdin_reader::BUFFER_CAPACITY);
+        let mut byte = [0u8; 1];
+        let mut pending = Box::pin(input.read(&mut byte));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        assert!(reader.wait_for_active(std::time::Duration::from_secs(5)));
+        drop(pending);
+
+        assert_eq!(
+            reader.waiter_count(),
+            1,
+            "cancelling a read must leave the handle's waiter registered"
+        );
+        write_test_pipe(&mut writer, b"tail").expect("write with no read outstanding");
+        assert!(
+            reader.wait_for_buffered(4, std::time::Duration::from_secs(5)),
+            "the reader must keep draining input while a cancelled read is retained"
+        );
+
+        // Retained, not restarted: the next read claims the cancelled
+        // operation, so it completes with that operation's one-byte capacity
+        // even though four bytes are buffered and the buffer is larger.
+        let mut observed = [0u8; 4];
+        assert_eq!(
+            crate::block_on(input.read(&mut observed)).expect("replacement read"),
+            1
+        );
+        assert_eq!(&observed[..1], b"t");
+        assert_eq!(
+            crate::block_on(input.read(&mut observed)).expect("read after the claimed operation"),
+            3
+        );
+        assert_eq!(&observed[..3], b"ail");
 
         drop(writer);
         assert!(reader.shutdown_and_wait(std::time::Duration::from_secs(5)));

@@ -92,6 +92,10 @@ impl Child {
     /// reaped** no longer exists, so adopting it fails rather than returning a
     /// `Child` whose `wait` never completes.
     ///
+    /// On Unix, `pid` is validated before any syscall: zero, or a value beyond
+    /// the platform's `pid_t`, is [`io::ErrorKind::InvalidInput`] rather than a
+    /// lookup failure. Windows passes the value straight to the OS.
+    ///
     /// # Caveats
     ///
     /// - **On Unix the process must be a direct child of this one.** Exit

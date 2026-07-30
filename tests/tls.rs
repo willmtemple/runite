@@ -8,12 +8,15 @@
 
 #![cfg(feature = "rustls")]
 
+use std::io;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
-use runite::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use runite::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use runite::net::{TcpListener, TcpStream};
 use runite::tls::{TlsAcceptor, TlsConnector};
 
@@ -23,6 +26,15 @@ use runite::tls::{TlsAcceptor, TlsConnector};
 /// treat an end-entity certificate as a trust anchor — which is not what a real
 /// deployment looks like, and not what the verifier is tuned for.
 fn configurations() -> (TlsConnector, TlsAcceptor) {
+    let (client, server) = rustls_configurations();
+    (
+        TlsConnector::new(Arc::new(client)),
+        TlsAcceptor::new(Arc::new(server)),
+    )
+}
+
+/// The same pair before wrapping, for tests that have to alter a config.
+fn rustls_configurations() -> (ClientConfig, ServerConfig) {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
         // The test binary picks `ring`; runite itself deliberately picks
@@ -65,10 +77,7 @@ fn configurations() -> (TlsConnector, TlsAcceptor) {
         .with_single_cert(chain, key)
         .expect("the leaf key matches the leaf certificate");
 
-    (
-        TlsConnector::new(Arc::new(client)),
-        TlsAcceptor::new(Arc::new(server)),
-    )
+    (client, server)
 }
 
 fn server_name() -> ServerName<'static> {
@@ -300,4 +309,58 @@ async fn hyper_serves_and_requests_over_tls() {
     drop(sender);
     driver.await.expect("connection task");
     server.await.expect("server task");
+}
+
+/// A transport that fails the test if the handshake reaches it.
+///
+/// `TlsAcceptor::accept` rejects an unusable `ServerConfig` before it builds a
+/// session, so a configuration fault must never consume the connection.
+struct UntouchableTransport;
+
+impl AsyncRead for UntouchableTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        panic!("a rejected configuration must not read the transport");
+    }
+}
+
+impl AsyncWrite for UntouchableTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        panic!("a rejected configuration must not write the transport");
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        panic!("a rejected configuration must not flush the transport");
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        panic!("a rejected configuration must not close the transport");
+    }
+}
+
+/// `accept`'s `# Errors` promises `InvalidInput` for a configuration rustls
+/// will not start a session from, as distinct from the `InvalidData` a failed
+/// handshake produces. A server matching exhaustively on the documented kinds
+/// routes the two differently — drop this connection, or refuse to serve at
+/// all — so the distinction has to hold.
+#[runite::test]
+async fn a_server_configuration_rustls_rejects_is_invalid_input() {
+    let (_client, mut server) = rustls_configurations();
+    // Below the 512-byte floor RFC 6066 sets for the max_fragment_size
+    // extension, so `ServerConnection::new` refuses the config outright.
+    server.max_fragment_size = Some(4);
+    let acceptor = TlsAcceptor::new(Arc::new(server));
+
+    let error = acceptor
+        .accept(UntouchableTransport)
+        .await
+        .expect_err("an unusable server configuration must not hand back a stream");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }

@@ -223,6 +223,9 @@ impl TlsAcceptor {
     ///
     /// # Errors
     ///
+    /// Returns [`io::ErrorKind::InvalidInput`] if the configuration cannot
+    /// start a server connection — that is a startup fault, rejected before the
+    /// transport is touched, not something to retry the next connection over.
     /// Returns [`io::ErrorKind::InvalidData`] if the client fails the handshake
     /// (an unacceptable certificate, no shared cipher suite, a malformed
     /// record), [`io::ErrorKind::UnexpectedEof`] if the transport closes

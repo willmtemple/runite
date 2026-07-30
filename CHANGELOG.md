@@ -437,6 +437,43 @@ changes.
   the pending write, and is now documented as the escape, with a test pinning
   it. ([#27](https://github.com/willmtemple/runite/issues/27))
 
+- `Stdin`'s type documentation stated the pre-0.3 cancellation contract —
+  cancelling a pending read "removes only that handle's waiter" — which this
+  release inverted to retention. It was the only statement of the contract in
+  the module's rustdoc, so a reader had no way to discover the change from the
+  API docs. It now says what actually happens: the handle keeps the operation
+  and its waiter, the reader thread goes on filling the shared buffer, and the
+  handle's next read claims that same operation. The consequence a terminal
+  application has to plan for — input continuing to be consumed while nothing
+  awaits it — is stated too, and a test pins it.
+
+- The six socket `close_descriptor` methods promised, without qualification, to
+  order the close behind operations already submitted against the descriptor.
+  Only Linux does that; macOS and Windows close synchronously. The caveat lived
+  only in `fs::File::close_descriptor`'s body, one link away, and that method's
+  own summary line was unqualified as well. All seven summaries now name Linux,
+  and each socket carries the platform sentence directly.
+
+- `fd::read_chunks` said a caller `Break` "returns `Ok(())`" seven lines above
+  the paragraph explaining the `Drain` it actually returns. It now names
+  `Drain::Stopped`.
+
+- `Runtime`'s teardown bullet said teardown happens when the thread exits,
+  without the Windows exception: thread exit there cannot run user code, so an
+  application-owned thread runs no `on_shutdown` hooks, cancels no tasks, and
+  leaks its runtime state unless it calls `shutdown`. The bullet now says so and
+  links `shutdown`.
+
+- `TlsAcceptor::accept`'s `# Errors` omitted the `InvalidInput` its own first
+  line produces for a `ServerConfig` rustls will not build a session from, which
+  a server matching exhaustively on the documented kinds would route into its
+  per-connection retry path. `TlsConnector::connect` already documented the
+  identical case. Added, with a test.
+
+- `Child::from_pid`'s `# Errors` omitted the `InvalidInput` Unix returns for a
+  `pid` that is not a process identifier — zero, or beyond `pid_t` — which it
+  rejects before any syscall. Added, with a test.
+
 ### Changed
 
 - Fixed two intra-doc links on `TcpStream` that pointed at inherent
