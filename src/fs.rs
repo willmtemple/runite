@@ -72,9 +72,6 @@ use crate::io::{
     WriteOperation,
 };
 
-#[cfg(target_os = "linux")]
-pub mod watch;
-
 use crate::op::fs::{
     FileType as RawFileType, FsOp, MetadataTarget, OpenOptions as OpOpenOptions,
     RawDirEntry as OpDirEntry, RawMetadata,

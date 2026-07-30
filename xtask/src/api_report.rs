@@ -255,11 +255,12 @@ fn reject_api(surface: &BTreeSet<String>, target: Target, needle: &str) -> Resul
 /// platform, while these are simply unfinished.
 ///
 /// Every entry must name the issue that removes it.
-const PORTABILITY_EXEMPTIONS: &[(&str, &str)] = &[
-    // Linux-only while the macOS and Windows backends are written. Delete this
-    // entry when #47 closes; the surfaces converge on their own at that point.
-    ("runite::fs::watch", "#47"),
-];
+/// Public surfaces allowed to exist on some Unix targets but not others.
+///
+/// Deliberately empty. An entry here is a promise that every Unix target
+/// exposes the same public API, suspended — so each one needs an issue that
+/// will delete it again.
+const PORTABILITY_EXEMPTIONS: &[(&str, &str)] = &[];
 
 fn is_exempt(line: &str) -> bool {
     PORTABILITY_EXEMPTIONS
