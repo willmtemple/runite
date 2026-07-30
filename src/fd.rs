@@ -115,6 +115,30 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
     crate::sys::current::fd::wait_writable(raw).await
 }
 
+/// Why a [`read_chunks`] drain ended.
+///
+/// The distinction is load-bearing. A consumer draining a pseudoterminal keys
+/// its teardown on end of input — that is how it learns the child exited —
+/// while a self-imposed stop means the descriptor is still live and should be
+/// read again. One success value for both would make those indistinguishable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Drain {
+    /// The descriptor reported end of input. The peer is gone; further reads
+    /// will not produce data.
+    EndOfInput,
+    /// `on_chunk` returned [`ControlFlow::Break`](core::ops::ControlFlow::Break),
+    /// or the supplied buffer was empty. The descriptor is still live.
+    Stopped,
+}
+
+impl Drain {
+    /// Whether the drain ended because the descriptor reached end of input.
+    pub fn is_end_of_input(self) -> bool {
+        matches!(self, Self::EndOfInput)
+    }
+}
+
 /// Drains a nonblocking descriptor, delivering each chunk as it arrives.
 ///
 /// This is the readiness loop that [`wait_readable`] otherwise asks every
@@ -140,9 +164,14 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
 /// file into a terminal — starves everything else on the loop for as long as
 /// it takes.
 ///
-/// Returns when the descriptor reports end of input, when `on_chunk` breaks,
-/// or on error. The descriptor must already be nonblocking; a blocking one
-/// will stall the event loop inside `read`.
+/// The returned [`Drain`] says *which* of those ended the loop, which callers
+/// need: end of input usually means the peer is gone and the consumer should
+/// tear down, while a self-imposed stop means come back for more. Collapsing
+/// them into one success value would make a terminal unable to tell "the shell
+/// exited" from "I hit my byte budget".
+///
+/// The descriptor must already be nonblocking; a blocking one will stall the
+/// event loop inside `read`.
 ///
 /// # Examples
 ///
@@ -153,7 +182,7 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
 /// let mut buffer = vec![0; 64 * 1024];
 /// let mut budget: usize = 1024 * 1024;
 ///
-/// runite::fd::read_chunks(&fd, &mut buffer, |chunk| {
+/// let outcome = runite::fd::read_chunks(&fd, &mut buffer, |chunk| {
 ///     // Consume immediately: this runs before the loop waits for more.
 ///     budget = budget.saturating_sub(chunk.len());
 ///     if budget == 0 {
@@ -163,6 +192,10 @@ pub async fn wait_writable<Fd: AsFd>(fd: Fd) -> io::Result<()> {
 ///     }
 /// })
 /// .await?;
+///
+/// if outcome.is_end_of_input() {
+///     // The peer is gone; tear down rather than waiting for more.
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -170,10 +203,10 @@ pub async fn read_chunks<Fd: AsFd>(
     fd: &Fd,
     buffer: &mut [u8],
     mut on_chunk: impl FnMut(&[u8]) -> core::ops::ControlFlow<()>,
-) -> io::Result<()> {
+) -> io::Result<Drain> {
     let raw = fd.as_fd().as_raw_fd();
     if buffer.is_empty() {
-        return Ok(());
+        return Ok(Drain::Stopped);
     }
     loop {
         // SAFETY: `raw` is borrowed from `fd` for the whole call, and `buffer`
@@ -188,12 +221,12 @@ pub async fn read_chunks<Fd: AsFd>(
         if read > 0 {
             let read = read as usize;
             if on_chunk(&buffer[..read]).is_break() {
-                return Ok(());
+                return Ok(Drain::Stopped);
             }
             continue;
         }
         if read == 0 {
-            return Ok(());
+            return Ok(Drain::EndOfInput);
         }
         let error = io::Error::last_os_error();
         match error.kind() {
@@ -309,7 +342,7 @@ mod tests {
                 let borrowed = unsafe { BorrowedFd::borrow_raw(read_fd) };
                 let mut buffer = [0u8; 64];
                 let mut chunks = 0;
-                super::read_chunks(&borrowed, &mut buffer, |chunk| {
+                let outcome = super::read_chunks(&borrowed, &mut buffer, |chunk| {
                     collected
                         .borrow_mut()
                         .push(String::from_utf8_lossy(chunk).into_owned());
@@ -324,6 +357,11 @@ mod tests {
                 })
                 .await
                 .expect("read_chunks should not error");
+                assert_eq!(
+                    outcome,
+                    super::Drain::Stopped,
+                    "a caller break must be distinguishable from end of input"
+                );
                 // SAFETY: this task owns the descriptor's lifetime here.
                 unsafe { libc::close(read_fd) };
             });
@@ -363,9 +401,15 @@ mod tests {
                 // SAFETY: `read_fd` stays open until this task closes it.
                 let borrowed = unsafe { BorrowedFd::borrow_raw(read_fd) };
                 let mut buffer = [0u8; 16];
-                super::read_chunks(&borrowed, &mut buffer, |_| ControlFlow::Continue(()))
-                    .await
-                    .expect("end of input is not an error");
+                let outcome =
+                    super::read_chunks(&borrowed, &mut buffer, |_| ControlFlow::Continue(()))
+                        .await
+                        .expect("end of input is not an error");
+                assert_eq!(
+                    outcome,
+                    super::Drain::EndOfInput,
+                    "a consumer keys its teardown on this"
+                );
                 flag.store(true, Ordering::Release);
                 // SAFETY: this task owns the descriptor's lifetime here.
                 unsafe { libc::close(read_fd) };

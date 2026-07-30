@@ -44,6 +44,7 @@ pub(crate) const IORING_OP_ACCEPT: u8 = 13;
 pub(crate) const IORING_OP_ASYNC_CANCEL: u8 = 14;
 pub(crate) const IORING_OP_CONNECT: u8 = 16;
 pub(crate) const IORING_OP_OPENAT: u8 = 18;
+pub(crate) const IORING_OP_CLOSE: u8 = 19;
 pub(crate) const IORING_OP_STATX: u8 = 21;
 pub(crate) const IORING_OP_READ: u8 = 22;
 pub(crate) const IORING_OP_WRITE: u8 = 23;
@@ -571,7 +572,7 @@ impl IoUring {
         let nodrop = params.features & IORING_FEAT_NODROP != 0;
         if !nodrop {
             tracing::warn!(
-                target: "runite::driver",
+                target: crate::trace_targets::DRIVER,
                 event = "cq_nodrop_unsupported",
                 "this kernel lacks IORING_FEAT_NODROP (needs Linux 5.5+); completions may \
                  be dropped on completion-queue overflow",
@@ -712,7 +713,7 @@ impl IoUring {
             ring.drain_completions(|cqe| {
                 if cqe.res < 0 {
                     tracing::warn!(
-                        target: "runite::driver",
+                        target: crate::trace_targets::DRIVER,
                         event = "fallback_submitter_op_failed",
                         errno = -cqe.res,
                         "an io_uring op on the global fallback submitter failed \
@@ -859,7 +860,7 @@ impl IoUring {
                 "this kernel lacks FEAT_NODROP"
             };
             tracing::error!(
-                target: "runite::driver",
+                target: crate::trace_targets::DRIVER,
                 event = "cq_overflow_dropped",
                 overflow,
                 nodrop = self.nodrop,
@@ -1368,7 +1369,7 @@ fn setup_ring(entries: u32, profile: SetupProfile) -> io::Result<(RawFd, IoUring
                 };
                 let _ = cache.set(flags);
                 tracing::debug!(
-                    target: "runite::driver",
+                    target: crate::trace_targets::DRIVER,
                     event = "io_uring_setup_flags",
                     flags,
                     entries,

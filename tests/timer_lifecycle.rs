@@ -121,3 +121,49 @@ fn into_inner_releases_the_guard_without_cancelling() {
         "into_inner must not cancel the timeout it releases"
     );
 }
+
+/// A shutdown hook runs at teardown, and runs even though `run()` has already
+/// returned — which is the case `process::exit` was previously the only answer
+/// for.
+#[test]
+fn shutdown_hooks_run_at_thread_teardown() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let order = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&order);
+    let observed_after_run = Arc::clone(&order);
+
+    std::thread::spawn(move || {
+        runite::queue_macrotask({
+            let observed = Arc::clone(&observed);
+            move || {
+                runite::on_shutdown({
+                    let observed = Arc::clone(&observed);
+                    move || {
+                        observed.fetch_add(1, Ordering::AcqRel);
+                    }
+                });
+                runite::on_shutdown(move || {
+                    observed.fetch_add(10, Ordering::AcqRel);
+                });
+            }
+        });
+        runite::run();
+        // Still zero here: hooks are keyed to teardown, not to `run` returning.
+        assert_eq!(observed_after_run.load(Ordering::Acquire), 0);
+        // Explicit teardown, rather than relying on the thread exiting. On
+        // Windows nothing else will run these hooks: TLS destructors there
+        // hold the loader lock, where arbitrary user code cannot safely run.
+        runite::shutdown();
+        0
+    })
+    .join()
+    .expect("runtime thread should not panic");
+
+    assert_eq!(
+        order.load(Ordering::Acquire),
+        11,
+        "both hooks should have run once the thread's runtime was torn down"
+    );
+}

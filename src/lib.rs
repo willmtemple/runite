@@ -200,6 +200,11 @@ pub(crate) mod trace_targets {
     // "compiles under dev, breaks under `cargo bench`/release" trap.
     pub const TIMER: &str = "runite::timer";
     pub const ASYNC: &str = "runite::async";
+
+    /// Signal delivery. Emitted only on Windows today, where the console
+    /// control handler runs on a thread the runtime does not own.
+    #[cfg(windows)]
+    pub const SIGNAL: &str = "runite::signal";
 }
 
 pub mod channel;
@@ -574,6 +579,129 @@ mod runtime_api {
     /// called while this thread is already driving the runtime.
     pub fn run_until_stalled() {
         imp::run_until_stalled()
+    }
+
+    /// Registers a closure to run when this thread's runtime is torn down.
+    ///
+    /// Hooks run once, in registration order, at the start of teardown — while
+    /// the runtime is still intact, before spawned tasks are cancelled and
+    /// before the platform driver is destroyed. That ordering is the point: a
+    /// hook that ran after cancellation would be handed a runtime that can no
+    /// longer do anything.
+    ///
+    /// This is keyed to *teardown*, not to an entry point returning.
+    /// [`run`], [`run_until_stalled`] and
+    /// [`run_ready_tasks`] all return routinely — a host
+    /// driving the loop with the last of those returns constantly and means
+    /// nothing by it — so a hook defined as "runs when `run()` returns" would
+    /// fire spuriously for such a host and never for the case this exists for.
+    ///
+    /// The intended use is releasing a resource the runtime cannot see: sending
+    /// a final signal to a child process, flushing a log, telling a peer the
+    /// process is going away. Without it, an application that must do such work
+    /// on the way out has no place to put it, and typically resorts to
+    /// [`std::process::exit`], which skips every destructor in the process.
+    ///
+    /// A hook that panics is reported and does not stop the remaining hooks or
+    /// abort teardown: a half-torn-down runtime is worse than a reported panic.
+    /// Hooks are `FnOnce` and `!Send`, and run on their own runtime thread.
+    ///
+    /// # Teardown has to happen for a hook to run
+    ///
+    /// On Unix, a thread that simply exits tears its runtime down through a TLS
+    /// destructor, so hooks run without the application doing anything.
+    ///
+    /// **On Windows they do not.** TLS destructors there run while the loader
+    /// lock is held, where running arbitrary user code or closing a completion
+    /// port can deadlock process shutdown — so runite deliberately does not,
+    /// and an ordinary thread that exits never runs its hooks. Runtime-owned
+    /// workers are unaffected; they tear down explicitly before exiting.
+    ///
+    /// Call [`shutdown`] to tear the runtime down on the caller's own stack.
+    /// It works identically everywhere, and on Windows it is the only way a
+    /// hook on an application-owned thread will run at all. It is also worth
+    /// preferring on Unix, where TLS destructor order is otherwise deciding
+    /// when your hooks run relative to the rest of the thread's state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from a thread with no runtime installed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let released = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&released);
+    ///
+    /// runite::queue_macrotask(move || {
+    ///     runite::on_shutdown(move || flag.set(true));
+    /// });
+    /// runite::run();
+    /// // The hook runs at thread teardown, not when `run` returns.
+    /// ```
+    pub fn on_shutdown<F>(hook: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        imp::on_shutdown(hook);
+    }
+
+    /// Tears this thread's runtime down now, running its [`on_shutdown`] hooks.
+    ///
+    /// Hooks run, spawned tasks are cancelled, and the platform driver is
+    /// destroyed — the same teardown a thread performs on the way out, but on
+    /// the caller's own stack and at a point the application chooses.
+    ///
+    /// Call it after [`run`] or [`block_on`] returns, when the thread is done
+    /// with the runtime.
+    ///
+    /// # Why this exists rather than relying on the thread exiting
+    ///
+    /// On Windows, teardown at thread exit cannot run user code: TLS
+    /// destructors hold the loader lock, and running arbitrary `Drop`
+    /// implementations or closing a completion port there can deadlock process
+    /// shutdown. So an application-owned thread that just exits never runs its
+    /// shutdown hooks, and this is the only way to make them run.
+    ///
+    /// It is worth calling on Unix too, where hooks would otherwise run at a
+    /// moment decided by TLS destructor order relative to everything else the
+    /// thread owns.
+    ///
+    /// Calling it on a thread with no runtime installed does nothing, so it is
+    /// safe in cleanup paths that cannot easily tell.
+    ///
+    /// The runtime can be used again afterwards: the next call that needs one
+    /// initializes a fresh runtime for the thread, with no hooks registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within a task or callback running on this
+    /// runtime — the loop cannot tear itself down while it is being driven —
+    /// or if the runtime is already tearing down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::rc::Rc;
+    /// use std::cell::Cell;
+    ///
+    /// let released = Rc::new(Cell::new(false));
+    /// let flag = Rc::clone(&released);
+    ///
+    /// runite::queue_macrotask(move || {
+    ///     runite::on_shutdown(move || flag.set(true));
+    /// });
+    /// runite::run();
+    /// assert!(!released.get(), "the hook is keyed to teardown, not to `run`");
+    ///
+    /// runite::shutdown();
+    /// assert!(released.get());
+    /// ```
+    pub fn shutdown() {
+        imp::shutdown();
     }
 
     /// Returns the identifier of the event-loop turn currently being driven.

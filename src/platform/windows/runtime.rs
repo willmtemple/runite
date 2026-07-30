@@ -23,7 +23,7 @@ use crate::platform::runtime_shared as shared;
 
 pub use shared::{
     AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, ThreadHandle, TimeoutHandle,
-    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, yield_now,
+    TimerCancel, TurnId, WorkerHandle, YieldNow, current_turn, on_shutdown, shutdown, yield_now,
 };
 
 /// Marker type used to monomorphize the shared scheduler for this platform.

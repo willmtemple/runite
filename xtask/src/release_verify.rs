@@ -75,6 +75,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let macro_artifact = artifacts.join(format!("runite-proc-macros-{macro_version}.crate"));
     require_file(&main_artifact)?;
     require_file(&macro_artifact)?;
+    build_publish_shaped_artifacts(
+        &root,
+        &release_dir,
+        allow_dirty,
+        &["runite", "runite-proc-macros"],
+    )?;
 
     let unpacked = release_dir.join("unpacked");
     fs::create_dir_all(&unpacked)
@@ -222,6 +228,49 @@ fn package_list(root: &Path, package: &str, allow_dirty: bool) -> Result<BTreeSe
         .map(|line| line.trim_start_matches("./").to_owned())
         .filter(|line| !line.is_empty())
         .collect())
+}
+
+/// Produces the artifacts in the shape `cargo publish` will actually upload.
+///
+/// These differ from the workspace-packaged ones, and that is correct — which
+/// is exactly why they have to exist separately. `cargo package --workspace`
+/// rewrites the packaged `Cargo.lock` to reference the *locally packaged*
+/// proc-macro, so the unpacked tree can be built and tested before anything is
+/// uploaded. `cargo publish --locked --package runite`, which is what the
+/// release actually runs, resolves the proc-macro from the registry instead,
+/// recording a different checksum and so producing a different `.crate`.
+///
+/// The distinction is load-bearing rather than cosmetic. The release workflow
+/// compares crates.io's stored checksum against a local repackage, and a
+/// mismatch is close to unrecoverable: it is detected only after the first
+/// crate has been uploaded, and re-detected on every rerun. Comparing against
+/// the workspace artifact means comparing a checksum the published crate can
+/// never have, which turns a successful release into a permanently
+/// unpublishable version.
+fn build_publish_shaped_artifacts(
+    root: &Path,
+    release_dir: &Path,
+    allow_dirty: bool,
+    packages: &[&str],
+) -> Result<(), String> {
+    let publish_shape = release_dir.join("publish-shape");
+    for package in packages {
+        let mut command = Command::new("cargo");
+        command.current_dir(root).args(["package", "--no-verify"]);
+        if allow_dirty {
+            command.arg("--allow-dirty");
+        }
+        command
+            .args(["--package", package, "--target-dir"])
+            .arg(&publish_shape);
+        run_status(&mut command, &format!("package {package} in publish shape"))?;
+    }
+    println!(
+        "xtask: publish-shaped artifacts written to {} (compare release checksums against these, \
+         not the workspace ones)",
+        publish_shape.join("package").display()
+    );
+    Ok(())
 }
 
 fn package_workspace(root: &Path, target: &Path, allow_dirty: bool) -> Result<(), String> {

@@ -31,6 +31,17 @@ use crate::sys::blocking::spawn_blocking;
 use crate::sys::handle::{OwnedFile, PlatformMetadata, RawFile};
 use crate::sys::windows::overlapped;
 
+/// Closes an owned descriptor.
+///
+/// Windows has no asynchronous close, so this releases the handle and reports
+/// success. `CloseHandle` fails only for an invalid or close-protected handle,
+/// both of which are programmer error rather than I/O error, so there is
+/// nothing meaningful to surface.
+pub(crate) async fn close(fd: crate::sys::handle::OwnedFile) -> io::Result<()> {
+    drop(fd);
+    Ok(())
+}
+
 pub async fn open(op: FsOp) -> io::Result<OwnedFile> {
     let FsOp::Open { path, options } = op else {
         unreachable!("open backend called with non-open op");

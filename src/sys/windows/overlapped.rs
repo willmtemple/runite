@@ -244,7 +244,7 @@ fn cancel_operation(owner: &OverlappedOwner, overlapped: *const OVERLAPPED) {
     // stays alive and the waiter parks indefinitely. Nothing here can force the
     // packet, so record it rather than discarding the only evidence.
     tracing::error!(
-        target: "runite::driver",
+        target: crate::trace_targets::DRIVER,
         event = "cancel_io_failed",
         error = %error,
         "CancelIoEx failed for an in-flight overlapped operation; its completion \

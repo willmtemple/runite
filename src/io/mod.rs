@@ -78,6 +78,27 @@ pub(crate) use pending::{CursorState, IoFuture, ReadState, WriteOperation, Write
 // `AsyncWrite::poll_write_operation`, which mints its own generation.
 #[cfg(test)]
 pub(crate) use pending::next_operation_id;
+/// Whether [`close_descriptor`](crate::fs::File::close_descriptor) actually
+/// released the descriptor.
+///
+/// A resource handle reference-counts its descriptor, because a split half, a
+/// listener's `Incoming` stream, or (on Windows) an accepted-but-incomplete
+/// operation can all hold it. Consuming the handle you have therefore does not
+/// prove you were the last holder, and this reports which happened.
+///
+/// [`StillShared`](Self::StillShared) is not an error, and nothing leaks: the
+/// last holder closes the descriptor when it drops. What you do not get is the
+/// *ordering* — and you could not have had it anyway, because another holder
+/// may still submit operations against that descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CloseOutcome {
+    /// This handle was the last one, and the descriptor is closed.
+    Closed,
+    /// Something else still holds the descriptor, so it was not closed here.
+    StillShared,
+}
+
 pub use std::io::SeekFrom;
 pub use stream::{Collect, Filter, ForEach, Map, Next, Skip, Stream, StreamExt, Take};
 pub use traits::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};

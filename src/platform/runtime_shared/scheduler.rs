@@ -105,7 +105,6 @@ pub fn queue_task<R: Runtime, F>(task: F)
 where
     F: FnOnce() + 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::SCHEDULER,
         event = "queue_task",
@@ -127,7 +126,6 @@ pub fn queue_microtask<R: Runtime, F>(task: F)
 where
     F: FnOnce() + 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::SCHEDULER,
         event = "queue_microtask",
@@ -153,7 +151,6 @@ where
 {
     let id = allocate_timer_id::<R>();
     let deadline = deadline_from_now::<R>(delay);
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "timeout",
@@ -179,7 +176,6 @@ where
 /// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
 pub fn cancel_timeout(handle: &TimeoutHandle) {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "cancel_timeout",
@@ -202,7 +198,6 @@ where
 {
     let id = allocate_timer_id::<R>();
 
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "interval",
@@ -232,7 +227,6 @@ where
         schedule_interval_macrotask::<R>(id, scheduled);
     } else {
         let deadline = deadline_from_now::<R>(delay);
-        #[cfg(debug_assertions)]
         tracing::trace!(
             target: trace_targets::TIMER,
             event = "interval_deadline",
@@ -253,7 +247,6 @@ where
 /// Cancelling a handle whose originating runtime thread has already torn down,
 /// or whose handle was created on a different thread, is a silent no-op.
 pub fn cancel_interval(handle: &IntervalHandle) {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::TIMER,
         event = "cancel_interval",
@@ -281,7 +274,6 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    #[cfg(debug_assertions)]
     tracing::trace!(
         target: trace_targets::ASYNC,
         event = "queue_future",
@@ -501,15 +493,6 @@ pub fn run<R: Runtime>() {
             continue;
         }
 
-        if !with_installed_thread(|state| state.try_begin_idle_probe()) {
-            continue;
-        }
-
-        // From here `closing` is `true`. This guard restores it to `false` on
-        // any early exit from the shutdown-probe region below — including a
-        // panic unwind — and is disarmed only once we commit to exiting.
-        let mut closing_reset = ClosingResetGuard::new();
-
         drain_all::<R>();
 
         if has_ready_work() {
@@ -527,8 +510,6 @@ pub fn run<R: Runtime>() {
 
         if busy {
             with_installed_thread(|state| {
-                state.shared.closing.store(false, Ordering::Release);
-                #[cfg(debug_assertions)]
                 tracing::trace!(
                     target: trace_targets::RUNTIME,
                     event = "run_wait",
@@ -552,7 +533,6 @@ pub fn run<R: Runtime>() {
         let worker_closed = match commit_idle() {
             IdleCommit::Retry => {
                 // A completion or remote task raced the preliminary probes.
-                // `closing_reset` restores the flag before retrying.
                 continue;
             }
             IdleCommit::CancelTasks(tasks) => {
@@ -561,14 +541,8 @@ pub fn run<R: Runtime>() {
                 cancel_tasks_for_shutdown(tasks);
                 continue;
             }
-            IdleCommit::MainIdle => {
-                closing_reset.disarm();
-                false
-            }
-            IdleCommit::WorkerClosed => {
-                closing_reset.disarm();
-                true
-            }
+            IdleCommit::MainIdle => false,
+            IdleCommit::WorkerClosed => true,
         };
 
         tracing::debug!(
@@ -610,9 +584,6 @@ pub fn run_until_stalled<R: Runtime>() {
             continue;
         }
 
-        with_installed_thread(|state| {
-            state.shared.closing.store(false, Ordering::Release);
-        });
         return;
     }
 }
@@ -647,9 +618,6 @@ pub fn run_ready_tasks<R: Runtime>() {
             continue;
         }
 
-        with_installed_thread(|state| {
-            state.shared.closing.store(false, Ordering::Release);
-        });
         return;
     }
 }
@@ -775,6 +743,7 @@ impl Wake for BlockOnWaker {
 /// waiting-macrotask condition is re-checked at each threshold multiple rather
 /// than warning on count alone.
 fn drain_microtasks<R: Runtime>() {
+    let started = std::time::Instant::now();
     let mut microtasks_run: u64 = 0;
     let mut warned = false;
     while let Some(task) = pop_microtask() {
@@ -797,6 +766,7 @@ fn drain_microtasks<R: Runtime>() {
             );
         }
     }
+    MICROTASK_DRAIN.with(|drain| drain.set(drain.get() + started.elapsed()));
 }
 
 /// Returns whether a macrotask is waiting to run on this thread: a queued
@@ -860,6 +830,10 @@ static NEXT_TURN: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static CURRENT_TURN: std::cell::Cell<Option<TurnId>> = const { std::cell::Cell::new(None) };
+    /// Time spent draining microtasks in the current turn. Accumulated because
+    /// a turn may drain more than once.
+    static MICROTASK_DRAIN: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
 
 /// Identifies one turn of an event loop.
@@ -875,6 +849,18 @@ impl std::fmt::Display for TurnId {
     }
 }
 
+/// Registers a closure to run when this thread's runtime is torn down.
+pub fn on_shutdown<F: FnOnce() + 'static>(hook: F) {
+    with_installed_thread(|state| {
+        state.shutdown_hooks.borrow_mut().push(Box::new(hook));
+    });
+}
+
+/// Tears this thread's runtime down now, running shutdown hooks.
+pub fn shutdown() {
+    super::state::shutdown_current_thread();
+}
+
 /// Returns the identifier of the turn currently being driven, if any.
 pub fn current_turn() -> Option<TurnId> {
     CURRENT_TURN.with(std::cell::Cell::get)
@@ -884,7 +870,10 @@ pub fn current_turn() -> Option<TurnId> {
 ///
 /// Restores the previous value rather than clearing, so the mechanism does not
 /// depend on `EventLoopGuard`'s non-reentrancy assertion staying in place.
-struct TurnGuard(Option<TurnId>);
+struct TurnGuard {
+    previous: Option<TurnId>,
+    started: std::time::Instant,
+}
 
 impl TurnGuard {
     fn begin() -> Self {
@@ -896,13 +885,32 @@ impl TurnGuard {
         });
         let id = TurnId(NEXT_TURN.fetch_add(1, Ordering::Relaxed));
         CURRENT_TURN.with(|current| current.set(Some(id)));
-        Self(previous)
+        MICROTASK_DRAIN.with(|drain| drain.set(std::time::Duration::ZERO));
+        Self {
+            previous,
+            started: std::time::Instant::now(),
+        }
     }
 }
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        CURRENT_TURN.with(|current| current.set(self.0));
+        // Two clock reads per *turn*, not per microtask. A turn already opens
+        // with a driver poll, so this is far below the noise floor — and
+        // without it "the reactive graph is what this turn spent its time on"
+        // is unanswerable, which is the question a consumer sitting in the
+        // microtask checkpoint actually has.
+        let elapsed = self.started.elapsed();
+        let drained = MICROTASK_DRAIN.with(std::cell::Cell::get);
+        try_with_installed_thread(|state| {
+            if let Some(state) = state {
+                if drained * 2 > elapsed {
+                    RuntimeCounters::bump(&state.shared.counters.microtask_bound_turns);
+                }
+                state.observe_peaks();
+            }
+        });
+        CURRENT_TURN.with(|current| current.set(self.previous));
     }
 }
 
@@ -939,40 +947,6 @@ impl Drop for EventLoopGuard {
     }
 }
 
-/// Resets the current thread's `closing` flag on drop.
-///
-/// `run()` sets `closing` while it probes for a run-to-idle return. On every
-/// non-idle path the flag must return to `false` so the loop can be re-entered.
-/// This guard makes that reset happen even if a panic unwinds through the
-/// probe. Runtime-owned workers may instead atomically commit `closed`; other
-/// threads leave final closure to their teardown owner.
-struct ClosingResetGuard {
-    armed: bool,
-}
-
-impl ClosingResetGuard {
-    fn new() -> Self {
-        Self { armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ClosingResetGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        try_with_installed_thread(|state| {
-            if let Some(state) = state {
-                state.shared.closing.store(false, Ordering::Release);
-            }
-        });
-    }
-}
-
 /// Reap all external events into the local queues: poll the driver for I/O
 /// completions and expired timers, splice in cross-thread (remote) tasks, and
 /// collect exited workers.
@@ -1003,7 +977,6 @@ fn drain_driver_events<R: Runtime>() {
         };
 
         if ready.wake {
-            #[cfg(debug_assertions)]
             tracing::trace!(
                 target: trace_targets::DRIVER,
                 event = "drain_wake",
@@ -1014,7 +987,6 @@ fn drain_driver_events<R: Runtime>() {
             });
         }
         if ready.timer {
-            #[cfg(debug_assertions)]
             tracing::trace!(
                 target: trace_targets::TIMER,
                 event = "drain_timer",
@@ -1091,10 +1063,8 @@ fn pop_macrotask<R: Runtime>() -> Option<LocalTask> {
     with_installed_thread(|state| {
         RuntimeCounters::bump(&state.shared.counters.macrotasks_run);
     });
-    #[cfg(debug_assertions)]
-    {
-        let now = deadline_from_now::<R>(Duration::ZERO);
-        let wait = now.saturating_sub(entry.queued_at);
+    if let Some(queued_at) = entry.queued_at {
+        let wait = deadline_from_now::<R>(Duration::ZERO).saturating_sub(queued_at);
         tracing::trace!(
             target: trace_targets::SCHEDULER,
             event = "macrotask_dequeued",
@@ -1119,9 +1089,20 @@ fn make_macro_task<R: Runtime>(task: LocalTask) -> MacroTask {
     let _phantom: core::marker::PhantomData<R> = core::marker::PhantomData;
     MacroTask {
         task,
-        #[cfg(debug_assertions)]
-        queued_at: deadline_from_now::<R>(Duration::ZERO),
+        queued_at: queue_timestamp::<R>(),
     }
+}
+
+/// Reads the monotonic clock, but only if a subscriber is collecting the
+/// scheduler traces that would report it.
+///
+/// `tracing::enabled!` is the same check the trace macros make before
+/// evaluating their fields — a relaxed load of a shared static and a compare —
+/// so with no subscriber installed this costs a not-taken branch and no
+/// syscall.
+fn queue_timestamp<R: Runtime>() -> Option<Duration> {
+    tracing::enabled!(target: trace_targets::SCHEDULER, tracing::Level::TRACE)
+        .then(|| deadline_from_now::<R>(Duration::ZERO))
 }
 
 fn has_ready_work() -> bool {
@@ -1163,7 +1144,6 @@ fn commit_idle() -> IdleCommit {
             state.shared.closed.store(true, Ordering::Release);
             IdleCommit::WorkerClosed
         } else {
-            state.shared.closing.store(false, Ordering::Release);
             IdleCommit::MainIdle
         }
     })

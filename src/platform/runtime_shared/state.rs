@@ -127,10 +127,19 @@ pub(crate) fn thread_teardown_guard() -> ThreadTeardownGuard {
 
 pub(crate) struct MacroTask {
     pub(crate) task: LocalTask,
-    /// Wall time at which this task entered the local queue. Populated only
-    /// in debug builds; used to emit a trace event reporting queue-wait time.
-    #[cfg(debug_assertions)]
-    pub(crate) queued_at: Duration,
+    /// Monotonic time at which this task entered the local queue, used to
+    /// report queue-wait time when the task is dequeued.
+    ///
+    /// `None` unless a subscriber was actually collecting scheduler traces at
+    /// the moment of the push. Reading the clock is a real syscall — around
+    /// 20-30ns on every backend — and this is per macrotask, so it must not
+    /// happen just because the build has tracing linked in. The check that
+    /// produces this is the same not-taken branch every other trace site pays.
+    ///
+    /// The consequence is that queue-wait timing begins once a subscriber is
+    /// installed rather than retroactively: tasks already queued at that
+    /// moment are dequeued without it.
+    pub(crate) queued_at: Option<Duration>,
 }
 
 pub(crate) struct IntervalEntry {
@@ -160,6 +169,13 @@ impl RemoteQueue {
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCounters {
     pub(crate) turns: AtomicU64,
+    pub(crate) operations_completed: AtomicU64,
+    pub(crate) tasks_cancelled: AtomicU64,
+    pub(crate) coalesced_wakes: AtomicU64,
+    /// Turns whose microtask drain took more of the turn than everything else
+    /// put together. Two clock reads per *turn* — not per microtask — which is
+    /// far below the driver poll that opens the same turn.
+    pub(crate) microtask_bound_turns: AtomicU64,
     pub(crate) task_polls: AtomicU64,
     pub(crate) task_wakes: AtomicU64,
     pub(crate) microtasks_run: AtomicU64,
@@ -170,6 +186,34 @@ pub(crate) struct RuntimeCounters {
 impl RuntimeCounters {
     pub(crate) fn bump(counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Highest value each gauge has reached on this runtime thread.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimePeaks {
+    pub(crate) live_tasks: AtomicUsize,
+    pub(crate) ready_tasks: AtomicUsize,
+    pub(crate) microtask_queue_depth: AtomicUsize,
+    pub(crate) local_macrotask_queue_depth: AtomicUsize,
+    pub(crate) outstanding_operations: AtomicUsize,
+    pub(crate) armed_timers: AtomicUsize,
+}
+
+impl RuntimePeaks {
+    /// Raises `peak` to `value` if it is higher.
+    ///
+    /// A relaxed compare-and-swap loop rather than a fetch-max, which is not
+    /// available for `AtomicUsize`. Contention is nil: a peak is only ever
+    /// written from its own runtime thread.
+    pub(crate) fn observe(peak: &AtomicUsize, value: usize) {
+        let mut seen = peak.load(Ordering::Relaxed);
+        while value > seen {
+            match peak.compare_exchange_weak(seen, value, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(current) => seen = current,
+            }
+        }
     }
 }
 
@@ -201,6 +245,13 @@ pub(crate) struct ThreadState {
     /// a wake for a completed task simply finds no entry.
     pub(crate) tasks: RefCell<HashMap<u64, Rc<FutureTask>>>,
     pub(crate) next_task_id: Cell<u64>,
+    /// Closures to run when this thread's runtime is torn down.
+    ///
+    /// Deliberately keyed to teardown rather than to `run()` returning: a host
+    /// that drives the loop with `run_ready_tasks` returns constantly and means
+    /// nothing by it, so a hook defined as "runs when the entry point returns"
+    /// would fire spuriously there and never for the case it exists for.
+    pub(crate) shutdown_hooks: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// `true` while one of the driver loops (`run`, `run_until_stalled`,
     /// `run_ready_tasks`) is active on this thread. Used to detect and reject
     /// re-entrant driver calls (e.g. calling `run()` from inside a task poll),
@@ -241,6 +292,7 @@ impl ThreadState {
             next_timer_id: Cell::new(1),
             tasks: RefCell::new(HashMap::new()),
             next_task_id: Cell::new(1),
+            shutdown_hooks: RefCell::new(Vec::new()),
             in_event_loop: Cell::new(false),
             tearing_down: Cell::new(false),
             teardown_panicked: Cell::new(false),
@@ -268,11 +320,29 @@ impl ThreadState {
         self.shared.pending_ops.load(Ordering::Acquire)
     }
 
-    pub(crate) fn try_begin_idle_probe(&self) -> bool {
-        self.shared
-            .closing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    /// Tasks queued for polling but not yet polled.
+    pub(crate) fn ready_tasks(&self) -> usize {
+        self.shared.ready_tasks.load(Ordering::Acquire)
+    }
+
+    /// Records the peaks of gauges that are cheapest to sample at a turn
+    /// boundary rather than at every mutation: queue depths and live tasks
+    /// move constantly, and sampling them once per turn costs nothing while
+    /// still catching the shape of a backlog.
+    pub(crate) fn observe_peaks(&self) {
+        let peaks = &self.shared.peaks;
+        RuntimePeaks::observe(&peaks.live_tasks, self.tasks.borrow().len());
+        RuntimePeaks::observe(&peaks.ready_tasks, self.ready_tasks());
+        RuntimePeaks::observe(
+            &peaks.microtask_queue_depth,
+            self.local_microtasks.borrow().len(),
+        );
+        RuntimePeaks::observe(
+            &peaks.local_macrotask_queue_depth,
+            self.local_macrotasks.borrow().len(),
+        );
+        RuntimePeaks::observe(&peaks.outstanding_operations, self.outstanding_operations());
+        RuntimePeaks::observe(&peaks.armed_timers, self.timers.borrow().len());
     }
 }
 
@@ -288,7 +358,19 @@ pub(crate) struct ThreadShared {
     /// these are for attribution, never for synchronization, and a reader that
     /// observes a count one behind has still learned what it needed.
     pub(crate) counters: RuntimeCounters,
-    pub(crate) closing: AtomicBool,
+    /// Tasks currently sitting in the microtask queue waiting to be polled.
+    ///
+    /// Maintained rather than derived: counting them would mean walking the
+    /// task registry, and a snapshot that walks is work that distorts the idle
+    /// measurement it exists to take.
+    pub(crate) ready_tasks: AtomicUsize,
+    /// High-water marks for the gauges worth knowing the worst case of.
+    ///
+    /// A peak is neither a level nor a total: it answers "how bad did this
+    /// get", which neither of the others can, and which is exactly the
+    /// question after an incident. Updated where the corresponding gauge
+    /// rises, so reading one is a load.
+    pub(crate) peaks: RuntimePeaks,
     pub(crate) closed: AtomicBool,
     notification_requested: AtomicU64,
     notification_delivered: AtomicU64,
@@ -311,7 +393,8 @@ impl ThreadShared {
             remote_macrotasks: RemoteQueue::new(capacity),
             pending_ops: AtomicUsize::new(0),
             counters: RuntimeCounters::default(),
-            closing: AtomicBool::new(false),
+            ready_tasks: AtomicUsize::new(0),
+            peaks: RuntimePeaks::default(),
             closed: AtomicBool::new(false),
             notification_requested: AtomicU64::new(0),
             notification_delivered: AtomicU64::new(0),
@@ -542,7 +625,6 @@ impl ThreadShared {
     }
 
     fn close(&self) -> VecDeque<SendTask> {
-        self.closing.store(true, Ordering::Release);
         let mut queue = lock_queue(&self.remote_macrotasks);
         self.closed.store(true, Ordering::Release);
         self.notification_delivered.store(
@@ -574,7 +656,6 @@ impl ThreadShared {
 
     #[cfg(windows)]
     fn mark_closed_without_cleanup(&self) {
-        self.closing.store(true, Ordering::Release);
         self.closed.store(true, Ordering::Release);
         self.notification_delivered.store(
             self.notification_requested.load(Ordering::Acquire),
@@ -952,6 +1033,33 @@ fn install_owned_state(state: Box<ThreadState>) -> *const ThreadState {
     ptr
 }
 
+/// Tears down this thread's runtime now, from the caller's own stack.
+///
+/// Returns `false` if there was nothing installed to tear down.
+pub(crate) fn shutdown_current_thread() -> bool {
+    let installed = try_with_installed_thread(|state| {
+        if let Some(state) = state {
+            assert!(
+                !state.in_event_loop.get(),
+                "runite: cannot shut the runtime down from within a task or \
+                 callback running on it; call `shutdown` after `run` returns",
+            );
+            assert!(
+                !state.tearing_down.get(),
+                "runite: the runtime is already tearing down",
+            );
+            true
+        } else {
+            false
+        }
+    });
+    if !installed {
+        return false;
+    }
+    let _ = teardown_owned_thread(true);
+    true
+}
+
 fn teardown_owned_thread(final_exit: bool) -> Result<(), ThreadTeardownError> {
     let state = THREAD_OWNER.try_with(ThreadOwner::take).ok().flatten();
     if let Some(state) = state {
@@ -978,6 +1086,15 @@ fn finalize_thread(state: Rc<ThreadState>, final_exit: bool) -> Result<(), Threa
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut pointer_reset = CurrentPointerReset { armed: true };
+        // Before anything is torn down: hooks exist to observe a live runtime
+        // one last time, and running them after the tasks are cancelled would
+        // hand them a runtime that can no longer do anything.
+        let hooks = std::mem::take(&mut *state.shutdown_hooks.borrow_mut());
+        for hook in hooks {
+            if run_shutdown_hook(hook) {
+                teardown_failed.set(true);
+            }
+        }
         cancel_all_registered_tasks(&state);
         if state.teardown_panicked.get() {
             teardown_failed.set(true);
@@ -1136,6 +1253,25 @@ fn mark_closed_last_resort(state: Rc<ThreadState>) {
     // threads still publish `closed` so external handles fail safely, but the
     // remaining state is deliberately leaked.
     let _ = Rc::into_raw(state);
+}
+
+/// Runs one shutdown hook, isolating a panic the way task panics are isolated.
+///
+/// A hook that panics must not abort teardown: the remaining hooks still have
+/// resources to release, and a half-torn-down runtime is worse than a reported
+/// panic.
+fn run_shutdown_hook(hook: Box<dyn FnOnce()>) -> bool {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
+        tracing::error!(
+            target: trace_targets::RUNTIME,
+            event = "shutdown_hook_panicked",
+            panic = describe_panic(&*payload),
+            "a runtime shutdown hook panicked; isolating panic and continuing teardown",
+        );
+        true
+    } else {
+        false
+    }
 }
 
 fn drop_user_value<T>(value: T, kind: &'static str) -> bool {

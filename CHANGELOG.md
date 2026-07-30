@@ -134,19 +134,81 @@ changes.
 
   `on_chunk` runs for each read as it completes, so delivery-before-parking is
   structural rather than advisory, and returning `ControlFlow::Break` ends the
-  drain. One-shot readiness is deliberately kept rather than replaced by an
+  drain. The returned `fd::Drain` says which of the two ended it: a consumer
+  draining a pseudoterminal keys its teardown on end of input — that is how it
+  learns the child exited — and must be able to tell that from its own byte
+  budget running out. One-shot readiness is deliberately kept rather than replaced by an
   `AsyncRead` for descriptors: a consumer sharing its thread with a frame clock
   needs the yield point that reading to completion inside a single stream call
   would take away. ([#42](https://github.com/willmtemple/runite/issues/42))
 
-- `metrics::snapshot()`, returning a `Snapshot` of `Gauges` and `Counters`.
-  Gauges are levels read at an instant — live tasks, microtask and macrotask
-  queue depths, remote queue depth, armed timers, outstanding driver
-  operations. Counters are monotonic totals — turns, task polls, task wakes,
-  microtasks and macrotasks run, remote tasks rejected — whose useful quantity
-  is the difference between two snapshots.
+- `close_descriptor` on `File`, `TcpStream`, `TcpListener`, `UdpSocket`,
+  `UnixStream`, `UnixListener` and `UnixDatagram`, returning
+  `io::Result<io::CloseOutcome>` where the outcome is `Closed` or `StillShared`.
 
-  They are two types rather than one flat struct on purpose: a flat struct
+  The point is ordering, not error reporting. On Linux the close goes through
+  the ring as `IORING_OP_CLOSE`, sequenced behind operations already submitted
+  against the same descriptor; a `close(2)` from `Drop` is not, and while the
+  kernel keeps the underlying file alive until those finish, it frees the
+  descriptor *number* immediately, so a racing `open` elsewhere can be handed
+  it. macOS and Windows have no asynchronous close and gain only the outcome.
+
+  `StillShared` is not an error: a split half, a listener's `Incoming`, or an
+  in-flight operation on Windows can hold the descriptor, and nothing leaks
+  because the last holder still closes it. Following glommio, which solved the
+  same problem, the shared case sits on the `Ok` side.
+
+  Named `close_descriptor` rather than `close` because `AsyncWriteExt::close`
+  already exists and means something else — flush and close the *writer* — and
+  an inherent `close` would shadow it, giving two identical-looking calls with
+  different effects. That is the collision issue #35 spent this milestone
+  removing.
+
+  Do not use it to catch close errors: Rust's libs team declined `File::close`
+  for the standard library because `close(2)` error reporting is too unreliable
+  to build portable APIs on, and that reasoning applies here too.
+  ([#7](https://github.com/willmtemple/runite/issues/7))
+
+- `on_shutdown`, registering a closure to run when a thread's runtime is torn
+  down — before spawned tasks are cancelled and before the driver is destroyed,
+  so a hook is handed a runtime that can still do something. Deliberately keyed
+  to teardown rather than to an entry point returning: `run_until_stalled` and
+  `run_ready_tasks` return routinely, and a host driving the loop with the
+  latter returns constantly and means nothing by it. Without this, an
+  application with work to do on the way out has nowhere to put it and
+  typically reaches for `std::process::exit`, which skips every destructor in
+  the process. ([#45](https://github.com/willmtemple/runite/issues/45))
+
+- `shutdown()`, tearing this thread's runtime down on the caller's own stack:
+  hooks run, spawned tasks are cancelled, the driver is destroyed. On Windows
+  it is the only way a hook on an application-owned thread runs at all —
+  teardown at thread exit happens under the loader lock, where executing
+  arbitrary user code or closing a completion port can deadlock process
+  shutdown, so runite deliberately does neither. Worth preferring on Unix as
+  well, where TLS destructor order would otherwise decide when hooks run
+  relative to the rest of the thread's state. A no-op with no runtime
+  installed, and the thread may initialize a fresh one afterwards.
+
+- `metrics::snapshot()`, returning a `Snapshot` of `Gauges`, `Counters` and
+  `Peaks`.
+  Gauges are levels read at an instant — live tasks, ready tasks, microtask and
+  macrotask queue depths, remote queue depth, armed timers, outstanding driver
+  operations. Counters are monotonic totals — turns, task polls, task wakes,
+  coalesced wakes, microtasks and macrotasks run, operations completed, tasks
+  cancelled, microtask-bound turns, remote tasks rejected — whose useful
+  quantity is the difference between two snapshots. Peaks are the highest each
+  gauge has reached, which answers "how bad did this get" after an incident and
+  survives the level falling back to zero.
+
+  `microtask_bound_turns` counts turns whose microtask drain took longer than
+  everything else in the turn combined, which is how a consumer learns the
+  loop's time went to reactive work rather than to I/O or timers — a
+  distinction wake counts cannot make. It costs two clock reads per *turn*, not
+  per microtask, well below the driver poll that opens the same turn. Peaks are
+  sampled once per turn for the same reason, so a queue that spikes and drains
+  within a single turn can be missed.
+
+  They are three types rather than one flat struct on purpose: a flat struct
   invites subtracting a gauge or reading a counter as a level, and a consumer
   that cannot tell them apart will misreport. High-water marks are a third kind
   and will be a third type.
@@ -159,10 +221,12 @@ changes.
   harness that drives application logic without a reactor can still call it.
 
   `task_wakes` counts only wakes that actually schedule a poll; one coalescing
-  into an already-queued poll is not counted, since it caused no new work.
-  Comparing it against `task_polls` is how a spurious-wake problem surfaces. A
-  snapshot spans whatever interval the reader chooses, so it carries no
-  `TurnId`. ([#43](https://github.com/willmtemple/runite/issues/43))
+  into an already-queued poll lands in `coalesced_wakes` instead, so neither
+  number misleads and the work coalescing avoids stays visible. Comparing
+  `task_wakes` against `task_polls` is how a spurious-wake problem surfaces,
+  and `operations_completed` against the `outstanding_operations` gauge is how
+  a leaked operation does. A snapshot spans whatever interval the reader
+  chooses, so it carries no `TurnId`. ([#43](https://github.com/willmtemple/runite/issues/43))
 
 - `sync::CancellationToken`: cloneable, hierarchical cooperative cancellation
   that `!Send` tasks can await. It complements `AbortHandle` rather than

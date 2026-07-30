@@ -12,6 +12,16 @@ use crate::op::completion::completion_for_current_thread;
 use crate::op::fs::{FileType, FsOp, MetadataTarget, RawMetadata};
 use crate::sys::blocking::spawn_blocking;
 
+/// Closes an owned descriptor.
+///
+/// kqueue has no asynchronous close, so this releases the descriptor and
+/// reports success. The ordering guarantee `close` offers on Linux is not
+/// available here; the `Closed` versus `StillShared` distinction still is.
+pub(crate) async fn close(fd: crate::sys::handle::OwnedFile) -> io::Result<()> {
+    drop(fd);
+    Ok(())
+}
+
 pub async fn open(op: FsOp) -> io::Result<OwnedFd> {
     let FsOp::Open { path, options } = op else {
         unreachable!("open backend called with non-open op");

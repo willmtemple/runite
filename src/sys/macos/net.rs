@@ -24,6 +24,15 @@ type RecvFuture = Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'static>>;
 type SendFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + 'static>>;
 type ShutdownFuture = Pin<Box<dyn Future<Output = io::Result<()>> + 'static>>;
 
+/// Closes an owned socket.
+///
+/// kqueue has no asynchronous close, so this releases the descriptor and
+/// reports success.
+pub(crate) async fn close(sock: crate::sys::handle::OwnedSock) -> io::Result<()> {
+    drop(sock);
+    Ok(())
+}
+
 pub async fn resolve_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,

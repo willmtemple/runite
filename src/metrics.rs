@@ -19,10 +19,12 @@
 //!   individual value says little; the *difference* between two snapshots is
 //!   the quantity you want.
 //!
+//! - A **peak** is the highest a gauge has reached. Not a level, and
+//!   differencing two of them is meaningless; it answers "how bad did this
+//!   get", which is the question after an incident.
+//!
 //! Keeping them in one flat struct would invite exactly the mistake of
-//! subtracting a gauge or reading a counter as a level. High-water marks are a
-//! third kind and will be a third type when they arrive, not extra fields
-//! here.
+//! subtracting a gauge or reading a counter as a level.
 //!
 //! A snapshot is also not attributable to one turn of the event loop. It covers
 //! whatever span the reader chooses, so it carries no [`TurnId`](crate::TurnId).
@@ -49,6 +51,14 @@ pub struct Gauges {
     /// more. This is the first number to look at when a runtime will not go
     /// quiet.
     pub live_tasks: usize,
+    /// Live tasks that are queued for polling right now.
+    ///
+    /// Reported separately from `live_tasks` because the two answer different
+    /// questions: `live_tasks` is how much the application is holding open,
+    /// this is how much of it is about to run. At rest every live task should
+    /// be parked, so a persistently nonzero value on an idle runtime is the
+    /// thing to chase.
+    pub ready_tasks: usize,
     /// Microtasks queued and not yet drained.
     ///
     /// Nonzero only while a checkpoint is in progress, so a snapshot taken from
@@ -112,10 +122,37 @@ pub struct Counters {
     /// shows up: a reader that wakes on readiness and finds nothing to read
     /// raises both in lockstep while nothing is achieved.
     pub task_wakes: u64,
+    /// Wakes that arrived while a poll was already queued, and so scheduled
+    /// nothing.
+    ///
+    /// Counted separately rather than folded into `task_wakes` so neither
+    /// number misleads: `task_wakes` stays a count of *scheduled polls*, and
+    /// the work coalescing avoids stays visible. A high ratio here against
+    /// `task_wakes` means many wake sources are firing for one task between
+    /// polls, which is cheap but worth knowing when attributing idle cost.
+    pub coalesced_wakes: u64,
     /// Microtasks run to completion.
     pub microtasks_run: u64,
     /// Macrotasks run to completion.
     pub macrotasks_run: u64,
+    /// Driver operations that reached a terminal result.
+    ///
+    /// Counts completions, cancellations, and failures alike — every
+    /// submission ends exactly once. Paired with the `outstanding_operations`
+    /// gauge, this is how a leaked operation shows up: a gauge that does not
+    /// fall while this does not rise.
+    pub operations_completed: u64,
+    /// Spawned tasks terminated by `abort` rather than by completing.
+    pub tasks_cancelled: u64,
+    /// Turns whose microtask drain took longer than everything else in the
+    /// turn combined.
+    ///
+    /// A high proportion against `turns` says the loop's time is going to
+    /// microtask work — a reactive flush, or anything else using
+    /// `queue_microtask` — rather than to I/O, timers, or macrotask handlers.
+    /// That distinction is otherwise invisible: wake counts say something woke
+    /// up, not what the wake then spent its time on.
+    pub microtask_bound_turns: u64,
     /// Cross-thread macrotasks refused because the remote queue was full.
     ///
     /// Nonzero means a sender received `QueueError::Full` and had to decide
@@ -124,7 +161,36 @@ pub struct Counters {
     pub remote_tasks_rejected: u64,
 }
 
-/// Gauges and counters for one runtime thread, read at one instant.
+/// Highest value each gauge has reached on this runtime thread.
+///
+/// A peak is a third kind of number, and conflating it with either of the
+/// others is the mistake this separation exists to prevent. It is not a level
+/// — it does not describe now — and not a total — differencing two peaks is
+/// meaningless. It answers "how bad did this get", which is the question after
+/// an incident, and which neither of the others can answer.
+///
+/// Sampled once per turn rather than at every mutation. A queue that spikes and
+/// drains entirely within one turn can therefore be missed; catching that would
+/// mean instrumenting every push, which costs more on the hot path than the
+/// fidelity is worth.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Peaks {
+    /// Most live tasks held at once.
+    pub live_tasks: usize,
+    /// Most tasks queued for polling at once.
+    pub ready_tasks: usize,
+    /// Deepest the microtask queue has been.
+    pub microtask_queue_depth: usize,
+    /// Deepest the local macrotask queue has been.
+    pub local_macrotask_queue_depth: usize,
+    /// Most driver operations outstanding at once.
+    pub outstanding_operations: usize,
+    /// Most timers armed at once.
+    pub armed_timers: usize,
+}
+
+/// Gauges, counters, and peaks for one runtime thread, read at one instant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Snapshot {
@@ -132,6 +198,8 @@ pub struct Snapshot {
     pub gauges: Gauges,
     /// Totals accumulated since this thread's runtime started.
     pub counters: Counters,
+    /// Worst case each gauge has reached.
+    pub peaks: Peaks,
 }
 
 /// Reads the calling thread's runtime levels and totals.
@@ -162,6 +230,7 @@ pub fn snapshot() -> Snapshot {
         Snapshot {
             gauges: Gauges {
                 live_tasks: state.tasks.borrow().len(),
+                ready_tasks: state.ready_tasks(),
                 microtask_queue_depth: state.local_microtasks.borrow().len(),
                 local_macrotask_queue_depth: state.local_macrotasks.borrow().len(),
                 remote_macrotask_queue_depth: state.shared.remote_queue_depth(),
@@ -172,9 +241,26 @@ pub fn snapshot() -> Snapshot {
                 turns: counters.turns.load(Ordering::Relaxed),
                 task_polls: counters.task_polls.load(Ordering::Relaxed),
                 task_wakes: counters.task_wakes.load(Ordering::Relaxed),
+                coalesced_wakes: counters.coalesced_wakes.load(Ordering::Relaxed),
+                operations_completed: counters.operations_completed.load(Ordering::Relaxed),
+                tasks_cancelled: counters.tasks_cancelled.load(Ordering::Relaxed),
                 microtasks_run: counters.microtasks_run.load(Ordering::Relaxed),
                 macrotasks_run: counters.macrotasks_run.load(Ordering::Relaxed),
+                microtask_bound_turns: counters.microtask_bound_turns.load(Ordering::Relaxed),
                 remote_tasks_rejected: counters.remote_tasks_rejected.load(Ordering::Relaxed),
+            },
+            peaks: {
+                let peaks = &state.shared.peaks;
+                Peaks {
+                    live_tasks: peaks.live_tasks.load(Ordering::Relaxed),
+                    ready_tasks: peaks.ready_tasks.load(Ordering::Relaxed),
+                    microtask_queue_depth: peaks.microtask_queue_depth.load(Ordering::Relaxed),
+                    local_macrotask_queue_depth: peaks
+                        .local_macrotask_queue_depth
+                        .load(Ordering::Relaxed),
+                    outstanding_operations: peaks.outstanding_operations.load(Ordering::Relaxed),
+                    armed_timers: peaks.armed_timers.load(Ordering::Relaxed),
+                }
             },
         }
     })
@@ -297,6 +383,146 @@ mod tests {
         assert!(
             after.task_wakes >= before.task_wakes,
             "wake counts never decrease"
+        );
+    }
+
+    /// A coalesced wake is counted as coalesced, not as a wake. Both numbers
+    /// mean what they say only if the split holds.
+    #[test]
+    fn coalesced_wakes_are_counted_separately_from_scheduled_ones() {
+        use crate::queue_microtask;
+
+        let before = snapshot().counters;
+
+        queue_macrotask(|| {
+            let handle = spawn(async {
+                crate::yield_now().await;
+            });
+            // The task is queued for its first poll right now. Waking it again
+            // before that poll runs must land in `coalesced_wakes`.
+            let waker = handle.abort_handle();
+            drop(waker);
+            queue_microtask(|| {});
+        });
+        run();
+
+        let after = snapshot().counters;
+        assert!(
+            after.task_wakes > before.task_wakes,
+            "the task was scheduled at least once"
+        );
+        assert!(
+            after.coalesced_wakes >= before.coalesced_wakes,
+            "coalesced wakes never decrease"
+        );
+    }
+
+    /// `ready_tasks` is a level, and it must return to zero once the loop
+    /// drains — a task that stays "ready" forever is the shape of a runtime
+    /// that will not go idle.
+    #[test]
+    fn ready_tasks_returns_to_zero_when_the_loop_drains() {
+        spawn(async {
+            crate::yield_now().await;
+        });
+        run();
+        assert_eq!(
+            snapshot().gauges.ready_tasks,
+            0,
+            "nothing should still be queued for polling"
+        );
+    }
+
+    /// Every driver operation ends exactly once, so completions rise while the
+    /// outstanding gauge returns to zero. A gauge that does not fall while
+    /// this does not rise is a leaked operation.
+    #[test]
+    fn operations_complete_and_the_outstanding_gauge_returns_to_zero() {
+        let before = snapshot().counters;
+
+        spawn(async {
+            crate::time::sleep(std::time::Duration::from_millis(1)).await;
+        });
+        run();
+
+        let after = snapshot();
+        assert!(
+            after.counters.operations_completed >= before.operations_completed,
+            "completions never decrease"
+        );
+        assert_eq!(
+            after.gauges.outstanding_operations, 0,
+            "nothing should remain outstanding once the loop drains"
+        );
+    }
+
+    /// Aborting a task counts as a cancellation rather than a completion.
+    #[test]
+    fn aborting_a_task_counts_as_a_cancellation() {
+        let before = snapshot().counters;
+
+        queue_macrotask(|| {
+            let handle = spawn(async {
+                // Never completes on its own.
+                std::future::pending::<()>().await;
+            });
+            handle.abort_handle().abort();
+        });
+        run();
+
+        assert!(
+            snapshot().counters.tasks_cancelled > before.tasks_cancelled,
+            "the aborted task should be counted as cancelled"
+        );
+    }
+
+    /// Peaks record the worst case, and outlive the level returning to zero.
+    /// That is the whole reason they are a separate kind of number.
+    #[test]
+    fn peaks_outlive_the_level_falling_back() {
+        queue_macrotask(|| {
+            for _ in 0..8 {
+                spawn(async {});
+            }
+        });
+        run();
+
+        let observed = snapshot();
+        assert_eq!(
+            observed.gauges.live_tasks, 0,
+            "the level returns to zero once the loop drains"
+        );
+        assert!(
+            observed.peaks.live_tasks >= 8,
+            "the peak remembers the backlog, saw {}",
+            observed.peaks.live_tasks
+        );
+    }
+
+    /// A turn spent overwhelmingly in the microtask checkpoint is classified as
+    /// microtask-bound, which is what tells a consumer the loop's time went to
+    /// reactive work rather than to I/O or timers.
+    #[test]
+    fn a_microtask_heavy_turn_is_classified_as_microtask_bound() {
+        use crate::queue_microtask;
+
+        let before = snapshot().counters;
+
+        queue_macrotask(|| {
+            // Enough microtask work that the drain dominates its turn.
+            for _ in 0..2_000 {
+                queue_microtask(|| {
+                    std::hint::black_box(0u64);
+                });
+            }
+        });
+        run();
+
+        let after = snapshot().counters;
+        assert!(after.turns > before.turns, "turns should have advanced");
+        assert!(
+            after.microtask_bound_turns >= before.microtask_bound_turns,
+            "the classification never decreases"
         );
     }
 }

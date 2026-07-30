@@ -6,9 +6,32 @@ name: Release
 on:
   release:
     types: [published]
+  # Manual re-entry. The checksum comparison below is a safety property, not a
+  # convenience: a mismatch means crates.io holds bytes this commit cannot
+  # reproduce, and republishing over it is impossible. But the comparison is
+  # detected *after* the proc-macro crate has been uploaded, so without an
+  # override a single mismatch makes that version permanently unpublishable and
+  # only a version bump escapes. This exists so a human who has established why
+  # the bytes differ can proceed deliberately.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (v<version>)'
+        required: true
+        type: string
+      allow_checksum_mismatch:
+        description: >-
+          Continue when crates.io holds a different checksum for this version.
+          Only set this having confirmed the published artifact is correct and
+          the local difference is benign (for example a packaging-metadata
+          change). Wrong use publishes a version whose contents nobody can
+          reproduce.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -32,12 +55,12 @@ jobs:
       - name: Resolve and check out release tag
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
           fetch-depth: 1
       - name: Record immutable release commit
         id: release-ref
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           case "$RELEASE_TAG" in
@@ -77,7 +100,7 @@ jobs:
           python3 .github/scripts/release_ci_gate.py "$RELEASE_SHA"
       - name: Verify tag and lockstep crate versions
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           tag_version=${RELEASE_TAG#v}
@@ -145,14 +168,24 @@ jobs:
       - name: Detect exact published versions
         id: published
         env:
-          VERSION: ${{ github.event.release.tag_name }}
+          VERSION: ${{ github.event.release.tag_name || inputs.tag }}
+          ALLOW_CHECKSUM_MISMATCH: ${{ inputs.allow_checksum_mismatch || false }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
+          # The publish-shaped artifacts, not the workspace-packaged ones. The
+          # workspace path rewrites the embedded Cargo.lock to reference the
+          # locally packaged proc-macro so the unpacked tree can be verified
+          # before upload; `cargo publish` resolves it from the registry
+          # instead. Comparing crates.io against the workspace artifact would
+          # compare a checksum the published crate can never have, and a
+          # mismatch here is detected only after the first upload and re-raised
+          # on every rerun.
           python3 - "$version" "$GITHUB_OUTPUT" \
-            "target/xtask-release/package/package/runite-${version}.crate" \
-            "target/xtask-release/package/package/runite-proc-macros-${version}.crate" <<'PY'
+            "target/xtask-release/publish-shape/package/runite-${version}.crate" \
+            "target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate" \
+            "${ALLOW_CHECKSUM_MISMATCH:-false}" <<'PY'
           import hashlib
           import json
           import pathlib
@@ -160,7 +193,8 @@ jobs:
           import urllib.error
           import urllib.request
 
-          version, output_path, runite_artifact, macros_artifact = sys.argv[1:]
+          version, output_path, runite_artifact, macros_artifact, allow = sys.argv[1:]
+          allow_mismatch = allow == "true"
 
           def state(name, artifact):
               request = urllib.request.Request(
@@ -178,10 +212,17 @@ jobs:
                   raise SystemExit(f"{name}@{version} exists but is yanked; refusing release")
               local = hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest()
               if published["checksum"] != local:
-                  raise SystemExit(
+                  message = (
                       f"{name}@{version} exists with checksum {published['checksum']}, "
                       f"but this commit produced {local}"
                   )
+                  if not allow_mismatch:
+                      raise SystemExit(
+                          f"{message}. If the published artifact is correct and the "
+                          "difference is understood, re-run this workflow manually with "
+                          "allow_checksum_mismatch=true."
+                      )
+                  print(f"::warning::{message}; continuing because allow_checksum_mismatch is set")
               return "present"
 
           runite = state("runite", runite_artifact)
@@ -209,12 +250,13 @@ jobs:
       - name: Wait for exact proc-macro artifact
         if: steps.published.outputs.macros == 'missing'
         env:
-          VERSION: ${{ github.event.release.tag_name }}
+          VERSION: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
-          artifact="target/xtask-release/package/package/runite-proc-macros-${version}.crate"
+          # Publish-shaped, for the same reason as the detection step above.
+          artifact="target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate"
           python3 - "$version" "$artifact" <<'PY'
           import hashlib
           import json
