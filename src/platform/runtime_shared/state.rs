@@ -1210,10 +1210,24 @@ fn finalize_thread(state: Rc<ThreadState>, final_exit: bool) -> Result<(), Threa
         // Before anything is torn down: hooks exist to observe a live runtime
         // one last time, and running them after the tasks are cancelled would
         // hand them a runtime that can no longer do anything.
-        let hooks = std::mem::take(&mut *state.shutdown_hooks.borrow_mut());
-        for hook in hooks {
-            if run_shutdown_hook(hook) {
-                teardown_failed.set(true);
+        // Drained to a fixed point, not once. A hook may register another —
+        // one that shuts a subsystem down and lets that subsystem register its
+        // own cleanup is an ordinary shape — and a single `take` would leave
+        // those in a list nobody looks at again, running them silently never.
+        //
+        // A hook that registers a hook forever does stall shutdown, but so does
+        // one that simply never returns, and neither is something the runtime
+        // can distinguish from work in progress. Running everything registered
+        // is the behaviour that is explicable; stopping after one pass is not.
+        loop {
+            let hooks = std::mem::take(&mut *state.shutdown_hooks.borrow_mut());
+            if hooks.is_empty() {
+                break;
+            }
+            for hook in hooks {
+                if run_shutdown_hook(hook) {
+                    teardown_failed.set(true);
+                }
             }
         }
         cancel_all_registered_tasks(&state);

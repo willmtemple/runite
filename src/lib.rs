@@ -656,6 +656,12 @@ mod runtime_api {
     /// abort teardown: a half-torn-down runtime is worse than a reported panic.
     /// Hooks are `FnOnce` and `!Send`, and run on their own runtime thread.
     ///
+    /// **A hook may register another.** Teardown drains to a fixed point, so a
+    /// hook that shuts a subsystem down and lets that subsystem register its
+    /// own cleanup works, however deep it goes. A hook that registers a hook
+    /// unconditionally will stall shutdown — but so will one that never
+    /// returns, and neither is distinguishable from work still in progress.
+    ///
     /// # Teardown has to happen for a hook to run
     ///
     /// On Unix, a thread that simply exits tears its runtime down through a TLS

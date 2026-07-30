@@ -941,9 +941,29 @@ fn accept_sync(fd: RawFd) -> io::Result<(OwnedFd, SocketAddr)> {
         let stream = ManuallyDrop::new(unsafe {
             std::os::unix::net::UnixStream::from_raw_fd(owned.as_raw_fd())
         });
-        stream.peer_addr()?
+        match stream.peer_addr() {
+            Ok(addr) => addr,
+            // An accepted peer that reached us through `connect` never bound a
+            // path, so it has no address. Linux reports that as an unnamed
+            // address; macOS reports `EINVAL` from `getpeername` instead.
+            // Failing the accept over it would make `UnixListener::accept`
+            // unusable on macOS for every ordinary client, so an unnamed peer
+            // is reported as one on both.
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => unnamed_socket_addr()?,
+            Err(error) => return Err(error),
+        }
     };
     Ok((owned, addr))
+}
+
+/// An unnamed Unix socket address.
+///
+/// `std::os::unix::net::SocketAddr` has no public constructor, so the only way
+/// to obtain one is to ask a socket that has no address of its own. An unbound
+/// datagram socket is exactly that, and the descriptor is closed again before
+/// this returns.
+fn unnamed_socket_addr() -> io::Result<SocketAddr> {
+    std::os::unix::net::UnixDatagram::unbound()?.local_addr()
 }
 
 fn recv_from_sync(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
