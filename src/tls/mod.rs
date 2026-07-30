@@ -46,10 +46,27 @@
 //! Rustls crate features.
 //! ```
 //!
-//! Fix it in one of two ways. Either depend on `rustls` directly with a
-//! provider feature — `rustls = { version = "0.23", features = ["ring"] }` —
-//! and let rustls install it, or install one explicitly before building any
-//! configuration:
+//! Supplying one starts in the application's own `Cargo.toml`, because a
+//! feature can only be turned on from one:
+//!
+//! ```toml
+//! rustls = { version = "0.23", default-features = false, features = ["ring"] }
+//! ```
+//!
+//! `default-features = false` is load-bearing. rustls's default set enables
+//! `aws_lc_rs` — directly, and again through `prefer-post-quantum` — cargo
+//! unions features across the whole graph, and rustls refuses to auto-select
+//! when it can see both providers. Leaving the defaults on therefore *causes*
+//! the panic above, and builds AWS-LC to do it. runite already enables the
+//! rest of what those defaults would have given you (`logging`, `std`,
+//! `tls12`), so the provider is all this entry has to add. To take `aws-lc-rs`
+//! instead, name it in place of `ring`, plus `prefer-post-quantum` if you want
+//! rustls's default key exchange preference.
+//!
+//! That one feature is enough on its own: rustls installs the provider as the
+//! process default the first time a configuration is built. Install one by
+//! hand when the process chooses at runtime, or to make the choice explicit
+//! rather than a property of the dependency graph:
 //!
 //! ```no_run
 //! runite::tls::rustls::crypto::ring::default_provider()
@@ -57,9 +74,8 @@
 //!     .expect("no other provider may be installed first");
 //! ```
 //!
-//! A direct dependency is still the way to *enable* a provider — a feature can
-//! only be turned on from a `Cargo.toml` — but write the code against
-//! [`runite::tls::rustls`](rustls) so the version can never drift.
+//! Write that against [`runite::tls::rustls`](rustls) rather than your own
+//! `rustls` import, so the version can never drift.
 //!
 //! Trust anchors are the same kind of decision and are equally out of scope:
 //! `rustls-native-certs` reads the platform store, `webpki-roots` compiles a
@@ -223,11 +239,13 @@ impl TlsAcceptor {
     ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::InvalidData`] if the client fails the handshake
-    /// (an unacceptable certificate, no shared cipher suite, a malformed
-    /// record), [`io::ErrorKind::UnexpectedEof`] if the transport closes
-    /// mid-handshake — a plaintext HTTP request to a TLS port typically lands
-    /// here or on `InvalidData` — and any error the transport itself reports.
+    /// Returns [`io::ErrorKind::InvalidInput`] if the configuration cannot
+    /// start a connection at all, [`io::ErrorKind::InvalidData`] if the client
+    /// fails the handshake (an unacceptable certificate, no shared cipher
+    /// suite, a malformed record), [`io::ErrorKind::UnexpectedEof`] if the
+    /// transport closes mid-handshake — a plaintext HTTP request to a TLS port
+    /// typically lands here or on `InvalidData` — and any error the transport
+    /// itself reports.
     pub async fn accept<S>(&self, stream: S) -> io::Result<TlsStream<S>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -279,6 +297,10 @@ impl From<Arc<ServerConfig>> for TlsAcceptor {
 /// - Plaintext is handed to rustls only once the previously staged ciphertext
 ///   has been written. A write future abandoned mid-record therefore leaves no
 ///   truncated record behind, and the next writer resumes the same byte stream.
+/// - A write that accepted plaintext reports the count even if the transport
+///   then failed, because rustls has already encrypted those bytes and writing
+///   them again would duplicate them in the stream. The transport error is
+///   reported by the next write, flush, or close.
 pub struct TlsStream<S> {
     io: S,
     conn: Connection,
@@ -608,11 +630,13 @@ where
             )));
         }
 
-        // Best effort: get the record moving now. Ciphertext the transport will
-        // not take yet stays staged, and `poll_flush` is what waits for it.
-        if let Poll::Ready(Err(error)) = self.poll_send(cx) {
-            return Poll::Ready(Err(error));
-        }
+        // Best effort: get the record moving now. The count has to be reported
+        // whatever happens, because rustls has already taken those bytes and
+        // will not take them back — an error here would tell the caller nothing
+        // was written and invite a retry that puts the same plaintext on the
+        // wire twice. Ciphertext the transport will not take stays staged, and
+        // the failure resurfaces on the next write, flush, or close.
+        let _ = self.poll_send(cx);
         Poll::Ready(Ok(accepted))
     }
 }
@@ -621,6 +645,16 @@ impl<S> AsyncRead for TlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Decrypts into `buf`, driving the transport as far as it takes.
+    ///
+    /// An [`io::ErrorKind::InvalidData`] here ends the session: rustls has
+    /// rejected a record, queued a fatal alert, and will not process another
+    /// record on this connection. The stream does not latch that, because the
+    /// rustls state machine is the thing that knows it — polling for more
+    /// plaintext afterwards waits forever for input rustls can no longer take,
+    /// and writing still encrypts. Stop using the stream when this happens:
+    /// [`close`](crate::io::AsyncWriteExt::close) it to give the alert a last
+    /// chance at the peer, or drop it.
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

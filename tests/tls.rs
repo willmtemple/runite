@@ -209,6 +209,37 @@ async fn an_untrusted_certificate_fails_the_handshake() {
     server.await.expect("server task");
 }
 
+/// `connect` promises that the caller's `server_name` — not the address the
+/// transport reached — is what the certificate is checked against. The CA is
+/// trusted here, so a mismatched name is the only thing that can fail it.
+#[runite::test]
+async fn a_certificate_valid_for_another_name_fails_the_handshake() {
+    let (connector, acceptor) = configurations();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server = runite::spawn(async move {
+        // The client rejects the name and alerts, so the server handshake fails
+        // too; which error arrives depends on timing.
+        let (socket, _peer) = listener.accept().await.expect("accept");
+        let _ = acceptor.accept(socket).await;
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let name = ServerName::try_from("evil.example").expect("valid DNS name");
+    let error = connector
+        .connect(name, socket)
+        .await
+        .expect_err("the leaf certificate is only valid for localhost");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error.to_string().contains("evil.example"),
+        "the rejection must be about the name, not something else: {error}"
+    );
+
+    server.await.expect("server task");
+}
+
 /// ALPN is passed straight through to rustls; this only pins that both sides
 /// can read the result off the stream.
 #[runite::test]

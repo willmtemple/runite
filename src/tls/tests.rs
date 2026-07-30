@@ -34,6 +34,9 @@ struct Pipe {
     /// Set to make every subsequent write fail, standing in for a peer that
     /// reset the connection while it was still sending.
     write_fails: bool,
+    /// Set to make the next write fail and then recover, standing in for the
+    /// transient errors a real transport reports and a caller retries.
+    fail_next_once: Option<io::ErrorKind>,
     closed: bool,
 }
 
@@ -105,6 +108,9 @@ impl AsyncWrite for Duplex {
             .borrow_mut()
             .push((buf.as_ptr() as usize, buf.len()));
         let mut pipe = self.write_to.borrow_mut();
+        if let Some(kind) = pipe.fail_next_once.take() {
+            return Poll::Ready(Err(io::Error::new(kind, "a transient transport failure")));
+        }
         if pipe.write_fails {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -410,6 +416,85 @@ fn an_abandoned_write_accepts_no_plaintext_and_leaves_the_record_intact() {
         &received, b"firstthird",
         "the staged record must arrive once, and the abandoned write not at all"
     );
+}
+
+/// rustls takes plaintext the moment `poll_write` hands it over, and will not
+/// give it back. A transport error raised after that must therefore still
+/// report the count: telling the caller nothing was written invites the retry
+/// that a std-style write loop performs, and the same plaintext goes into the
+/// encrypted stream twice.
+#[test]
+fn a_transport_error_after_rustls_took_the_plaintext_does_not_duplicate_it() {
+    use crate::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let (mut client, mut server) = handshake();
+    client.get_ref().outbound().borrow_mut().fail_next_once = Some(io::ErrorKind::Interrupted);
+
+    // A caller that retries the identical buffer on a transient error, as
+    // `std::io::Write::write_all` does for `Interrupted`.
+    let mut cx = context();
+    let mut accepted = None;
+    for _ in 0..8 {
+        match Pin::new(&mut client).poll_write(&mut cx, b"AB") {
+            Poll::Ready(Ok(count)) => {
+                accepted = Some(count);
+                break;
+            }
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+            other => panic!("unexpected write outcome: {other:?}"),
+        }
+    }
+    assert_eq!(
+        accepted,
+        Some(2),
+        "plaintext rustls has encrypted must be reported as written"
+    );
+
+    now(client.close()).expect("the staged record and the alert still go out");
+    let mut received = Vec::new();
+    now(server.read_to_end(&mut received)).expect("server read");
+    assert_eq!(
+        received, b"AB",
+        "the hiccup must be absorbed, not answered with a second copy"
+    );
+}
+
+/// A record that fails to authenticate ends the session, and the one outcome
+/// that would be dangerous is reporting it as the end of the data: a caller
+/// treating a forged truncation as a clean close is exactly what `close_notify`
+/// exists to prevent. The error is fatal in rustls, so nothing resolves after
+/// it either — which is what [`AsyncRead::poll_read`] tells callers to stop on.
+#[test]
+fn a_record_that_fails_to_decrypt_is_an_error_and_never_becomes_an_end_of_stream() {
+    use crate::io::AsyncWriteExt as _;
+
+    let (mut client, mut server) = handshake();
+    now(server.write_all(b"hello")).expect("server write");
+    now(server.flush()).expect("server flush");
+
+    // Flip the last byte of the record on the wire: the authentication tag no
+    // longer matches, which is what a tampered or corrupted stream looks like.
+    {
+        let mut pipe = client.get_ref().read_from.borrow_mut();
+        let last = pipe.bytes.len() - 1;
+        pipe.bytes[last] ^= 0xff;
+    }
+
+    let mut cx = context();
+    let mut buf = [0u8; 5];
+    let Poll::Ready(Err(error)) = Pin::new(&mut client).poll_read(&mut cx, &mut buf) else {
+        panic!("a record that fails to decrypt must not be delivered");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+    for _ in 0..16 {
+        assert!(
+            Pin::new(&mut client)
+                .poll_read(&mut cx, &mut buf)
+                .is_pending(),
+            "a fatal error must never turn into a clean end of stream"
+        );
+    }
 }
 
 /// A peer that has stopped reading must not be able to stop us reading what it
