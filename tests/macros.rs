@@ -36,11 +36,35 @@ async fn a_configured_test_attribute_drives_real_io() {
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
 }
 
-/// The synchronous shape builds the runtime too, and the body runs on it
-/// rather than on one installed lazily underneath it.
+thread_local! {
+    /// Set by the task the synchronous configured body spawns.
+    static SYNC_BODY_TASK_RAN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Asserts from `Termination::report`, which libtest calls after the wrapper
+/// returns — the only point at which the attribute's `run()` has already
+/// happened. An assertion at the end of the body would run before it, which is
+/// why the drain was never observed.
+struct DrainedTheLoop;
+
+impl std::process::Termination for DrainedTheLoop {
+    fn report(self) -> std::process::ExitCode {
+        assert!(
+            SYNC_BODY_TASK_RAN.with(Cell::get),
+            "the attribute must drive its runtime after a synchronous body returns"
+        );
+        std::process::ExitCode::SUCCESS
+    }
+}
+
+/// The synchronous shape builds the runtime too, the body runs on it rather
+/// than on one installed lazily underneath it, and — the part that has no other
+/// coverage — the attribute drains that runtime afterwards. A `main` written
+/// this way would otherwise exit without running a single spawned task, and
+/// silently, since dropping a `JoinHandle` detaches.
 #[cfg(target_os = "linux")]
 #[runite::test(ring_entries = 8)]
-fn a_configured_sync_test_attribute_runs_on_the_runtime_it_built() {
+fn a_configured_sync_test_attribute_runs_on_the_runtime_it_built() -> DrainedTheLoop {
     let error = runite::Builder::new()
         .build()
         .expect_err("the attribute already started this thread's runtime");
@@ -49,7 +73,10 @@ fn a_configured_sync_test_attribute_runs_on_the_runtime_it_built() {
     // Drained by the attribute's `run()` after this body returns.
     runite::spawn(async {
         runite::time::sleep(Duration::from_millis(1)).await;
+        SYNC_BODY_TASK_RAN.with(|ran| ran.set(true));
     });
+
+    DrainedTheLoop
 }
 
 /// The generated `#[test]` drives the async body to completion, including real
