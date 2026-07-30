@@ -174,9 +174,12 @@ impl RemoteQueue {
 /// Identifies one runtime — one thread's event loop — for the life of the
 /// process.
 ///
-/// See [`crate::current_runtime_id`]. Opaque for the same reason
-/// [`TurnId`](crate::TurnId) is: consumers join records on equality, and a
-/// private numbering scheme stays changeable.
+/// See [`crate::current_runtime_id`]. The [`Display`](std::fmt::Display)
+/// rendering is the same text that appears in the `runtime_id` field of
+/// runite's trace events, which is what lets application records be joined
+/// against runite's; that correspondence is the promise, not the numbering
+/// behind it. Nothing else about the value is specified — do not read
+/// ordering, density, or a thread's spawn order out of it.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RuntimeId(pub(crate) u64);
 
@@ -489,6 +492,12 @@ impl ThreadShared {
                 tracing::warn!(
                     target: trace_targets::SCHEDULER,
                     event = "remote_queue_full",
+                    // Both ends, as on `queue_remote_task`: the rejection is a
+                    // property of the destination, but a collector chasing a
+                    // backlog needs to know which sender hit it.
+                    runtime_id = super::scheduler::trace_runtime_id(),
+                    turn_id = super::scheduler::trace_turn_id(),
+                    to_runtime_id = self.runtime_id.0,
                     capacity = self.remote_macrotasks.capacity,
                     "cross-thread macrotask queue is full; rejecting remote task"
                 );

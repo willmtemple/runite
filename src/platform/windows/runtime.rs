@@ -159,6 +159,11 @@ mod tests {
     }
 
     #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<WindowsRuntime>();
+    }
+
+    #[test]
     fn sequential_entry_points_keep_one_driver_identity() {
         let first = block_on(async { current_driver_id() });
         run_until_stalled();

@@ -161,4 +161,9 @@ mod tests {
     fn zero_interval_fires_once_per_turn_without_spinning() {
         test_support::zero_interval_fires_once_per_turn_without_spinning::<MacosRuntime>();
     }
+
+    #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<MacosRuntime>();
+    }
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 /// Bits of readiness reported by [`DriverBackend::poll`].
 ///
-/// Both fields are best-effort hints — the driver is allowed to wake up
+/// Every field is a best-effort hint — the driver is allowed to wake up
 /// spuriously, in which case the scheduler simply finds nothing to do and
 /// blocks again.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -16,6 +16,15 @@ pub struct ReadyEvents {
     pub timer: bool,
     /// One or more cross-thread wake notifications are pending.
     pub wake: bool,
+    /// The driver dispatched at least one I/O completion.
+    ///
+    /// Reported by the driver rather than inferred from the runtime's
+    /// `operations_completed` counter: that counter is bumped from the
+    /// blocking pool too, so a delta over a turn's wall-clock window proves
+    /// nothing about what *this* driver saw. Completions consumed inside
+    /// [`DriverBackend::wait`] have no `ReadyEvents` of their own, so every
+    /// backend holds the bit until the next `poll` reports it.
+    pub io: bool,
 }
 
 /// The per-platform surface that the shared scheduler consumes.

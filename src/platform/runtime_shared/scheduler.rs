@@ -242,6 +242,7 @@ where
             target: trace_targets::TIMER,
             event = "interval_deadline",
             runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             timer_id = id,
             deadline_ns = deadline.as_nanos() as u64,
             "interval deadline computed"
@@ -776,6 +777,7 @@ fn drain_microtasks<R: Runtime>() {
             && macrotask_waiting::<R>()
         {
             warned = true;
+            TURN.with(|turn| turn.starvation_warned.set(true));
             tracing::warn!(
                 target: trace_targets::SCHEDULER,
                 event = "microtask_starvation",
@@ -862,8 +864,13 @@ thread_local! {
 
 /// Identifies one turn of an event loop.
 ///
-/// See [`crate::current_turn`]. Deliberately opaque: consumers join records on
-/// equality, and keeping the numbering scheme private leaves it changeable.
+/// See [`crate::current_turn`]. The [`Display`](std::fmt::Display) rendering
+/// is the same text that appears in the `turn_id` field of runite's trace
+/// events, so application records can be joined against runite's; that
+/// correspondence is the promise, not the numbering behind it. Nothing else
+/// about the value is specified — in particular, the gap between two turn ids
+/// is not a count of turns, because the counter is process-wide and every
+/// runtime thread draws from it.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TurnId(u64);
 
@@ -929,8 +936,53 @@ pub(crate) fn trace_turn_id() -> Option<u64> {
 /// dormant build reaches none of the work this gates: no clock read for the
 /// driver park, no queue-depth sampling, and in particular no lock on the
 /// cross-thread queue.
+///
+/// It is a *different* callsite from the record it guards, and it carries no
+/// fields, so it answers only the target and the level. A subscriber whose
+/// interest depends on which fields a callsite declares can therefore accept
+/// the record's callsite and decline this one, in which case the sample is
+/// never taken and the record is never emitted. There is no way to ask
+/// `tracing` "would you want *that* event" without emitting it, and answering
+/// the question by building the record first is the cost this exists to
+/// avoid — so the contract is that turn records are selected by target and
+/// level (`runite::runtime` at `TRACE`), not by field predicate.
 fn turn_records_enabled() -> bool {
     tracing::enabled!(target: trace_targets::RUNTIME, tracing::Level::TRACE)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has done work that only the turn record
+    /// needs: sampling the queue depths (which locks the cross-thread queue)
+    /// and timing the driver park.
+    ///
+    /// Exists because "no record was emitted" does not establish "no work was
+    /// done", and the work is the entire cost.
+    /// [`test_support::dormant_turn_records_cost_nothing`](super::test_support::dormant_turn_records_cost_nothing)
+    /// asserts this stays at zero under a subscriber that declines TRACE, so
+    /// deleting the gate fails a test instead of silently putting a mutex lock
+    /// on every iteration of every runite loop.
+    static TURN_SAMPLES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Records that the turn machinery did something a dormant loop must not do.
+#[cfg(test)]
+fn note_turn_sample() {
+    TURN_SAMPLES.with(|samples| samples.set(samples.get() + 1));
+}
+
+#[cfg(not(test))]
+fn note_turn_sample() {}
+
+/// Samples taken on this thread since the counter was last reset.
+#[cfg(test)]
+pub(crate) fn turn_samples_taken() -> u64 {
+    TURN_SAMPLES.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_turn_samples() {
+    TURN_SAMPLES.with(|samples| samples.set(0));
 }
 
 /// What the turn in progress has done, accumulated by the sites that did it.
@@ -956,6 +1008,13 @@ struct TurnActivity {
     timer_ready: Cell<bool>,
     /// The driver reported a cross-thread wake notification.
     wake_ready: Cell<bool>,
+    /// The driver dispatched at least one I/O completion. Read from the
+    /// driver rather than from the `operations_completed` delta, which the
+    /// blocking pool also moves.
+    io_ready: Cell<bool>,
+    /// A microtask checkpoint crossed [`MICROTASK_STARVATION_THRESHOLD`] with
+    /// macrotasks waiting behind it.
+    starvation_warned: Cell<bool>,
 }
 
 impl TurnActivity {
@@ -968,6 +1027,8 @@ impl TurnActivity {
             notifications: Cell::new(0),
             timer_ready: Cell::new(false),
             wake_ready: Cell::new(false),
+            io_ready: Cell::new(false),
+            starvation_warned: Cell::new(false),
         }
     }
 
@@ -979,6 +1040,8 @@ impl TurnActivity {
         self.notifications.set(0);
         self.timer_ready.set(false);
         self.wake_ready.set(false);
+        self.io_ready.set(false);
+        self.starvation_warned.set(false);
     }
 }
 
@@ -1001,8 +1064,12 @@ const ENTRY_READY_TASKS: &str = "run_ready_tasks";
 
 /// Marks one iteration of an event loop as a turn, and reports what it did.
 ///
-/// Restores the previous turn id rather than clearing, so the mechanism does
-/// not depend on `EventLoopGuard`'s non-reentrancy assertion staying in place.
+/// The turn *id* is restored on drop rather than cleared, so a nested turn
+/// would leave the outer one correctly identified. The per-turn *activity* is
+/// a single thread-local, and a nested turn resets it: the outer record would
+/// then report only what happened after the inner one finished. That is
+/// unreachable — `EventLoopGuard` rejects re-entering a driver loop — and
+/// making it reachable means revisiting this, not just the id.
 struct TurnGuard {
     id: TurnId,
     previous: Option<TurnId>,
@@ -1049,6 +1116,8 @@ struct TurnDrained {
     notifications: u64,
     timer_ready: bool,
     wake_ready: bool,
+    io_ready: bool,
+    starvation_warned: bool,
 }
 
 impl TurnDrained {
@@ -1060,6 +1129,8 @@ impl TurnDrained {
             notifications: activity.notifications.get(),
             timer_ready: activity.timer_ready.get(),
             wake_ready: activity.wake_ready.get(),
+            io_ready: activity.io_ready.get(),
+            starvation_warned: activity.starvation_warned.get(),
         }
     }
 }
@@ -1081,6 +1152,7 @@ impl TurnGuard {
             if !turn_records_enabled() {
                 return None;
             }
+            note_turn_sample();
             let counters = &state.shared.counters;
             Some(TurnOpening {
                 parked,
@@ -1109,12 +1181,18 @@ impl TurnGuard {
     /// turn performed at its own end; that park is subtracted so `runnable_ns`
     /// is time spent on work, and is reported instead as the *next* turn's
     /// `wait_ns`.
-    fn emit(&self, opening: &TurnOpening, elapsed: Duration, microtask_drain: Duration) {
+    fn emit(&self, opening: &TurnOpening, close: TurnClose) {
+        let TurnClose {
+            elapsed,
+            microtask_drain,
+            microtask_bound,
+        } = close;
         let parked_here = PARKED.with(Cell::get).unwrap_or(Duration::ZERO);
         let drained = TURN.with(TurnDrained::of);
 
         let Some(closing) = try_with_installed_thread(|state| {
             let state = state?;
+            note_turn_sample();
             let counters = &state.shared.counters;
             Some(TurnClosing {
                 runtime_id: state.shared.runtime_id.0,
@@ -1132,29 +1210,32 @@ impl TurnGuard {
             return;
         };
 
-        let io_completions = closing
-            .operations_completed
-            .saturating_sub(opening.operations_completed);
-        let wake = wake_reason(opening.parked.is_some(), &drained, io_completions);
-
         tracing::trace!(
             target: trace_targets::RUNTIME,
             event = "turn",
             runtime_id = closing.runtime_id,
             turn_id = self.id.0,
             entry = self.entry,
-            wake,
+            wake = wake_reason(opening.parked.is_some(), &drained),
             wait_ns = opening.parked.unwrap_or(Duration::ZERO).as_nanos() as u64,
             runnable_ns = elapsed.saturating_sub(parked_here).as_nanos() as u64,
             microtask_ns = microtask_drain.as_nanos() as u64,
             microtasks = closing.microtasks_run.saturating_sub(opening.microtasks_run),
             macrotasks = closing.macrotasks_run.saturating_sub(opening.macrotasks_run),
             task_polls = closing.task_polls.saturating_sub(opening.task_polls),
-            io_completions,
+            // Cumulative-counter delta, so it counts every async operation of
+            // this runtime that reached a terminal result inside the turn's
+            // wall-clock window — including ones finished on a blocking-pool
+            // thread. `wake` deliberately does not read it.
+            operations_completed = closing
+                .operations_completed
+                .saturating_sub(opening.operations_completed),
             timers = drained.timers_dispatched,
             remote_adopted = drained.remote_adopted,
             worker_exits = drained.worker_exits,
             notifications = drained.notifications,
+            microtask_bound,
+            microtask_starvation = drained.starvation_warned,
             microtask_depth_before = opening.microtask_depth,
             microtask_depth_after = closing.microtask_depth,
             macrotask_depth_before = opening.macrotask_depth,
@@ -1166,30 +1247,46 @@ impl TurnGuard {
     }
 }
 
-/// Classifies what began a turn.
+/// What the turn looked like from [`TurnGuard::drop`], where the numbers the
+/// record needs are already computed for the runtime's own counters.
+struct TurnClose {
+    elapsed: Duration,
+    microtask_drain: Duration,
+    microtask_bound: bool,
+}
+
+/// Classifies what began a turn, from what the turn itself observed.
 ///
-/// A wake can carry more than one kind of event, so one of them has to be
-/// named. A timer expiry wins, because "which timer stops this process
-/// sleeping" is the question an idle-cost investigation actually asks; I/O
-/// beats a bare notification for the same reason, a notification usually being
-/// the delivery mechanism for something else. The per-source counts on the
-/// same record say what else the wake carried.
+/// A turn that did not park was not woken by anything: the loop went round
+/// again, which covers a turn continuing existing work, a host-driven turn,
+/// and the first turn after entering the loop. Reporting one of those as an
+/// I/O or timer wake would be a guess, and the whole point of the field is to
+/// not guess — so `queued` outranks every cause.
 ///
-/// `spurious` and `queued` are the two cases that must not be misattributed:
-/// the loop parked and the driver gave it nothing, or the loop went round
-/// again without parking at all — which covers a turn continuing existing
-/// work, a host-driven turn, and the first turn after entering the loop.
-fn wake_reason(parked: bool, drained: &TurnDrained, io_completions: u64) -> &'static str {
-    if drained.timer_ready {
+/// Given a park, the causes come from the driver's own readiness bits, never
+/// from a counter delta: `operations_completed` moves on blocking-pool threads
+/// too, so a turn whose wall-clock window merely overlapped a pool completion
+/// would otherwise be labelled an I/O wake. A wake can carry more than one
+/// kind of event, so one has to be named. A timer expiry wins, because "which
+/// timer stops this process sleeping" is the question an idle-cost
+/// investigation asks; I/O beats a bare notification for the same reason, a
+/// notification usually being the delivery mechanism for something else. The
+/// per-source counts on the same record say what else the wake carried.
+///
+/// `spurious` — parked, and the driver gave nothing — is the remaining honest
+/// answer, and exists so an unexplained wake is reported as one rather than
+/// blamed on whatever happened nearby.
+fn wake_reason(parked: bool, drained: &TurnDrained) -> &'static str {
+    if !parked {
+        "queued"
+    } else if drained.timer_ready {
         "timer"
-    } else if io_completions > 0 {
+    } else if drained.io_ready {
         "io"
     } else if drained.wake_ready {
         "notify"
-    } else if parked {
-        "spurious"
     } else {
-        "queued"
+        "spurious"
     }
 }
 
@@ -1202,16 +1299,26 @@ impl Drop for TurnGuard {
         // microtask checkpoint actually has.
         let elapsed = self.started.elapsed();
         let drained = TURN.with(|activity| activity.microtask_drain.get());
+        // The same predicate that bumps `microtask_bound_turns`, so the record
+        // explains the counter rather than inviting a second interpretation.
+        let microtask_bound = drained * 2 > elapsed;
         try_with_installed_thread(|state| {
             if let Some(state) = state {
-                if drained * 2 > elapsed {
+                if microtask_bound {
                     RuntimeCounters::bump(&state.shared.counters.microtask_bound_turns);
                 }
                 state.observe_peaks();
             }
         });
         if let Some(opening) = self.opening.take() {
-            self.emit(&opening, elapsed, drained);
+            self.emit(
+                &opening,
+                TurnClose {
+                    elapsed,
+                    microtask_drain: drained,
+                    microtask_bound,
+                },
+            );
         }
         CURRENT_TURN.with(|current| current.set(self.previous));
     }
@@ -1227,6 +1334,7 @@ fn park_in_driver(state: &ThreadState) {
         state.driver.wait().expect("driver wait should succeed");
         return;
     }
+    note_turn_sample();
     let started = Instant::now();
     state.driver.wait().expect("driver wait should succeed");
     PARKED.with(|parked| parked.set(Some(started.elapsed())));
@@ -1305,6 +1413,9 @@ fn drain_driver_events<R: Runtime>() {
             break;
         };
 
+        if ready.io {
+            TURN.with(|turn| turn.io_ready.set(true));
+        }
         if ready.wake {
             tracing::trace!(
                 target: trace_targets::DRIVER,
@@ -1667,6 +1778,7 @@ fn drop_timer_value<T>(value: T, kind: &'static str) {
             target: trace_targets::TIMER,
             event = "timer_drop_panicked",
             runtime_id = trace_runtime_id(),
+            turn_id = trace_turn_id(),
             kind,
             panic = describe_panic(&*payload),
             "timer-owned value panicked from Drop; timer bookkeeping is already terminal",

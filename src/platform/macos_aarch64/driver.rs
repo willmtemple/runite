@@ -112,6 +112,10 @@ pub struct Driver {
     timer_deadline: Cell<Option<Duration>>,
     pending_wakes: Cell<u64>,
     pending_timers: Cell<u64>,
+    /// An I/O waiter was completed and has not yet been reported through
+    /// [`ReadyEvents::io`]. Held across the call boundary because `wait`
+    /// completes waiters with no `ReadyEvents` to report them on.
+    io_completed: Cell<bool>,
     next_fd_token: Cell<u64>,
     fd_waiters: RefCell<HashMap<FdKey, Vec<FdWaiter>>>,
     next_process_token: Cell<u64>,
@@ -168,6 +172,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
         timer_deadline: Cell::new(None),
         pending_wakes: Cell::new(0),
         pending_timers: Cell::new(0),
+        io_completed: Cell::new(false),
         next_fd_token: Cell::new(1),
         fd_waiters: RefCell::new(HashMap::new()),
         next_process_token: Cell::new(1),
@@ -229,10 +234,15 @@ impl Driver {
         if self.pending_timers.get() > 0 {
             pending.timer = true;
         }
-        if pending.wake || pending.timer {
+        // Waiters completed inside `wait` had no `ReadyEvents` to be reported
+        // on; this is where the bit they set is handed over.
+        pending.io = self.io_completed.replace(false);
+        if pending.wake || pending.timer || pending.io {
             return Ok(Some(pending));
         }
-        self.process(Some(Duration::ZERO))
+        let ready = self.process(Some(Duration::ZERO));
+        self.io_completed.set(false);
+        ready
     }
 
     /// Blocks until at least one event is available.
@@ -423,8 +433,12 @@ impl Driver {
                         Err(error) => drain_error = drain_error.or(Some(error)),
                     }
                 } else if let Some(interest) = interest_from_filter(event.filter) {
+                    ready.io = true;
+                    self.io_completed.set(true);
                     self.complete_fd_waiters(event.ident as RawFd, interest, event);
                 } else if event.filter == libc::EVFILT_PROC {
+                    ready.io = true;
+                    self.io_completed.set(true);
                     self.complete_process_waiters(event.ident as libc::pid_t, event);
                 }
             }

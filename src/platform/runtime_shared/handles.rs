@@ -484,6 +484,7 @@ impl ThreadHandle {
             // "which runtime" has two answers. The sender is `None` when the
             // posting thread has no runtime of its own.
             runtime_id = super::scheduler::trace_runtime_id(),
+            turn_id = super::scheduler::trace_turn_id(),
             to_runtime_id = self.shared.runtime_id.0,
             queue = "remote_macro",
             queued = result.is_ok(),

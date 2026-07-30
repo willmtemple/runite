@@ -144,8 +144,10 @@ identifiers do not collide between runtime threads. Being globally unique matter
 dense: a consumer merging several threads into one profile joins on equality, and a per-thread
 counter would force it to carry a thread identity alongside. All four entry points (`run`,
 `block_on`, `run_until_stalled`, `run_ready_tasks`) drive turns, since a host embedding the runtime
-through the latter two needs the key as much as `run` does. The identifier is deliberately opaque
-and carries nothing about what the turn did.
+through the latter two needs the key as much as `run` does. It renders as the same text that
+appears in the `turn_id` trace field — that correspondence is what makes joining possible, and is
+the only thing promised about the value. It carries nothing about what the turn did, and the gap
+between two ids is not a count of turns, since every runtime thread draws from the same counter.
 
 What the turn *did* is a separate record, emitted once per turn on `runite::runtime` at `TRACE`
 (`event = "turn"`): why the loop woke, how long it was parked in the driver, how long it then spent
@@ -154,15 +156,28 @@ the `TurnId`, because task and timer ids restart at 1 on every runtime thread an
 per-driver and wrapping — without the runtime identity, a merged timeline collapses one thread's
 `timer_id = 3` onto another's.
 
-The cost constraint is what shapes the implementation. A park belongs to the turn its wake begins,
-so `TurnGuard` carries the park duration across the turn boundary in a thread-local rather than
+The `wake` classification is derived only from what the turn itself observed, because a diagnostic
+that guesses is worse than one that abstains. A turn that never parked was not woken at all, so it
+reports `queued` no matter what else was moving; the causes for a turn that did park come from the
+driver's `ReadyEvents`, never from a counter delta. `operations_completed` in particular is bumped
+by whichever thread terminalizes the operation, including a blocking-pool thread, so reading a wake
+out of it would label turns that neither parked nor polled a driver as I/O wakes.
+
+The cost constraint is what shapes the rest. A park belongs to the turn its wake begins, so
+`TurnGuard` carries the park duration across the turn boundary in a thread-local rather than
 splitting the wait from its cause across two records. Drained counts are differences of the
 cumulative counters the runtime already maintains, so nothing new happens per task or per microtask;
 only the quantities no counter covers — timers dispatched, cross-thread tasks adopted, worker exits,
 wake notifications — are accumulated per turn, and only by the sites that did the work. Everything
 that costs something at turn boundaries (sampling queue depths, locking the cross-thread queue,
 timing the driver park) sits behind one `tracing::enabled!` check taken when the turn opens, so an
-uninstrumented loop pays a not-taken branch.
+uninstrumented loop pays that check plus the reset of the per-turn activity cells and nothing else.
+
+That last property is the one worth defending, because the cross-thread queue depth is read under
+the very mutex `enqueue_macro` contends on. Under `cfg(test)` the gated sites count themselves, and
+`dormant_turn_records_cost_nothing` asserts the count is zero for a loop that parks with no
+collector installed — so deleting the gate fails a test instead of silently putting a lock
+acquisition on every iteration of every runite loop.
 
 Why this shape exists:
 

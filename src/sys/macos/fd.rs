@@ -44,6 +44,8 @@ async fn wait_fd_readiness(fd: RawFd, interest: FdInterest) -> io::Result<()> {
                             tracing::error!(
                                 target: crate::trace_targets::SCHEDULER,
                                 event = "fd_cancel_dropped",
+                                runtime_id = crate::platform::runtime_shared::scheduler::trace_runtime_id(),
+                                turn_id = crate::platform::runtime_shared::scheduler::trace_turn_id(),
                                 "dropping fd-readiness cancellation because the remote queue is full"
                             );
                             handle.finish(None);

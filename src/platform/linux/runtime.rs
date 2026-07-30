@@ -161,6 +161,11 @@ mod tests {
     }
 
     #[test]
+    fn dormant_turn_records_cost_nothing() {
+        test_support::dormant_turn_records_cost_nothing::<LinuxRuntime>();
+    }
+
+    #[test]
     fn pending_read_teardown_quiesces_before_retained_handle_drops() {
         let mut fds = [0; 2];
         // SAFETY: pipe2 initializes both descriptor slots on success.
