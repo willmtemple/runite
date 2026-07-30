@@ -26,8 +26,7 @@ use super::state::{
     ChildWorker, IntervalEntry, MacroTask, RuntimeCounters, RuntimeId, ThreadShared, ThreadState,
     WorkerCompletion, describe_panic, install_thread, lock_queue, thread_teardown_guard,
     try_ensure_current_thread, try_install_configured_thread, try_with_installed_thread,
-    with_current_thread,
-    with_installed_thread,
+    with_current_thread, with_installed_thread,
 };
 use super::timer::{TimerKind, TimerNode};
 use super::{IntervalCallback, LocalTask, MICROTASK_STARVATION_THRESHOLD};

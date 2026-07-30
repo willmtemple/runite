@@ -1,3 +1,6 @@
 target/
 runite.worktrees/
 __pycache__/
+
+# Scratch worktrees created for parallel agent runs.
+.claude/worktrees/
