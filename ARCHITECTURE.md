@@ -791,6 +791,12 @@ the same record. In the other direction, ciphertext read from the transport is
 held until rustls has taken every byte, because rustls's deframer consumes only
 what it can use.
 
+There is no third buffer for plaintext. Reads copy straight out of rustls's own
+receive buffer into the caller's, including hyper's cursor — which cannot be
+reached through `AsyncRead` at all, since it exposes uninitialized memory. The
+alternative, a scratch buffer between them, would have to be sized for a TLS
+record and would be paid for on every read poll of every connection.
+
 `poll_close` is not a transport shutdown. It sends `close_notify` and waits for
 the transport to accept it before closing the transport's write direction, which
 is what lets the peer distinguish the end of a message from a truncation;

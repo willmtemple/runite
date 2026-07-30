@@ -14,13 +14,29 @@
 //! `TlsStream` implements hyper's transport traits, so `hyper` speaks HTTPS
 //! over it.
 //!
+//! # `rustls` is part of this API
+//!
+//! The types here are rustls's own: [`TlsConnector::new`] takes an
+//! `Arc<ClientConfig>`, [`TlsStream::connection`] hands back a `&Connection`.
+//! Those types are only nameable through the exact `rustls` build runite links
+//! against, so runite re-exports it as [`runite::tls::rustls`](rustls). Reach
+//! for that path rather than a second `rustls` dependency of your own: two
+//! semver-incompatible copies in one graph produce an `expected ClientConfig,
+//! found ClientConfig` error with nothing in it to explain itself.
+//!
+//! The consequence runs the other way too. A `rustls` 0.24 is a breaking change
+//! for runite, because it changes types this module's signatures are written
+//! in; runite will take it in a major release of its own, not a patch.
+//!
 //! # You must choose a cryptographic provider
 //!
 //! runite depends on `rustls` with **no provider feature enabled**. Which
 //! implementation performs the cryptography — `aws-lc-rs` (rustls's own
-//! default, needing a C toolchain) or `ring` — is an application decision with
-//! real build, licensing, and certification consequences, so runite does not
-//! make it for you.
+//! default) or `ring` — is an application decision with real build, licensing,
+//! and certification consequences, so runite does not make it for you. Neither
+//! is the "no C toolchain" option: both compile C in a build script. The
+//! difference is how much of one — `ring` needs a C compiler (`cc`), while
+//! `aws-lc-rs` builds AWS-LC through `aws-lc-sys`, which wants CMake as well.
 //!
 //! The consequence is that the application must supply one. If it does not,
 //! building a `ClientConfig` or `ServerConfig` panics with:
@@ -36,10 +52,14 @@
 //! configuration:
 //!
 //! ```no_run
-//! rustls::crypto::ring::default_provider()
+//! runite::tls::rustls::crypto::ring::default_provider()
 //!     .install_default()
 //!     .expect("no other provider may be installed first");
 //! ```
+//!
+//! A direct dependency is still the way to *enable* a provider — a feature can
+//! only be turned on from a `Cargo.toml` — but write the code against
+//! [`runite::tls::rustls`](rustls) so the version can never drift.
 //!
 //! Trust anchors are the same kind of decision and are equally out of scope:
 //! `rustls-native-certs` reads the platform store, `webpki-roots` compiles a
@@ -55,9 +75,10 @@
 //!
 //! use runite::io::AsyncWriteExt;
 //! use runite::net::TcpStream;
+//! use runite::tls::rustls::ClientConfig;
 //! use runite::tls::TlsConnector;
 //!
-//! # async fn example(config: Arc<rustls::ClientConfig>) -> std::io::Result<()> {
+//! # async fn example(config: Arc<ClientConfig>) -> std::io::Result<()> {
 //! let connector = TlsConnector::new(config);
 //! let socket = TcpStream::connect("example.com:443").await?;
 //! let mut tls = connector
@@ -74,13 +95,20 @@ use core::fmt;
 use core::pin::Pin;
 use core::task::{Context, Poll, ready};
 use std::future::poll_fn;
-use std::io::{self, IoSlice, Read as _, Write as _};
+use std::io::{self, BufRead as _, IoSlice, Read as _, Write as _};
 use std::sync::Arc;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, Connection, ServerConfig, ServerConnection};
 
 use crate::io::{AsyncRead, AsyncWrite};
+
+/// The `rustls` build this module's signatures are written in.
+///
+/// Re-exported because those signatures are unusable without it: a caller who
+/// declares their own `rustls` dependency is relying on cargo to unify the two,
+/// and gets a type error that names the same type twice when it does not.
+pub use rustls;
 
 #[cfg(feature = "hyper")]
 mod hyper_impl;
@@ -495,14 +523,14 @@ where
         self.poll_send(cx)
     }
 
-    fn poll_read_plaintext(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
+    /// Drives the session until rustls's plaintext buffer can answer a read.
+    ///
+    /// `Ready(Ok(()))` means the next [`Connection::reader`] call resolves
+    /// without blocking — with plaintext, or with the end of the stream.
+    /// Separating this from taking the bytes is what lets a caller read
+    /// straight out of rustls's buffer: a borrow of the connection cannot
+    /// survive the polling loop that produced it.
+    fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Only a handshake justifies making a reader wait on the write
         // direction. Once the session is up, a peer that has stopped reading
         // must not be able to stop us reading what it already sent.
@@ -511,27 +539,41 @@ where
         }
 
         loop {
-            match self.conn.reader().read(buf) {
-                // rustls reports a clean `close_notify` as `Ok(0)` and a
-                // truncated stream as `UnexpectedEof`, which is precisely the
-                // distinction callers need; both pass through unchanged.
-                Ok(count) => return Poll::Ready(Ok(count)),
+            match self.conn.reader().fill_buf() {
+                // Plaintext, or an empty chunk for a clean `close_notify`. A
+                // truncated stream comes back as `UnexpectedEof`, which is
+                // precisely the distinction callers need, so it passes through
+                // unchanged.
+                Ok(_) => return Poll::Ready(Ok(())),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Poll::Ready(Err(error)),
             }
 
             if !ready!(self.poll_ingest(cx))? {
-                return Poll::Ready(Ok(0));
+                return Poll::Ready(Ok(()));
             }
 
             // Processing may have queued records of its own — a TLS 1.3 key
-            // update, or an alert. Offer them to the transport, but do not make
-            // a reader wait on write backpressure: they will go out with the
-            // next write or flush.
-            if let Poll::Ready(Err(error)) = self.poll_send(cx) {
-                return Poll::Ready(Err(error));
-            }
+            // update, or an alert. Offer them to the transport, but neither
+            // wait on write backpressure nor fail the read if the write
+            // direction is gone: plaintext the peer already sent may be sitting
+            // in rustls right now, and losing it to a write-side error would
+            // truncate a message that arrived intact. The records stay queued
+            // and the error resurfaces on the next write, flush, or close.
+            let _ = self.poll_send(cx);
         }
+    }
+
+    fn poll_read_plaintext(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        ready!(self.poll_fill(cx))?;
+        Poll::Ready(self.conn.reader().read(buf))
     }
 
     fn poll_write_plaintext(
@@ -669,8 +711,14 @@ where
     /// wait for the peer's own `close_notify`; read until end of stream if the
     /// application protocol requires that acknowledgement. Reads go on working
     /// afterwards, so a half-closed session is still usable in the other
-    /// direction. Calling it more than once is harmless, but writing after it
-    /// fails with [`io::ErrorKind::BrokenPipe`].
+    /// direction. Writing after it fails with
+    /// [`io::ErrorKind::BrokenPipe`].
+    ///
+    /// Calling it again is safe and is how a `close` future abandoned partway
+    /// is resumed: the alert is queued once and the retry picks up wherever the
+    /// transport stopped taking it. That includes retrying after a failure —
+    /// `close_notify` is not re-queued, but a transport that errored once will
+    /// keep reporting that error rather than silently reporting success.
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.close_notify_sent {

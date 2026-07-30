@@ -67,9 +67,11 @@ hyper = { version = "1.8", default-features = false, features = [
 ], optional = true }
 runite-proc-macros = { package = "runite-proc-macros", version = "=0.2.0", path = "./proc_macros" }
 # rustls's own defaults minus the crypto provider. Which implementation performs
-# the cryptography is the application's decision -- `aws-lc-rs` needs a C
-# toolchain, `ring` does not, and both carry licensing and certification
-# consequences a runtime has no business making. See `src/tls/mod.rs`.
+# the cryptography is the application's decision -- both `aws-lc-rs` and `ring`
+# compile C in a build script, and they differ in how much build tooling that
+# takes plus the licensing and certification consequences a runtime has no
+# business choosing. Re-exported as `runite::tls::rustls`, so a major bump here
+# is a breaking change for runite. See `src/tls/mod.rs`.
 rustls = { version = "0.23", default-features = false, features = [
   "logging",
   "std",

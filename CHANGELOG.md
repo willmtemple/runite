@@ -106,7 +106,16 @@ changes.
   about being unable to determine the process-level `CryptoProvider` when it
   builds a config; the `tls` module documentation says so and how to fix it.
   Trust anchors are left alone for the same reason: the module takes a finished
-  `ClientConfig` or `ServerConfig`.
+  `ClientConfig` or `ServerConfig`. Note that neither provider is the option
+  that avoids a C toolchain — both compile C in a build script; `ring` needs a C
+  compiler, `aws-lc-rs` also wants CMake.
+
+  **`rustls` is re-exported as `runite::tls::rustls`.** The public signatures are
+  written in rustls's types, so they cannot be used without naming the exact
+  build runite links against; use that path rather than a `rustls` dependency of
+  your own that cargo may or may not unify. The consequence is that a `rustls`
+  0.24 is a breaking change for runite, and will land in a major release rather
+  than a patch.
 
   Two details are worth knowing before use. Ciphertext is staged in a buffer the
   stream owns and re-offered to the transport as the identical slice until it is
