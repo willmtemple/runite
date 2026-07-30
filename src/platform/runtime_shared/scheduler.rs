@@ -1008,6 +1008,33 @@ pub(crate) fn reset_turn_samples() {
     TURN_SAMPLES.with(|samples| samples.set(0));
 }
 
+/// Waits until the turn-record gate answers `want` on this thread.
+///
+/// `tracing` caches each callsite's interest process-wide, and while only one
+/// dispatcher is registered it resolves that cache against whichever thread
+/// happens to reach the callsite first (tracing-core's
+/// `Dispatchers::rebuilder`). Every runite loop reaches this gate, so a test
+/// running concurrently on a thread with no subscriber can pin it to
+/// `Interest::never` for the rest of the process, and a scoped subscriber
+/// installed afterwards cannot override a cached answer. Rebuilding from a
+/// thread that does have the subscriber installed re-resolves it; the loop
+/// covers the window where another thread is registering the callsite at the
+/// same moment and would otherwise win the race afterwards.
+///
+/// Establishing the precondition, not asserting the property: the sample
+/// counter still has to reach zero on its own.
+#[cfg(test)]
+pub(crate) fn settle_turn_record_gate(want: bool) {
+    for _ in 0..64 {
+        if turn_records_enabled() == want {
+            return;
+        }
+        tracing::callsite::rebuild_interest_cache();
+        std::thread::yield_now();
+    }
+    panic!("turn-record gate would not settle to {want}");
+}
+
 /// What the turn in progress has done, accumulated by the sites that did it.
 ///
 /// Separate from [`RuntimeCounters`] because those are cumulative for the life
