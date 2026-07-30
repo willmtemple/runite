@@ -613,6 +613,14 @@ impl File {
     /// `close(2)` error reporting is too unreliable to build portable APIs on,
     /// and that reasoning applies here: use `sync_all` if durability matters.
     ///
+    /// # Cancellation
+    ///
+    /// Dropping this future does not call the close off. A submitted close
+    /// cannot be retracted, so on Linux it still runs and its outcome is
+    /// discarded; the descriptor is closed exactly once either way, and is
+    /// never left open. What a caller loses by cancelling is the report, not
+    /// the close — so there is no state to recover and nothing to retry.
+    ///
     /// # Errors
     ///
     /// Returns an error only if the close itself was submitted and failed.

@@ -23,8 +23,10 @@ changes.
   `std::os::unix::process::CommandExt::pre_exec`. This is the window in which
   a process acquires a controlling terminal (`setsid` then `TIOCSCTTY`), changes
   process group, or drops privileges. It takes `Fn` rather than `FnMut` because
-  a runite `Command` may be spawned more than once. An error from the hook
-  aborts the spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
+  a runite `Command` may be spawned more than once. Hooks compose the way std's
+  do: a second registration adds to the first rather than replacing it, every
+  hook runs in registration order, and the first to return an error aborts the
+  spawn. ([#39](https://github.com/willmtemple/runite/issues/39))
 
   Together these remove the last reason for an otherwise all-runite application
   to reach for `std::process` — a terminal multiplexer can now start a shell on
@@ -40,9 +42,15 @@ changes.
   ([#44](https://github.com/willmtemple/runite/issues/44))
 
   On Unix the process must be a direct child, since reading an exit status
-  requires being its parent; Windows has no such restriction. Adopting a
+  requires being its parent; Windows has no such restriction. Nothing at
+  adoption time can tell parentage, so a non-child adopts successfully and then
+  `wait`, `try_wait` and `kill` all fail immediately with `ECHILD` — `wait` does
+  not watch for the exit, and `kill` does not send the signal. Adopting a
   process that does not exist fails at adoption rather than producing a handle
-  whose `wait` never completes.
+  whose `wait` never completes. Adoption is not an access check: on Windows it
+  asks for terminate rights but settles for synchronize and
+  query-limited-information, so a process the caller may wait on but not
+  terminate is adoptable and `kill` is what reports `ERROR_ACCESS_DENIED`.
 
 - `Child` implements `Debug`, reporting the process id and which standard
   streams are piped. ([#31](https://github.com/willmtemple/runite/issues/31))

@@ -216,6 +216,87 @@ fn pre_exec_failure_fails_the_spawn() {
     assert_eq!(error.raw_os_error(), Some(libc::EACCES));
 }
 
+/// Appends one byte to `path` using only async-signal-safe calls, so the
+/// closure is legal between `fork` and `exec`. `path` is built in the parent;
+/// the child only reads it.
+fn append_marker(path: &std::ffi::CStr, byte: u8) -> io::Result<()> {
+    // SAFETY: `path` is a live NUL-terminated string and the mode is only read
+    // when the file is created.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is open for writing and `byte` is one readable byte.
+    let written = unsafe { libc::write(fd, std::ptr::from_ref(&byte).cast::<libc::c_void>(), 1) };
+    // SAFETY: `fd` came from the `open` above and is not used again.
+    unsafe { libc::close(fd) };
+    if written != 1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Registering a second hook does not discard the first: both run, in
+/// registration order, the way `std::os::unix::process::CommandExt` composes.
+/// A layered builder that adds a hook on top of one already there must not
+/// silently lose it.
+#[test]
+fn pre_exec_hooks_chain_in_registration_order() {
+    // `temp_dir`, not `target/`: this path is also a `sun_path` habit, and a
+    // packaged crate unpacks somewhere much deeper than the source tree.
+    let marker = std::env::temp_dir().join(format!(
+        "runite-pre-exec-chain-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after the epoch")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let path = std::ffi::CString::new(marker.as_os_str().as_encoded_bytes())
+        .expect("a temp path should not contain NUL");
+
+    let status = block_on({
+        let path = path.clone();
+        move || async move {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg("exit 0").stdout(Stdio::null());
+
+            let first = path.clone();
+            let second = path;
+            // SAFETY: `open`, `write` and `close` are async-signal-safe, and
+            // neither hook allocates nor takes a lock — the path is a `CString`
+            // built in the parent.
+            unsafe {
+                command.pre_exec(move || append_marker(&first, b'a'));
+                command.pre_exec(move || append_marker(&second, b'b'));
+            }
+
+            command
+                .spawn()
+                .expect("spawn should succeed")
+                .wait()
+                .await
+                .expect("child should exit")
+        }
+    });
+
+    let recorded = std::fs::read(&marker).unwrap_or_default();
+    let _ = std::fs::remove_file(&marker);
+    assert!(status.success(), "the child should exit cleanly");
+    assert_eq!(
+        String::from_utf8_lossy(&recorded),
+        "ab",
+        "both hooks should run, first-registered first"
+    );
+}
+
 /// The descriptor is duplicated per spawn, so one `Command` can start several
 /// children and the caller keeps its original.
 #[test]
