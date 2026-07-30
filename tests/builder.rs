@@ -111,6 +111,28 @@ fn building_after_the_thread_has_already_used_the_runtime_is_refused() {
     });
 }
 
+/// `shutdown` removes the thread's runtime, so it also removes the reason
+/// `build` had to refuse — which is the only way to re-configure a thread that
+/// has already started one.
+#[test]
+fn shutting_the_runtime_down_makes_the_thread_buildable_again() {
+    on_a_fresh_thread(|| {
+        {
+            let first = runite::Builder::new()
+                .build()
+                .expect("runtime should start");
+            assert_eq!(first.block_on(async { 1u32 }), 1);
+        }
+
+        runite::shutdown();
+
+        let second = runite::Builder::new()
+            .build()
+            .expect("shutdown released the thread, so it can be configured again");
+        assert_eq!(second.block_on(async { 2u32 }), 2);
+    });
+}
+
 #[test]
 fn a_built_runtime_drives_every_loop_entry_point() {
     on_a_fresh_thread(|| {
@@ -162,12 +184,14 @@ mod linux {
     #[test]
     fn the_largest_permitted_ring_is_not_rejected_as_invalid() {
         on_a_fresh_thread(|| {
-            if let Err(error) = runite::Builder::new().ring_entries(32_768).build() {
-                assert_ne!(
+            let built = runite::Builder::new().ring_entries(32_768).build();
+            match built {
+                Ok(runtime) => assert_eq!(runtime.block_on(async { 4u32 }), 4),
+                Err(error) => assert_ne!(
                     error.kind(),
                     ErrorKind::InvalidInput,
                     "IORING_MAX_ENTRIES is in range: {error}"
-                );
+                ),
             }
         });
     }
@@ -175,9 +199,13 @@ mod linux {
     /// The kernel would round these up or clamp them silently. A caller sizing
     /// a ring against a locked-memory budget must not be quietly given more
     /// than it asked for, so they are errors instead.
+    ///
+    /// `1` and `65_536` are powers of two on the wrong side of the accepted
+    /// range, so between them and the test above the two bounds are pinned:
+    /// moving either constant fails one of these.
     #[test]
     fn a_ring_size_the_kernel_would_adjust_is_rejected() {
-        for entries in [0, 1, 3, 100, 1000, 32_769, u32::MAX] {
+        for entries in [0, 1, 3, 100, 1000, 32_769, 65_536, u32::MAX] {
             let error = on_a_fresh_thread(move || {
                 runite::Builder::new()
                     .ring_entries(entries)

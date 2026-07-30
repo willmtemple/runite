@@ -62,6 +62,22 @@ pub trait BuilderExt {
     ///
     /// The setting is validated by `build`, not here, so it stays chainable.
     ///
+    /// # From an entry-point attribute
+    ///
+    /// [`#[runite::main]`](macro@crate::main) and
+    /// [`#[runite::test]`](macro@crate::test) start the thread's runtime before
+    /// the body runs, so a `Builder` inside one arrives too late and reports
+    /// [`AlreadyExists`](std::io::ErrorKind::AlreadyExists). Give the setting
+    /// to the attribute instead — it builds the runtime it names:
+    ///
+    /// ```
+    /// #[runite::main(ring_entries = 32)]
+    /// async fn main() {
+    ///     let contents = runite::fs::read_to_string("Cargo.toml").await.unwrap();
+    ///     assert!(contents.contains("runite"));
+    /// }
+    /// ```
+    ///
     /// # Examples
     ///
     /// ```

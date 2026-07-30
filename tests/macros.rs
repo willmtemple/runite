@@ -7,6 +7,51 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+/// The attribute installs the runtime before the body runs, which is why a
+/// `Builder` inside one is refused — and why the settings have to be reachable
+/// from the attribute itself.
+#[runite::test]
+async fn a_builder_inside_the_attribute_is_too_late() {
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+/// A configured attribute must still produce a runtime that does real work,
+/// not merely one that was accepted. The ring size itself is checked against
+/// the mapped ring by the in-crate tests, which can read it back.
+#[cfg(target_os = "linux")]
+#[runite::test(ring_entries = 8)]
+async fn a_configured_test_attribute_drives_real_io() {
+    let contents = runite::fs::read_to_string("Cargo.toml")
+        .await
+        .expect("Cargo.toml should be readable");
+    assert!(contents.contains("runite"));
+
+    // The attribute built it, so this thread is already configured.
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+/// The synchronous shape builds the runtime too, and the body runs on it
+/// rather than on one installed lazily underneath it.
+#[cfg(target_os = "linux")]
+#[runite::test(ring_entries = 8)]
+fn a_configured_sync_test_attribute_runs_on_the_runtime_it_built() {
+    let error = runite::Builder::new()
+        .build()
+        .expect_err("the attribute already started this thread's runtime");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+    // Drained by the attribute's `run()` after this body returns.
+    runite::spawn(async {
+        runite::time::sleep(Duration::from_millis(1)).await;
+    });
+}
+
 /// The generated `#[test]` drives the async body to completion, including real
 /// async I/O (a timer).
 #[runite::test]

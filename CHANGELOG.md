@@ -88,6 +88,16 @@ changes.
   rather than being rounded up or clamped in silence, because a ring sized
   against a memory budget must not quietly come back bigger.
   ([#40](https://github.com/willmtemple/runite/issues/40))
+- `#[runite::main]` and `#[runite::test]` accept the runtime's settings:
+  `#[runite::main(ring_entries = 32)]` builds the runtime it names instead of
+  the default one. Without this the attributes install a runtime before user
+  code runs, which put `ring_entries` out of reach of the crate's headline
+  entry point — the program #40 is about is one that cannot start under `perf`,
+  and it is a `#[runite::main]` program. `ring_entries` is a compile error
+  naming the platform on macOS and Windows, for the same reason it is not on
+  the portable `Builder`, and an unknown key is an error naming the key. The
+  bare attributes are unchanged.
+  ([#40](https://github.com/willmtemple/runite/issues/40))
 - `current_turn()` and `TurnId`: a stable, process-wide, monotonic key for one
   iteration of the event loop, readable from a task poll or a microtask
   callback and `None` outside a turn. A consumer with its own diagnostics

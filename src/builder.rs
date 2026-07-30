@@ -17,10 +17,10 @@ use crate::platform::runtime_shared::RuntimeConfig;
 /// Configures and starts the calling thread's runtime.
 ///
 /// Every other entry point — [`run`](crate::run), [`block_on`](crate::block_on),
-/// [`spawn`](crate::spawn), the [`#[runite::main]`](macro@crate::main)
-/// attribute — starts a default runtime on first use and panics if it cannot.
-/// A `Builder` separates those two things: [`build`](Self::build) is the one
-/// fallible step, and it hands back a [`Runtime`] proving the step succeeded.
+/// [`spawn`](crate::spawn), a bare [`#[runite::main]`](macro@crate::main) —
+/// starts a default runtime on first use and panics if it cannot. A `Builder`
+/// separates those two things: [`build`](Self::build) is the one fallible step,
+/// and it hands back a [`Runtime`] proving the step succeeded.
 ///
 /// ```
 /// let runtime = runite::Builder::new().build().expect("runtime should start");
@@ -43,6 +43,16 @@ use crate::platform::runtime_shared::RuntimeConfig;
     doc = "On Linux, `runite::os::linux::BuilderExt` sets the io_uring \
            submission-queue size; this backend has no such knob."
 )]
+///
+/// # Relationship to the entry-point attributes
+///
+/// [`#[runite::main]`](macro@crate::main) and
+/// [`#[runite::test]`](macro@crate::test) install the runtime before the
+/// annotated body runs, so a `Builder` inside one is refused with
+/// [`AlreadyExists`](io::ErrorKind::AlreadyExists). Those attributes take the
+/// same settings themselves — `#[runite::main(ring_entries = 32)]` — and a
+/// `Builder` is for a hand-written `fn main` that wants to handle a startup
+/// failure rather than panic on it.
 ///
 /// # Relationship to `try_block_on`
 ///
@@ -91,6 +101,19 @@ impl Builder {
     ///   [`QuotaExceeded`](io::ErrorKind::QuotaExceeded) when the locked-memory
     ///   budget is exhausted — commonly because a profiler in the same process
     ///   charges its sample buffers to it.
+    ///
+    /// [`shutdown`](crate::shutdown) removes the thread's runtime and with it
+    /// the reason for `AlreadyExists`, so it is the way to re-configure a
+    /// thread that has already started one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from a destructor that runs after the thread's runtime
+    /// TLS has already been released — a `thread_local!` initialized before
+    /// runite's, so destroyed after it. The thread is on its way out and
+    /// nothing can install a runtime on it. Every entry point shares this
+    /// floor, including [`block_on`](crate::block_on) and
+    /// [`try_block_on`](crate::try_block_on); it is not specific to `build`.
     ///
     /// # Examples
     ///

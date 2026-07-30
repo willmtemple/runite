@@ -185,6 +185,28 @@ mod tests {
         .expect("runtime thread should not panic");
     }
 
+    /// The entry-point attributes install the runtime before user code runs,
+    /// so a setting they do not carry is a setting no `#[runite::main]`
+    /// program can ever apply. This reads the count back out of the mapped
+    /// ring, so it proves the attribute's value reached the kernel.
+    // Arguments in the opposite order to the one the parser reads first, so
+    // this also pins that they are order-independent.
+    #[runite_proc_macros::test(ring_entries = 8, crate = "crate")]
+    async fn the_test_attribute_configures_the_ring_it_names() {
+        let read = crate::fs::read_to_string("Cargo.toml").await;
+        assert!(
+            read.expect("Cargo.toml should be readable")
+                .contains("runite")
+        );
+        assert_eq!(current_sq_entries(), 8);
+    }
+
+    /// The bare attribute must keep installing the default runtime.
+    #[runite_proc_macros::test(crate = "crate")]
+    async fn the_bare_test_attribute_leaves_the_ring_at_its_default() {
+        assert_eq!(current_sq_entries(), 256);
+    }
+
     #[test]
     fn a_worker_inherits_the_spawning_threads_ring_size() {
         std::thread::spawn(|| {

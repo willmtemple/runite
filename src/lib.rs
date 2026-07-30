@@ -108,6 +108,10 @@
 //! # }
 //! ```
 //!
+//! `build()` has to be the thread's first runtime call, so inside a
+//! `#[runite::main]` body it is already too late; the attribute takes the same
+//! settings directly, as `#[runite::main(ring_entries = 32)]`.
+//!
 //! # Where to look next
 //!
 //! - [`main`](macro@main) for executable entry points (sync or `async fn main`)
@@ -733,6 +737,9 @@ mod runtime_api {
     ///
     /// runite::shutdown();
     /// assert!(released.get());
+    ///
+    /// // The thread is free again, so the reuse promised above is checked here.
+    /// assert_eq!(runite::block_on(async { 1 + 1 }), 2);
     /// ```
     pub fn shutdown() {
         imp::shutdown();

@@ -1089,7 +1089,12 @@ pub(crate) fn shutdown_current_thread() -> bool {
     if !installed {
         return false;
     }
-    let _ = teardown_owned_thread(true);
+    // Not a final exit: the thread outlives this call and goes on running its
+    // own code, so it is left in the same phase it started in. Marking it
+    // terminated here would make the next runtime call — `block_on`,
+    // `try_block_on`, `Builder::build` — assert instead of installing a fresh
+    // runtime, which is the reuse `shutdown` documents.
+    let _ = teardown_owned_thread(false);
     true
 }
 

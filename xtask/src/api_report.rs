@@ -284,16 +284,18 @@ fn is_exempt(line: &str) -> bool {
 
 fn validate_portability(surfaces: &[ApiSurface]) -> Result<(), String> {
     // The Unix targets are held to a stricter standard than the portable
-    // intersection below: everything except an approved OS extension must
-    // match exactly, so a `#[cfg(target_os)]` that leaks a difference between
-    // Linux and macOS is caught even though both are Unix.
+    // intersection below: everything except a deliberate Unix split must match
+    // exactly, so a `#[cfg(target_os)]` that leaks a difference between Linux
+    // and macOS is caught even though both are Unix.
     let mut unix_surfaces = surfaces
         .iter()
         .filter(|surface| !surface.target.triple.contains("windows"));
     if let Some(reference) = unix_surfaces.next() {
         for surface in unix_surfaces {
             for feature_set in API_FEATURE_SETS {
-                if portable_part(reference, feature_set) != portable_part(surface, feature_set) {
+                if unix_comparable_part(reference, feature_set)
+                    != unix_comparable_part(surface, feature_set)
+                {
                     return Err(format!(
                         "{} and {} {} public surfaces differ outside genuine OS extension naming",
                         reference.target.triple,
@@ -334,20 +336,41 @@ fn validate_portability(surfaces: &[ApiSurface]) -> Result<(), String> {
     Ok(())
 }
 
-/// A target's surface with its approved OS-extension lines removed.
-fn portable_part(surface: &ApiSurface, feature_set: ApiFeatureSet) -> BTreeSet<&str> {
+/// A target's surface with only its deliberate Unix splits removed.
+///
+/// Deliberately *not* `is_platform_extension`: most of what that excuses —
+/// `os::unix`, `fd`, `net::unix`, `signal::unix` — is common to every Unix
+/// target, and leaving those lines in the comparison is what makes a
+/// `#[cfg(target_os)]` hidden inside one of them fail this check. Only the
+/// namespaces that are Linux-only by design come out.
+fn unix_comparable_part(surface: &ApiSurface, feature_set: ApiFeatureSet) -> BTreeSet<&str> {
     surface
         .api(feature_set)
         .iter()
         .map(String::as_str)
-        .filter(|line| !is_platform_extension(surface.target, line))
+        .filter(|line| !is_unix_split(surface.target, line))
         .collect()
 }
 
+/// Public API that exists on some Unix targets and not others on purpose.
+///
+/// io_uring tuning has no kqueue counterpart, so `os::linux` is the one
+/// namespace in this category. It is an OS extension, not a
+/// [`PORTABILITY_EXEMPTIONS`] entry: it is permanent, the platform is in the
+/// path the caller types, and `validate_surface` requires it on Linux while
+/// rejecting it on macOS and Windows, so widening the split fails there.
+fn is_unix_split(target: Target, line: &str) -> bool {
+    is_exempt(line)
+        || (target.triple.contains("linux")
+            && (line.contains("runite::os::linux")
+                // Like `Command::pre_exec`, `BuilderExt::ring_entries` renders
+                // as an inherent-looking method on its receiver.
+                || line.starts_with("pub fn runite::Builder::ring_entries")))
+}
+
 fn is_platform_extension(target: Target, line: &str) -> bool {
-    // Both portability checks funnel through here so they cannot disagree
-    // about what counts as approved. Exemptions are folded in for the same
-    // reason, but they are the other category: see PORTABILITY_EXEMPTIONS.
+    // An exempted item is not an OS extension, it is unfinished — but both
+    // checks have to agree on that, or one fails while the other passes.
     if is_exempt(line) {
         return true;
     }
@@ -362,18 +385,9 @@ fn is_platform_extension(target: Target, line: &str) -> bool {
             || line.starts_with("pub fn runite::fs::OpenOptions::security_qos_flags")
             || line.starts_with("pub fn runite::fs::OpenOptions::share_mode")
     } else {
-        // io_uring tuning has no kqueue or IOCP counterpart, so `os::linux` is
-        // the one extension that is approved on some Unix targets and not
-        // others. That is an OS extension, not a PORTABILITY_EXEMPTIONS entry:
-        // it is permanent, the platform is in the path the caller types, and
-        // `validate_surface` requires it on Linux while rejecting it on macOS
-        // and Windows. Here it only needs excusing from the cross-target
-        // comparison.
-        (target.triple.contains("linux")
-            && (line.contains("runite::os::linux")
-                // Like `pre_exec` below, `BuilderExt::ring_entries` also
-                // renders as an inherent-looking method on `Builder`.
-                || line.starts_with("pub fn runite::Builder::ring_entries")))
+        // The Linux-only namespaces are excused here too, so this check and
+        // the Unix-identity one above cannot disagree about what is approved.
+        is_unix_split(target, line)
             || line.contains("std::os::fd")
             || line.contains("std::os::unix")
             || line.contains("runite::fd")

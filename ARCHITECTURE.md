@@ -60,6 +60,13 @@ Lazy initialization contract:
   already has a `ThreadState` reports `ErrorKind::AlreadyExists` rather than accepting settings it
   cannot apply. The `Runtime` it returns is a `!Send` token, not an owner — dropping it leaves the
   thread's state installed, exactly as returning from `run()` does.
+- `#[runite::main]` and `#[runite::test]` (`proc_macros/src/entry.rs`) expand to `build()` when the
+  attribute carries settings, and to the lazy free functions when it does not. They install the
+  runtime before the annotated body runs, so without this the settings would be unreachable from
+  the crate's headline entry point. Because a proc macro cannot see the target, the expansion picks
+  between the configured and default builders with `cfg`, and emits `compile_error!` naming the
+  platform on the targets that lack the knob — the default builder is still emitted there so that
+  message is the only diagnostic.
 - The config is stored on `ThreadState` and read by `spawn_worker`, which passes it to the worker's
   driver and installs it on the worker thread, so it propagates down a worker tree. On Linux the
   driver also retains its ring size, because a worker's ring is minted on the parent thread and

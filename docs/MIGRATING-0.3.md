@@ -251,6 +251,26 @@ It lives on `os::linux::BuilderExt` rather than on `Builder` because kqueue and
 IOCP have no ring to size, and a portable method that did nothing on two of the
 three platforms would be worse than one you cannot call there at all.
 
+#### Configuring a `#[runite::main]` program
+
+`#[runite::main]` and `#[runite::test]` start the thread's runtime before your
+body runs, so a `Builder` *inside* one arrives too late and reports
+`AlreadyExists`. Give the settings to the attribute instead and it builds the
+runtime it names:
+
+```rust,ignore
+#[runite::main(ring_entries = 32)]
+async fn main() {
+    // ...
+}
+```
+
+`ring_entries` is Linux-only there too: on macOS or Windows the attribute is a
+compile error that names the platform, rather than a setting that quietly does
+nothing. A value the runtime rejects is a startup panic, since an entry point
+has nowhere to return an error to — use `Builder` directly when you want to
+handle it.
+
 ### A key that joins your diagnostics to the runtime's
 
 `runite::current_turn()` returns a `TurnId` for the event-loop iteration
