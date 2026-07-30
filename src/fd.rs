@@ -158,8 +158,8 @@ impl Drain {
 ///
 /// **The caller sets its own budget.** Returning
 /// [`ControlFlow::Break`](core::ops::ControlFlow::Break) stops
-/// the drain and returns `Ok(())`, so a consumer sharing its thread with a
-/// frame clock can bound how much it processes at once. Without that, a
+/// the drain and returns [`Drain::Stopped`], so a consumer sharing its thread
+/// with a frame clock can bound how much it processes at once. Without that, a
 /// descriptor producing faster than the caller consumes — `cat` of a large
 /// file into a terminal — starves everything else on the loop for as long as
 /// it takes.

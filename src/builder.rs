@@ -159,7 +159,10 @@ impl Builder {
 ///
 /// - **Dropping it shuts nothing down.** The thread keeps its runtime, and the
 ///   free functions keep working. Teardown happens when the thread exits, or
-///   when a runtime-owned worker finishes.
+///   when a runtime-owned worker finishes — except on Windows, where thread
+///   exit cannot run user code, so a thread the application owns runs no
+///   [`on_shutdown`](crate::on_shutdown) hooks, cancels no tasks, and leaks its
+///   runtime state unless it calls [`shutdown`](crate::shutdown) first.
 /// - **It is `!Send` and `!Sync`.** The runtime it refers to is this thread's,
 ///   and tasks on it never migrate. A `Runtime` moved elsewhere would name a
 ///   loop the new thread cannot drive, so the type system refuses the move:
