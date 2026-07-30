@@ -477,8 +477,8 @@ const API_PROBE: &str = r#"
 
 use core::future::Future;
 use runite::{
-    AbortHandle, IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle, WorkerHandle, WorkerJoin,
-    WorkerJoinError,
+    AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, ThreadHandle, TimeoutHandle,
+    TimerCancel, WorkerHandle, WorkerJoin, WorkerJoinError,
 };
 
 fn assert_worker_join_future<F: Future<Output = Result<(), WorkerJoinError>>>() {}
@@ -512,6 +512,27 @@ fn handle_contract(
     let setup = WorkerJoinError::SetupPanicked;
     let _ = setup.is_setup_panicked();
     let _ = setup.is_runtime_panicked();
+}
+
+// `CancelOnDrop` and `TimerCancel` are re-exported the same way the handles
+// are, so `cargo-public-api` shows only the bare names — including the `Clone`
+// supertrait that makes `into_inner` total. Pin the whole shape here.
+fn timer_guard_contract(timeout: TimeoutHandle, interval: IntervalHandle) {
+    // `H: TimerCancel` alone must imply `Clone`; naming both bounds here would
+    // pass even if the supertrait were dropped.
+    fn assert_token_is_clone<H: TimerCancel>() {
+        fn requires_clone<C: Clone>() {}
+        requires_clone::<H>();
+    }
+    assert_token_is_clone::<TimeoutHandle>();
+    assert_token_is_clone::<IntervalHandle>();
+
+    let guard: CancelOnDrop<TimeoutHandle> = timeout.cancel_on_drop();
+    let _: TimeoutHandle = guard.into_inner();
+
+    let guard: CancelOnDrop<IntervalHandle> = interval.cancel_on_drop();
+    guard.cancel_timer();
+    guard.cancel();
 }
 
 fn issue_9_traits<
@@ -660,7 +681,11 @@ fn render(surfaces: &[ApiSurface]) -> String {
          - `WorkerJoinError::{is_setup_panicked, is_runtime_panicked}`\n\
          - `JoinHandle::{abort, is_finished, abort_handle}` and \
          `AbortHandle::{abort, is_finished}`\n\
-         - `TimeoutHandle::cancel` and `IntervalHandle::cancel`\n\
+         - `TimeoutHandle::cancel` and `IntervalHandle::cancel`, plus \
+         `cancel_on_drop` on both and \
+         `CancelOnDrop::{into_inner, cancel}` reached through it\n\
+         - `TimerCancel: Clone`, which is what makes \
+         `CancelOnDrop::into_inner` total\n\
          - `Builder`/`Runtime` construction and every loop entry point on \
          them, plus `os::linux::BuilderExt` reached through a `Builder` on \
          Linux\n\
