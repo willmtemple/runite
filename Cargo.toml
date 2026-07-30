@@ -38,6 +38,13 @@ exclude = [
 
 [lints.rust]
 missing_debug_implementations = "deny"
+# `runite_opcode_injection` compiles in the RUNITE_IO_URING_DISABLE_OPCODES seam
+# (src/platform/linux/uring.rs). Only `mise run capability-matrix` sets it; a
+# `cargo build` of a dependent application never does, so a released binary has
+# no code that reads the variable. See CONTRIBUTING.md.
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(runite_opcode_injection)',
+] }
 
 [package.metadata.docs.rs]
 all-features = true

@@ -170,10 +170,84 @@ shell = "bash -c"
 run = """
 set -euo pipefail
 uname -srvo
-timeout --signal=TERM --kill-after=30s 10m \
-  python3 .github/scripts/ci_test_selector.py --contract capability-matrix -- \
-    cargo test --locked --package runite --all-features --lib \
-      capability_matrix_ -- --test-threads=1
+deadline=$((SECONDS + 1500))
+matrix_command() {
+  local remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then
+    echo 'capability matrix exceeded 25 minutes' >&2
+    return 124
+  fi
+  timeout --signal=TERM --kill-after=30s "${remaining}s" "$@"
+}
+
+# Per-test injection through the #[cfg(test)] thread-local seam. These pin
+# dispatch decisions that a whole-suite run cannot isolate: which wake
+# mechanism the driver picks, whether an old timer remove sets
+# IOSQE_CQE_SKIP_SUCCESS, which fallback each backend entry point takes.
+matrix_command python3 .github/scripts/ci_test_selector.py \
+  --contract capability-matrix -- \
+  cargo test --locked --package runite --all-features --lib \
+    capability_matrix_ -- --test-threads=1
+
+# The thread-local seam is invisible to integration tests, which link the
+# non-test build of the crate. RUNITE_IO_URING_DISABLE_OPCODES masks the probe
+# for the whole process instead, so tests/ — real sockets, real files — and the
+# doctests run against a constrained opcode set. Reading it requires
+# --cfg runite_opcode_injection, so this needs its own build and its own target
+# directory; a released build has no code that looks the variable up.
+#
+# Only the binaries that can reach a maskable opcode are worth the second run.
+# Every opcode in the profiles is a socket call (ACCEPT/CONNECT/SEND/RECV/
+# SOCKET/BIND/LISTEN/SHUTDOWN), a directory or file call (RENAMEAT/UNLINKAT/
+# MKDIRAT/FTRUNCATE), or the cross-ring wake (MSG_RING), so a binary that opens
+# no socket, touches no file, and starts no second runtime thread would run
+# identical code in both passes.
+constrained=(
+  channel close concurrency event_loop_order fd_interop fs fs_metadata
+  hyper_rt io_compat io_copy io_traits net net_extra unix_stream worker
+  write_identity
+)
+# Pure logic, pipes, ptys, signals, or compile-fail fixtures: nothing here
+# issues a maskable opcode, and several are the slowest and flakiest binaries
+# in the suite.
+opcode_independent=(
+  block_on cancellation compile_tests io_streams macros microtask_starvation
+  panic_isolation process process_adopt process_pty reentrancy signal stdio
+  test_attributes timer_lifecycle trace_queue_wait turn_id waker windows_iocp
+)
+unclassified=$(comm -23 \
+  <(basename -a -s .rs tests/*.rs | sort) \
+  <(printf '%s\\n' "${constrained[@]}" "${opcode_independent[@]}" | sort))
+if [ -n "$unclassified" ]; then
+  echo "new integration test targets are neither constrained nor exempt:" >&2
+  echo "$unclassified" >&2
+  echo "add each to constrained= or opcode_independent= in [tasks.capability-matrix]" >&2
+  exit 1
+fi
+
+targets=(--lib)
+for target in "${constrained[@]}"; do
+  targets+=(--test "$target")
+done
+
+export CARGO_TARGET_DIR=target/opcode-injection
+export RUSTFLAGS="${RUSTFLAGS:-} --cfg runite_opcode_injection"
+
+# `above-5.6` is the documented hard floor. `all-optional` additionally drops
+# the four socket opcodes a 5.6 kernel does have but that carry fallbacks
+# anyway, which is the widest constraint the runtime is designed to survive.
+#
+# Neither pass can quietly degrade into an unmasked run: a build carrying the
+# cfg panics during ring setup if the variable did not reach the process, and
+# opcode_injection_cfg_and_env_agree_and_reach_the_ring fails if the variable
+# reached a build without the cfg, or if the mask never made it into the
+# bitmap the ring actually dispatches against.
+for profile in above-5.6 all-optional; do
+  echo "== constrained opcode profile: $profile"
+  export RUNITE_IO_URING_DISABLE_OPCODES="$profile"
+  matrix_command cargo test --locked --package runite --all-features "${targets[@]}"
+  matrix_command cargo test --locked --package runite --all-features --doc
+done
 """
 
 [tasks.stress-issue-6]

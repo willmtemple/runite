@@ -213,7 +213,7 @@ Individual tasks:
 | `mise run api-report-check` | `cargo run -p xtask -- api-report --check`                    | Check target/feature API surfaces. |
 | `mise run package-verify` | `cargo run -p xtask -- release-verify`                         | Verify unpacked release artifacts. |
 | `mise run miri` / `asan` / `tsan` | Pinned-nightly focused safety suites.                  | Driver-free Miri/TSan; Linux ASan. |
-| `mise run capability-matrix` | Injected constrained-opcode production dispatch tests.       | Verify old-kernel fallbacks.       |
+| `mise run capability-matrix` | Injected constrained-opcode dispatch tests, then the io-facing tests under two masked opcode profiles. | Verify old-kernel fallbacks.  |
 | `mise run stress-issue-6` | Repeated doctest and blocking-runtime liveness tests.             | Guard the former intermittent race. |
 | `mise run ci-lint` | `actionlint .github/workflows/*.yml`                                    | Validate workflow YAML.            |
 

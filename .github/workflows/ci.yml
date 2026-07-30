@@ -245,7 +245,7 @@ jobs:
   capability-matrix:
     name: Linux constrained-opcode matrix
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install toolchain via mise
@@ -257,10 +257,23 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: capability-matrix
+          # The constrained passes need --cfg runite_opcode_injection, which is
+          # a different build; keeping it in its own target directory stops the
+          # two from evicting each other every run.
+          workspaces: |
+            . -> target
+            . -> target/opcode-injection
       # Containers share the runner's host kernel, so they cannot reliably
       # emulate an old io_uring implementation. Inject the constrained probe
-      # bitmap through the production dispatch seam, then execute the fallback
-      # paths on one known-compatible kernel.
+      # bitmap through the production dispatch seam instead: first per-test
+      # through the thread-local seam, then per-process through
+      # RUNITE_IO_URING_DISABLE_OPCODES so the integration tests and doctests
+      # reach the fallbacks too.
+      #
+      # This proves the fallback branches run and agree with the rest of the
+      # runtime; it cannot prove they are right about how a kernel that really
+      # lacks the opcode behaves. That needs a VM on a deliberately old kernel
+      # and is tracked separately — do not read this job as closing #19.
       - name: Run injected capability matrix
         run: mise run capability-matrix
 

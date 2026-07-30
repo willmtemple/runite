@@ -12,13 +12,22 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 thread_local! {
     // None = untested, Some(true) = io_uring works, Some(false) = use offload.
     // After the first successful IORING_OP_SEND, the clone in send() is skipped
     // for all subsequent calls on the same thread.
     static SEND_URING_SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
+
+    // The same question for IORING_OP_SEND paired with IORING_OP_LINK_TIMEOUT,
+    // which send_timeout submits. It needs its own cell because a rejection
+    // there is ambiguous: the kernel may lack SEND, or may have refused the
+    // linked-timeout pairing. Recording it as "SEND is missing" would push
+    // every plain send on the thread onto the readiness path too, and not
+    // recording it at all would make every send_timeout clone its payload
+    // forever on a kernel that never accepts the pair.
+    static SEND_WITH_LINK_TIMEOUT_SUPPORTED: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 use crate::op::completion::local_completion_for_current_thread;
@@ -553,10 +562,11 @@ pub async fn recv_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<Vec<u8>> {
+    let started = Instant::now();
     let mut buffer = Vec::with_capacity(len);
     let buffer_ptr = buffer.as_mut_ptr();
     let buffer_len = buffer.capacity();
-    submit_uring_with_linked_timeout::<Vec<u8>, _>(
+    match submit_uring_with_linked_timeout::<Vec<u8>, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_RECV;
             sqe.fd = fd;
@@ -571,9 +581,69 @@ pub async fn recv_timeout(
         },
     )
     .await
+    {
+        Err(error) if should_fallback_to_offload(&error) => {
+            deadline(remaining(timeout, started), recv_ready(fd, len, flags)).await
+        }
+        result => result,
+    }
 }
 
 pub async fn send_timeout(
+    fd: RawFd,
+    data: Vec<u8>,
+    flags: i32,
+    timeout: Duration,
+) -> io::Result<usize> {
+    // Capability known, either way: no clone, because there is nothing left to
+    // discover. `SEND_URING_SUPPORTED == Some(false)` settles the question on
+    // its own — a kernel without SEND cannot accept it under a linked timeout
+    // either.
+    if SEND_URING_SUPPORTED.with(Cell::get) == Some(false)
+        || SEND_WITH_LINK_TIMEOUT_SUPPORTED.with(Cell::get) == Some(false)
+    {
+        return deadline(timeout, send_ready(fd, data, flags)).await;
+    }
+    if SEND_WITH_LINK_TIMEOUT_SUPPORTED.with(Cell::get) == Some(true) {
+        return submit_send_with_deadline(fd, data, flags, timeout).await;
+    }
+
+    // Capability unknown: pay for one clone so an unsupported SEND can still
+    // honour the deadline. Both outcomes are recorded, so this costs one
+    // allocation and copy per thread rather than one per call.
+    let started = Instant::now();
+    let fallback_data = data.clone();
+    match submit_send_with_deadline(fd, data, flags, timeout).await {
+        Err(error) if should_fallback_to_offload(&error) => {
+            SEND_WITH_LINK_TIMEOUT_SUPPORTED.with(|supported| supported.set(Some(false)));
+            deadline(
+                remaining(timeout, started),
+                send_ready(fd, fallback_data, flags),
+            )
+            .await
+        }
+        result => {
+            // A deadline counts as proof alongside a successful write: the
+            // caller only sees `TimedOut` here when the linked timeout fired,
+            // which the kernel cannot do unless it took both SQEs. Without
+            // that, a socket whose peer never drains would clone on every
+            // call — which is the case write deadlines exist for.
+            let kernel_took_the_pair = result
+                .as_ref()
+                .err()
+                .is_none_or(|error| error.kind() == io::ErrorKind::TimedOut);
+            if kernel_took_the_pair {
+                SEND_WITH_LINK_TIMEOUT_SUPPORTED.with(|supported| supported.set(Some(true)));
+            }
+            if result.is_ok() {
+                SEND_URING_SUPPORTED.with(|supported| supported.set(Some(true)));
+            }
+            result
+        }
+    }
+}
+
+async fn submit_send_with_deadline(
     fd: RawFd,
     data: Vec<u8>,
     flags: i32,
@@ -604,6 +674,7 @@ pub async fn recv_from_timeout(
     flags: i32,
     timeout: Duration,
 ) -> io::Result<ReceivedDatagram> {
+    let started = Instant::now();
     let mut data = Vec::with_capacity(len);
     let mut storage = Box::new(MaybeUninit::<libc::sockaddr_storage>::zeroed());
     let mut iov = Box::new(libc::iovec {
@@ -621,7 +692,7 @@ pub async fn recv_from_timeout(
     let iov = SendIovec(iov);
     let msg = SendMsghdr(msg);
 
-    submit_uring_with_linked_timeout::<ReceivedDatagram, _>(
+    match submit_uring_with_linked_timeout::<ReceivedDatagram, _>(
         move |sqe| {
             sqe.opcode = IORING_OP_RECVMSG;
             sqe.fd = fd;
@@ -643,6 +714,12 @@ pub async fn recv_from_timeout(
         },
     )
     .await
+    {
+        Err(error) if should_fallback_to_offload(&error) => {
+            deadline(remaining(timeout, started), recv_from_ready(fd, len, flags)).await
+        }
+        result => result,
+    }
 }
 
 pub async fn send_to_timeout(
@@ -688,6 +765,7 @@ pub async fn send_to_timeout(
 }
 
 pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::Result<OwnedFd> {
+    let started = Instant::now();
     let socket = socket(NetOp::Socket {
         domain: socket_domain(addr),
         socket_type: libc::SOCK_STREAM,
@@ -698,10 +776,11 @@ pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::
 
     let fd = socket.as_raw_fd();
     let raw_addr = Box::new(RawSocketAddr::from_socket_addr(addr));
+    let fallback_addr = *raw_addr;
     let addr_ptr = raw_addr.as_ptr();
     let addr_len = raw_addr.len();
 
-    submit_uring_with_linked_timeout::<(), _>(
+    let connected = submit_uring_with_linked_timeout::<(), _>(
         move |sqe| {
             sqe.opcode = IORING_OP_CONNECT;
             sqe.fd = fd;
@@ -714,7 +793,18 @@ pub async fn connect_stream_timeout(addr: SocketAddr, timeout: Duration) -> io::
             cqe_to_timed_result(cqe).map(|_| ())
         },
     )
-    .await?;
+    .await;
+
+    match connected {
+        Err(error) if should_fallback_to_offload(&error) => {
+            deadline(
+                remaining(timeout, started),
+                connect_ready(fd, fallback_addr),
+            )
+            .await?;
+        }
+        result => result?,
+    }
 
     Ok(socket)
 }
@@ -877,6 +967,33 @@ where
     });
 
     future.await
+}
+
+/// Applies a socket deadline in the runtime's timer wheel instead of the
+/// kernel's `IORING_OP_LINK_TIMEOUT`.
+///
+/// The linked-timeout SQE only exists once the paired opcode is submitted, so
+/// a kernel that rejects the opcode leaves the deadline with nothing to attach
+/// to. Wrapping the readiness fallback the same way the kqueue backend does
+/// keeps `set_read_timeout` and friends meaning the same thing on every
+/// kernel, at the cost of a timer per call rather than a linked SQE.
+async fn deadline<T>(
+    timeout: Duration,
+    operation: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    crate::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "operation timed out"))?
+}
+
+/// What is left of `timeout` after the rejected io_uring attempt.
+///
+/// The probe bitmap rejects an unsupported opcode before submission, which
+/// costs nothing, but the kernel can also reject it per-CQE — and by then the
+/// paired `IORING_OP_LINK_TIMEOUT` has already been counting. Handing the
+/// fallback a fresh full `timeout` would let a 5s deadline take up to 10s.
+fn remaining(timeout: Duration, started: Instant) -> Duration {
+    timeout.saturating_sub(started.elapsed())
 }
 
 async fn offload<T: Send + 'static>(
@@ -1439,17 +1556,26 @@ mod tests {
         }
     }
 
-    struct SendCapabilityReset(Option<bool>);
+    struct SendCapabilityReset {
+        send: Option<bool>,
+        send_with_link_timeout: Option<bool>,
+    }
 
     impl SendCapabilityReset {
         fn install() -> Self {
-            Self(SEND_URING_SUPPORTED.with(|supported| supported.replace(None)))
+            Self {
+                send: SEND_URING_SUPPORTED.with(|supported| supported.replace(None)),
+                send_with_link_timeout: SEND_WITH_LINK_TIMEOUT_SUPPORTED
+                    .with(|supported| supported.replace(None)),
+            }
         }
     }
 
     impl Drop for SendCapabilityReset {
         fn drop(&mut self) {
-            SEND_URING_SUPPORTED.with(|supported| supported.set(self.0));
+            SEND_URING_SUPPORTED.with(|supported| supported.set(self.send));
+            SEND_WITH_LINK_TIMEOUT_SUPPORTED
+                .with(|supported| supported.set(self.send_with_link_timeout));
         }
     }
 
@@ -1771,6 +1897,100 @@ mod tests {
         run();
 
         assert!(*completed.lock().expect("result mutex poisoned"));
+    }
+
+    /// A read or write deadline is a caller-visible contract, so a kernel
+    /// without the underlying opcode has to keep honouring it. Before this was
+    /// fixed the `*_timeout` entry points had no fallback at all and surfaced
+    /// `ErrorKind::Unsupported` where their deadline-free siblings quietly
+    /// switched to the readiness path.
+    #[test]
+    fn capability_matrix_socket_deadlines_survive_missing_send_and_recv() {
+        let _send_capability = SendCapabilityReset::install();
+        let _override =
+            override_supported_ops(SupportedOps::all_except([IORING_OP_SEND, IORING_OP_RECV]));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_task = Arc::clone(&observed);
+
+        spawn(async move {
+            let listener = bind_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0), None)
+                .await
+                .expect("listener should bind");
+            let bound = local_addr(listener.as_raw_fd()).expect("listener should expose address");
+            let client = connect_stream(bound).await.expect("client should connect");
+            let server = accept(NetOp::Accept {
+                fd: listener.as_raw_fd(),
+            })
+            .await
+            .expect("listener should accept");
+
+            let timed_out = recv_timeout(
+                client.as_raw_fd(),
+                16,
+                0,
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .expect_err("an idle socket must hit the deadline");
+            observed_task
+                .lock()
+                .expect("result mutex poisoned")
+                .push(timed_out.kind());
+
+            send_timeout(
+                server.fd,
+                b"pong".to_vec(),
+                0,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("send deadline should not defeat the readiness fallback");
+            let received =
+                recv_timeout(client.as_raw_fd(), 16, 0, std::time::Duration::from_secs(5))
+                    .await
+                    .expect("recv deadline should not defeat the readiness fallback");
+            assert_eq!(&received, b"pong");
+
+            close_sync(server.fd).expect("accepted socket should close");
+        });
+        run();
+
+        assert_eq!(
+            observed.lock().expect("result mutex poisoned").as_slice(),
+            [io::ErrorKind::TimedOut]
+        );
+        // The fallback needs a copy of the payload, because the SQE may consume
+        // the original. Recording the rejection is what keeps that copy a
+        // one-off per thread instead of a per-call allocation and memcpy of the
+        // caller's whole write buffer.
+        assert_eq!(
+            SEND_WITH_LINK_TIMEOUT_SUPPORTED.with(Cell::get),
+            Some(false),
+            "a rejected linked-timeout send must be remembered"
+        );
+        assert_eq!(
+            SEND_URING_SUPPORTED.with(Cell::get),
+            None,
+            "and must not be mistaken for a kernel without IORING_OP_SEND"
+        );
+    }
+
+    /// The deadline the fallback gets is what is left of the caller's, not a
+    /// fresh copy: the linked timeout has already been running when the kernel
+    /// rejects the paired opcode per-CQE rather than at submission.
+    #[test]
+    fn a_rejected_linked_timeout_does_not_restart_the_callers_deadline() {
+        let timeout = Duration::from_secs(5);
+        let started = Instant::now() - Duration::from_secs(2);
+
+        let left = remaining(timeout, started);
+        assert!(left <= Duration::from_secs(3), "{left:?} exceeds the rest");
+        assert!(left > Duration::from_secs(2), "{left:?} is implausibly low");
+        assert_eq!(
+            remaining(timeout, Instant::now() - Duration::from_secs(9)),
+            Duration::ZERO,
+            "an already-elapsed deadline must not wrap into a long one"
+        );
     }
 
     #[test]

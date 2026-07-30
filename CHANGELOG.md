@@ -91,6 +91,24 @@ changes.
 
 ### Fixed
 
+- Socket read and write deadlines no longer fail outright when the kernel
+  lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
+  `recv_from_timeout`, and `connect_stream_timeout` submitted an
+  `IORING_OP_LINK_TIMEOUT`-paired SQE with no fallback, so where plain `recv`
+  quietly switched to the readiness path an identical call carrying a deadline
+  returned `ErrorKind::Unsupported` instead. They now fall back exactly where
+  their deadline-free siblings do, applying what is left of the deadline
+  through the runtime's timer the way the kqueue backend already did — the
+  linked timeout has already been running when the kernel rejects the opcode
+  per-CQE, so restarting the full duration would let a 5s deadline take 10s.
+  The cost is a timer per call instead of a linked SQE, and only on the
+  fallback path; `send_timeout` caches whether the kernel accepts a
+  linked-timeout-paired `IORING_OP_SEND`, so the payload clone that fallback
+  needs is paid once per thread rather than on every call. Found by masking the
+  opcode probe across the integration suite, which now runs under two
+  constrained profiles in `mise run capability-matrix`.
+  ([#19](https://github.com/willmtemple/runite/issues/19))
+
 - `Command::spawn` no longer blocks its runtime thread indefinitely when stdin
   is inherited. It waits for the process-wide stdin reader to release the
   terminal, and that wait was unbounded — an interrupt frees a reader parked in

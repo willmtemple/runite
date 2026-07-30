@@ -74,7 +74,7 @@ CONTRACTS: Final[dict[str, SelectionContract]] = {
         ),
     ),
     "capability-matrix": SelectionContract(
-        minimum=9,
+        minimum=10,
         expected=(
             "platform::linux::driver::tests::capability_matrix_eventfd_fallback_survives_worker_ring_rehome",
             "platform::linux::driver::tests::capability_matrix_eventfd_fallback_wakes_parked_runtime",
@@ -85,6 +85,7 @@ CONTRACTS: Final[dict[str, SelectionContract]] = {
             "sys::linux::net::tests::capability_matrix_bind_falls_back_without_bind_opcode",
             "sys::linux::net::tests::capability_matrix_listen_falls_back_without_listen_opcode",
             "sys::linux::net::tests::capability_matrix_missing_socket_opcodes_use_production_fallbacks",
+            "sys::linux::net::tests::capability_matrix_socket_deadlines_survive_missing_send_and_recv",
         ),
     ),
     "stress-task": SelectionContract(

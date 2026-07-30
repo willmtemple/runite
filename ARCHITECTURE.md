@@ -515,6 +515,16 @@ then allowed to preserve compatibility with kernels that support io_uring but no
 probe bitmap is available, `submit_operation` rejects unsupported `IORING_OP_*` values with
 `io::ErrorKind::Unsupported` before the SQE reaches the kernel.
 
+Hosted CI runners only ever offer recent kernels, so the bitmap is also maskable. Unit tests swap
+it per test through a `#[cfg(test)]` thread-local; integration tests and doctests, which link the
+non-test build, cannot reach that, so `RUNITE_IO_URING_DISABLE_OPCODES` subtracts opcodes from the
+probe result for the whole process instead. That variable is only read by a build compiled with
+`--cfg runite_opcode_injection`, which `mise run capability-matrix` sets and a `cargo build` never
+does — masking is a test instrument, not a supported knob, because hiding an opcode that has no
+fallback breaks the operation rather than exercising a recovery path. `mise run capability-matrix`
+uses it to run the io-facing tests against the 5.6 floor and against the widest constraint the
+runtime survives. See CONTRIBUTING.md for the full mechanism.
+
 # Platform parity matrix
 
 | Capability | Linux io_uring path | macOS path | Windows path |
@@ -548,7 +558,13 @@ Notes:
   the blocking pool, mirroring the macOS and Unix-domain-socket model (`src/sys/linux/net.rs`).
   The blocking pool is reserved for genuinely synchronous-only work (DNS resolution via
   `getaddrinfo`, `read_dir`/`getdents`). On a modern kernel the io_uring completion path always
-  wins; the readiness fallback is validated by a direct unit test that exercises it explicitly.
+  wins; the readiness fallback is validated both by direct unit tests and by running the io-facing
+  tests with those opcodes masked out. A socket operation carrying a deadline
+  (`set_read_timeout`, `set_write_timeout`, `TcpStream::connect_timeout`) normally rides an
+  `IORING_OP_LINK_TIMEOUT` paired with the main SQE; on the fallback path there is no SQE to pair
+  with, so the deadline comes from the runtime's timer instead, as it does on macOS. The fallback
+  gets what is left of the caller's deadline, not a fresh copy of it: when the kernel rejects the
+  opcode per-CQE rather than at submission, the linked timeout has already been running.
 - macOS has no io_uring equivalent. Its filesystem backend is entirely blocking-pool-based
   (`src/sys/macos/fs.rs`).
 - macOS network behavior is readiness-driven, not completion-driven; performance characteristics

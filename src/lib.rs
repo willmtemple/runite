@@ -145,8 +145,13 @@
 //! The io_uring backend recommends **Linux 6.1 or newer**. The hard floor is
 //! 5.6; newer opcodes are selected opportunistically. CI runs on GitHub-hosted
 //! Ubuntu runners (currently 6.8+) without pinning a kernel version, so the
-//! fallback paths below are exercised by opcode-capability injection tests
-//! rather than against an actual older kernel.
+//! fallback paths below are exercised by opcode-capability injection rather
+//! than against an actual older kernel: unit tests inject per test, and the
+//! integration tests and doctests run against a masked probe result. Injection
+//! shows the fallback branches work and stay consistent with the rest of the
+//! runtime; it does not substitute for running on a kernel that genuinely
+//! lacks the opcode. The masking seam is a test instrument compiled out of any
+//! build a dependent application produces; see `CONTRIBUTING.md`.
 //!
 //! Hard requirements (no fallback — the runtime will not function without them):
 //! - **5.6** — the base ring: `openat`/`read`/`write`/`fsync`/`statx`/`close`
