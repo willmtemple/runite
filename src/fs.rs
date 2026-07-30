@@ -589,8 +589,8 @@ impl<T> ReadDirObserver<T> {
 }
 
 impl File {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// Dropping a handle closes its descriptor too, and for most code that is
     /// the right thing. This exists for the case dropping cannot serve: on

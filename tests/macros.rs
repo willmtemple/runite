@@ -38,6 +38,9 @@ async fn a_configured_test_attribute_drives_real_io() {
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
 }
 
+// Both its setter and its reader are Linux-only, for the same reason as
+// `DrainedTheLoop` below.
+#[cfg(target_os = "linux")]
 thread_local! {
     /// Set by the task the synchronous configured body spawns.
     static SYNC_BODY_TASK_RAN: Cell<bool> = const { Cell::new(false) };
@@ -47,8 +50,12 @@ thread_local! {
 /// returns — the only point at which the attribute's `run()` has already
 /// happened. An assertion at the end of the body would run before it, which is
 /// why the drain was never observed.
+// Only its `ring_entries` user below exists, and that is Linux-only, so
+// elsewhere this is dead code under `-D warnings`.
+#[cfg(target_os = "linux")]
 struct DrainedTheLoop;
 
+#[cfg(target_os = "linux")]
 impl std::process::Termination for DrainedTheLoop {
     fn report(self) -> std::process::ExitCode {
         assert!(

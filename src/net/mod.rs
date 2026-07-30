@@ -409,8 +409,8 @@ impl TcpSocket {
 }
 
 impl TcpStream {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS and Windows have no asynchronous close: there the descriptor is
     /// closed synchronously and only the outcome reporting is gained.
@@ -955,8 +955,8 @@ impl std::fmt::Display for ReuniteError {
 impl std::error::Error for ReuniteError {}
 
 impl TcpListener {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS and Windows have no asynchronous close: there the descriptor is
     /// closed synchronously and only the outcome reporting is gained.
@@ -1144,8 +1144,8 @@ impl Stream for Incoming {
 }
 
 impl UdpSocket {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS and Windows have no asynchronous close: there the descriptor is
     /// closed synchronously and only the outcome reporting is gained.

@@ -171,7 +171,7 @@ fn main() -> std::io::Result<()> {
   future adapters; TCP split/reunite, listener `incoming()` streams, async
   stdin/stdout/stderr, and `BufReader`/`BufWriter`. `close_descriptor` closes a
   file or socket at a point you choose — on Linux through the ring, so the close
-  is ordered behind operations already submitted against that descriptor, which
+  is submitted through the ring rather than performed inline, which
   a `close(2)` from `Drop` is not. On Unix, `fd::read_chunks` drains a raw
   descriptor through the readiness loop `wait_readable` otherwise asks every
   caller to write.

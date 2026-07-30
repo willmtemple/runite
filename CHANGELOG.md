@@ -644,7 +644,7 @@ changes.
   same superseded contract in the same words and has been corrected with it.
 
 - The six socket `close_descriptor` methods promised, without qualification, to
-  order the close behind operations already submitted against the descriptor.
+  submit the close through the ring rather than perform it inline.
   Only Linux does that; macOS and Windows close synchronously. The caveat lived
   only in `fs::File::close_descriptor`'s body, one link away, and that method's
   own summary line was unqualified as well. All seven summaries now name Linux,

@@ -86,20 +86,27 @@ impl TokenState {
     /// which may clone the token, create a child, or cancel something else, and
     /// doing that while `wakers` or `children` is borrowed would panic. The
     /// borrows are all released before any waker runs.
+    ///
+    /// The subtree is walked with an explicit stack rather than by recursing.
+    /// Depth here is the application's, not ours: nothing stops a program from
+    /// deriving a child per layer of a deeply nested structure. Recursing once
+    /// per generation overflowed the stack at around ten thousand, which aborts
+    /// the process — not a panic a caller can catch, and reachable from safe
+    /// code through `child_token` and `cancel` alone. An explicit stack makes
+    /// the depth bounded by the heap instead.
     fn collect_cancellation(self: &Rc<Self>, wakers: &mut Vec<Waker>) {
-        if self.cancelled.replace(true) {
-            return;
-        }
-        wakers.extend(
-            std::mem::take(&mut *self.wakers.borrow_mut())
-                .into_iter()
-                .map(|(_, waker)| waker),
-        );
-        let children = std::mem::take(&mut *self.children.borrow_mut());
-        for child in children {
-            if let Some(child) = child.upgrade() {
-                child.collect_cancellation(wakers);
+        let mut pending = vec![Rc::clone(self)];
+        while let Some(state) = pending.pop() {
+            if state.cancelled.replace(true) {
+                continue;
             }
+            wakers.extend(
+                std::mem::take(&mut *state.wakers.borrow_mut())
+                    .into_iter()
+                    .map(|(_, waker)| waker),
+            );
+            let children = std::mem::take(&mut *state.children.borrow_mut());
+            pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
         }
     }
 }
@@ -512,6 +519,29 @@ mod tests {
             first.0.load(Ordering::SeqCst),
             0,
             "the waker from the earlier poll is stale and must not be used"
+        );
+    }
+
+    /// Cancelling a deep chain must not overflow the stack.
+    ///
+    /// Depth is the application's to choose — a child per layer of a nested
+    /// structure is an ordinary use — and a stack overflow aborts the process
+    /// rather than panicking, so no caller can recover from it. 20,000 is well
+    /// past where the recursive version died.
+    #[test]
+    fn cancelling_a_deep_chain_does_not_overflow_the_stack() {
+        let root = CancellationToken::new();
+        let mut chain = vec![root.clone()];
+        for _ in 0..20_000 {
+            let next = chain.last().expect("chain is never empty").child_token();
+            chain.push(next);
+        }
+
+        root.cancel();
+
+        assert!(
+            chain.last().expect("chain is never empty").is_cancelled(),
+            "cancellation must reach the deepest descendant"
         );
     }
 

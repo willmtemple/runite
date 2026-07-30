@@ -226,7 +226,8 @@ constrained=(
 # issues a maskable opcode, and several are the slowest and flakiest binaries
 # in the suite.
 opcode_independent=(
-  block_on cancellation compile_tests io_streams macros microtask_starvation
+  block_on cancellation compile_tests entry_bare_sync_runtime_timing io_streams
+  macros microtask_starvation
   panic_isolation process process_adopt process_pty reentrancy signal stdio
   test_attributes timer_lifecycle trace_queue_wait turn_id waker windows_iocp
 )

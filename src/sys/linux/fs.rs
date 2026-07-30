@@ -351,10 +351,28 @@ pub(crate) fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
     ReadDirStream::new(path)
 }
 
-/// Closes `fd` through the ring, so the close is ordered behind operations
-/// already submitted against it.
+/// Closes `fd` through the ring rather than with a synchronous `close(2)`.
 ///
-/// That ordering is the entire reason this exists. A `close(2)` from `Drop` is
+/// # What this does and does not order
+///
+/// It does **not** order the close behind operations already submitted against
+/// the descriptor. Nothing here sets `IOSQE_IO_DRAIN`, and io_uring does not
+/// otherwise promise completion order, so the close can be executed before an
+/// earlier SQE. Earlier documentation claimed that ordering; it was never
+/// implemented, and providing it would mean draining the whole ring — stalling
+/// every unrelated operation on the thread — for a guarantee nothing needs.
+///
+/// Nothing needs it because in-flight operations do not name this descriptor.
+/// `duplicate_sqe_fd` gives each submission its own duplicate, so an operation
+/// already running holds a descriptor of its own and is unaffected by this one
+/// closing. That is what makes an unordered close safe here.
+///
+/// What it does buy is that the close is a ring operation like any other, so it
+/// is awaited rather than performed inline, and its result is reported. The
+/// historical reasoning about descriptor reuse follows, and remains the reason
+/// ownership is handled the way it is below:
+///
+/// A `close(2)` from `Drop` is
 /// unordered with respect to in-flight SQEs on the same descriptor: the kernel
 /// keeps the underlying file alive until those complete, but the *descriptor
 /// number* is free for reuse immediately, so a racing `open` elsewhere can be

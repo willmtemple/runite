@@ -97,8 +97,8 @@ pub struct UnixDatagram {
 }
 
 impl UnixStream {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
@@ -500,8 +500,8 @@ impl std::fmt::Display for ReuniteError {
 impl std::error::Error for ReuniteError {}
 
 impl UnixListener {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
@@ -656,8 +656,8 @@ impl Stream for Incoming {
 }
 
 impl UnixDatagram {
-    /// Closes the descriptor, reporting the outcome and — on Linux — ordering
-    /// the close behind operations already submitted against it.
+    /// Closes the descriptor at a point you choose, reporting whether it
+    /// actually closed.
     ///
     /// macOS has no asynchronous close and gains only the outcome.
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
