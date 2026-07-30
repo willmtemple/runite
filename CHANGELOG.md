@@ -204,6 +204,12 @@ changes.
   direction, which is what lets a peer tell the end of a message from a
   truncation — a plain transport shutdown does not.
 
+  A write that reaches rustls reports its count even if the transport then
+  fails, because rustls has already encrypted those bytes and will not hand
+  them back; answering with an error would invite a retry that puts the same
+  plaintext in the stream twice. The failure arrives on the next write, flush,
+  or close.
+
 ### Fixed
 
 - Socket read and write deadlines no longer fail outright when the kernel
