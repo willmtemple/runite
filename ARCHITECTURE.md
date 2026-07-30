@@ -1,5 +1,6 @@
-*This document describes the runtime as implemented for 0.2. Forward-looking
-work is tracked in the project's GitHub issues.*
+*This document describes the runtime as it is implemented on the current
+development branch, not as any published version behaves. Forward-looking work
+is tracked in the project's GitHub issues.*
 
 # Overview
 
@@ -61,12 +62,18 @@ Lazy initialization contract:
   cannot apply. The `Runtime` it returns is a `!Send` token, not an owner — dropping it leaves the
   thread's state installed, exactly as returning from `run()` does.
 - `#[runite::main]` and `#[runite::test]` (`proc_macros/src/entry.rs`) expand to `build()` when the
-  attribute carries settings, and to the lazy free functions when it does not. They install the
-  runtime before the annotated body runs, so without this the settings would be unreachable from
-  the crate's headline entry point. Because a proc macro cannot see the target, the expansion picks
-  between the configured and default builders with `cfg`, and emits `compile_error!` naming the
-  platform on the targets that lack the knob — the default builder is still emitted there so that
-  message is the only diagnostic.
+  attribute carries settings, and to the lazy free functions when it does not. A configured
+  attribute installs the runtime before the annotated body runs, because otherwise the settings
+  would be unreachable from the crate's headline entry point. Because a proc macro cannot see the
+  target, the expansion picks between the configured and default builders with `cfg`, and emits
+  `compile_error!` naming the platform on the targets that lack the knob — the default builder is
+  still emitted there so that message is the only diagnostic.
+- The bare attributes stay lazy, so *when* the runtime appears differs by shape. A bare `async`
+  body is driven by `block_on`, which installs the runtime before polling it; a bare synchronous
+  body runs first and only then is drained by `run()`, so it is the one shape whose body executes
+  on a thread with no runtime yet. A `Builder::build()` there succeeds and the trailing `run()`
+  drives what it built. Everywhere else — either configured shape, or a bare `async` one — the
+  runtime already exists and `build()` reports `AlreadyExists`.
 - The config is stored on `ThreadState` and read by `spawn_worker`, which passes it to the worker's
   driver and installs it on the worker thread, so it propagates down a worker tree. On Linux the
   driver also retains its ring size, because a worker's ring is minted on the parent thread and
@@ -311,6 +318,28 @@ For `run`/`run_until_stalled`/`run_ready_tasks` that panic is absorbed by the pe
 (the offending task resolves to `JoinError::Panicked`); `block_on` is a direct driver, so it
 propagates to the caller.
 
+`shutdown()`:
+
+- Performs the thread's teardown on the caller's own stack instead of waiting for the thread to
+  exit: hooks registered with `on_shutdown` run, spawned tasks are cancelled, timers and queued
+  closures are dropped, and the driver is destroyed
+  (`shutdown_current_thread`/`finalize_thread`, `src/platform/runtime_shared/state.rs`).
+- Is not an entry point returning. `run_until_stalled` and `run_ready_tasks` return routinely — a
+  host driving the loop returns from one constantly and means nothing by it — so teardown is what
+  hooks are keyed to, and `shutdown` is how an application asks for it at a chosen moment.
+- Runs hooks **before** `cancel_all_registered_tasks`, because a hook exists to observe a live
+  runtime one last time; running it afterwards would hand it a runtime that can no longer do
+  anything.
+- Panics if called from inside a task or callback on the loop, or if teardown is already running.
+  On a thread with no runtime it does nothing, and after it returns the thread may install a fresh
+  runtime — including a reconfigured one through `Builder::build`, since the `AlreadyExists`
+  condition is gone.
+- Is the only way hooks run at all on an application-owned Windows thread: the TLS fallback there
+  runs under the loader lock, where executing arbitrary user code or closing a completion port can
+  deadlock process shutdown, so it publishes closure and retains the rest (see "Idle commit and
+  teardown ownership" below). Worker threads are unaffected on every platform; they tear down
+  explicitly before exiting.
+
 ## Panic isolation
 
 A panic must never tear down the event loop that observes it:
@@ -363,9 +392,12 @@ Runtime-state ownership is RAII (`THREAD_OWNER`), while `CURRENT_THREAD` is a
 scoped non-owning fast-path pointer. Unix ordinary threads finalize at TLS
 teardown. Windows TLS fallback runs under the loader lock, so it only publishes
 closure and retains unsafe-to-drop state; runtime-owned workers always use an
-explicit teardown guard outside loader lock. Teardown terminalizes tasks,
-timers, children, retry helpers, and the driver before worker completion can be
-published (`src/platform/runtime_shared/state.rs`).
+explicit teardown guard outside loader lock. Teardown runs the thread's
+`on_shutdown` hooks first, then terminalizes tasks, timers, children, retry
+helpers, and the driver before worker completion can be published
+(`src/platform/runtime_shared/state.rs`). The Windows fallback runs none of
+that, so an application-owned Windows thread must call `shutdown()` for its
+hooks to run at all.
 
 ## Worker observation
 
@@ -434,6 +466,15 @@ rejects an inherited-console spawn with `WouldBlock` while a console read is
 active because that host read cannot always be cancelled losslessly
 (`src/stdio.rs`, `src/stdio/stdin_reader.rs`).
 
+Drop is not the only cancellation mechanism the crate offers, but it is the
+only one the *backend* participates in. `sync::CancellationToken` is a
+cooperative signal between tasks: cloneable, `!Send` like the rest of `sync`,
+hierarchical through `child_token` (cancellation flows down only), and awaited
+with `cancelled()`. Nothing in the driver observes it. Where `AbortHandle`
+terminates a task at its next suspension point whether or not it is ready, a
+token is something a task chooses to poll, so work that must flush a buffer or
+release a lock before stopping can do so (`src/sync/cancellation.rs`).
+
 What Drop does not mean:
 
 - It does not guarantee the kernel or OS operation stopped.
@@ -448,8 +489,33 @@ Implication for buffer ownership:
 - The current implementation satisfies this by moving owned staging buffers into completion/cancel
   guards as described below.
 
-An explicit `CancellationToken` remains a possible future addition for
-operations that need cancellation independent of future ownership.
+## Closing a descriptor on purpose
+
+Dropping a resource closes its descriptor with a synchronous `close(2)`, which
+is unordered with respect to SQEs already submitted against it: the kernel
+keeps the underlying file alive until those complete, but frees the descriptor
+*number* immediately, so a racing `open` elsewhere can be handed it while this
+resource's operations still name it. `close_descriptor` on `File`, `TcpStream`,
+`TcpListener`, `UdpSocket`, `UnixStream`, `UnixListener` and `UnixDatagram`
+exists for that ordering. On Linux it submits `IORING_OP_CLOSE`, which the ring
+sequences behind the earlier operations; macOS and Windows have no asynchronous
+close and gain only the outcome reporting.
+
+It returns `io::Result<io::CloseOutcome>`, where `StillShared` sits on the `Ok`
+side: a split half, a listener's `Incoming`, or an in-flight Windows operation
+can still hold the descriptor, and nothing leaks because the last holder closes
+it.
+
+The `OwnedFd` is **moved into the completion callback**, exactly as staging
+buffers are, and for the same reason: this future is cancellable, and dropping
+it must not run `OwnedFd::drop` while the SQE is live — cancelling only stages
+an `ASYNC_CANCEL`, which cannot retract an SQE the kernel already has. The
+callback decides from the CQE whether `close(2)` actually ran, biased towards
+assuming it did: guessing wrong the other way closes a descriptor number that
+may already belong to something else. `IORING_OP_CLOSE` is the one opcode where
+this matters, because it is absent from `duplicate_sqe_fd`'s `uses_descriptor`
+set and so names the caller's real descriptor rather than a duplicate
+(`src/sys/linux/fs.rs`).
 
 # I/O buffer ownership rules
 
