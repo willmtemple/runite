@@ -360,10 +360,33 @@ pub(crate) fn read_dir(op: FsOp) -> io::Result<ReadDirStream> {
 /// number* is free for reuse immediately, so a racing `open` elsewhere can be
 /// handed it while this file's operations still name it.
 ///
-/// Takes the descriptor by value and forgets it once the ring has accepted the
-/// close, because the ring owns it from that point — letting `OwnedFd::drop`
-/// also run would close a descriptor number the kernel may already have
-/// reissued to someone else.
+/// # Who owns the descriptor
+///
+/// The descriptor is moved into the **completion callback**, not held by this
+/// future. That placement is the whole of the correctness argument, and it is
+/// the same rule the rest of the backend follows for kernel-visible storage:
+/// the completion callback is the sole release point.
+///
+/// Holding it here instead would be unsound, because this future is
+/// cancellable. Dropping it — `JoinHandle::abort`, a `select!` losing the race,
+/// runtime teardown — would run `OwnedFd::drop` while the `IORING_OP_CLOSE` SQE
+/// is still live. Cancelling only *stages* an `ASYNC_CANCEL`; it cannot retract
+/// an SQE the kernel already has. The two outcomes are a double close, which
+/// trips std's I/O-safety check and aborts the process, or the descriptor
+/// number being reissued to an unrelated file that the ring then closes.
+///
+/// `IORING_OP_CLOSE` is the one opcode that makes this reachable: it is absent
+/// from `duplicate_sqe_fd`'s `uses_descriptor` set, so unlike every other
+/// operation the SQE names the caller's real descriptor rather than a
+/// duplicate.
+///
+/// The driver retains the callback until a CQE arrives — including for a
+/// cancelled operation, which still completes — so the descriptor stays owned
+/// exactly as long as the kernel can name it. If submission fails the callback
+/// is dropped without running, which closes the descriptor; that is correct,
+/// because no SQE was staged in any of those paths (`shutting_down` and
+/// `validate_opcode` both return before insertion, and a failed
+/// `submit_with_token` removes the completion it just inserted).
 pub(crate) async fn close(fd: OwnedFd) -> io::Result<()> {
     let raw = fd.as_raw_fd();
     let result = submit_uring::<(), _>(
@@ -371,30 +394,48 @@ pub(crate) async fn close(fd: OwnedFd) -> io::Result<()> {
             sqe.opcode = IORING_OP_CLOSE;
             sqe.fd = raw;
         },
-        |cqe| cqe_to_result(cqe).map(|_| ()),
+        move |cqe| {
+            let outcome = cqe_to_result(cqe).map(|_| ());
+            if close_ran(&outcome) {
+                // The kernel released the descriptor. Linux frees the number
+                // even when `close(2)` reports an error, so closing again would
+                // be closing something else.
+                std::mem::forget(fd);
+            } else {
+                // The operation never executed, so the descriptor is still
+                // ours and still open.
+                drop(fd);
+            }
+            outcome
+        },
     )
     .await;
 
     match result {
-        Ok(()) => {
-            // The ring closed it; do not close it again.
-            std::mem::forget(fd);
-            Ok(())
-        }
-        Err(error) if is_unsupported_operation(&error) => {
-            // Pre-5.6 kernel, or a probe that rejects the opcode. Fall back to
-            // the synchronous close that `OwnedFd::drop` performs. The ordering
-            // guarantee is lost; correctness is not.
-            drop(fd);
-            Ok(())
-        }
-        Err(error) => {
-            // The ring never took ownership, so dropping closes it, and the
-            // error is still worth reporting.
-            drop(fd);
-            Err(error)
-        }
+        Ok(()) => Ok(()),
+        // A kernel or probe that will not run the opcode. The callback closed
+        // the descriptor synchronously, which is what `OwnedFd::drop` would
+        // have done anyway: the ordering guarantee is lost, correctness is not.
+        Err(error) if is_unsupported_operation(&error) => Ok(()),
+        Err(error) => Err(error),
     }
+}
+
+/// Whether a completed `IORING_OP_CLOSE` actually reached `close(2)`.
+///
+/// Biased towards reporting `true`, deliberately. Guessing `true` when the
+/// close did not run leaks a descriptor; guessing `false` when it did run
+/// closes a descriptor number that may already belong to something else. Only
+/// the second one is unsound, so anything not positively known to have skipped
+/// the close is treated as having performed it.
+fn close_ran(outcome: &io::Result<()>) -> bool {
+    let Err(error) = outcome else {
+        return true;
+    };
+    if is_unsupported_operation(error) {
+        return false;
+    }
+    error.raw_os_error() != Some(libc::ECANCELED)
 }
 
 async fn submit_sync(fd: RawFd, flags: u32) -> io::Result<()> {
