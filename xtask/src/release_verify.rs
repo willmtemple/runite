@@ -52,6 +52,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             "LICENSE-MIT",
             "docs/WINDOWS.md",
             "docs/MIGRATING-0.2.md",
+            "docs/MIGRATING-0.3.md",
             "src/lib.rs",
         ],
     )?;
@@ -101,6 +102,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             "LICENSE-MIT",
             "docs/WINDOWS.md",
             "docs/MIGRATING-0.2.md",
+            "docs/MIGRATING-0.3.md",
             "src/lib.rs",
         ],
     )?;
