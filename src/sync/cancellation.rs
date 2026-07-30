@@ -156,6 +156,12 @@ impl CancellationToken {
         self.state.cancelled.get()
     }
 
+    /// How many child slots the parent is holding, live or dead.
+    #[cfg(test)]
+    fn live_child_slots(&self) -> usize {
+        self.state.children.borrow().len()
+    }
+
     /// Creates a token cancelled when this one is.
     ///
     /// Cancelling the child does not cancel the parent, so a subsystem can be
@@ -177,7 +183,21 @@ impl CancellationToken {
         if self.state.cancelled.get() {
             child.cancelled.set(true);
         } else {
-            self.state.children.borrow_mut().push(Rc::downgrade(&child));
+            let mut children = self.state.children.borrow_mut();
+            // Drop the entries whose tokens are gone before adding another.
+            // A `Weak` costs nothing to keep alive, but the slot holding it
+            // does, and the shape this type is built for — a long-lived parent
+            // handing a child to each of many short-lived tasks — would
+            // otherwise grow this vector for the life of the parent and make
+            // every later `cancel` walk the accumulated corpses.
+            //
+            // Pruning on push rather than on drop keeps the cost amortised and
+            // keeps `Drop` free of borrowing, which matters because cancelling
+            // runs user code that may create children.
+            if children.len() == children.capacity() {
+                children.retain(|child| child.strong_count() > 0);
+            }
+            children.push(Rc::downgrade(&child));
         }
         Self { state: child }
     }
@@ -492,6 +512,25 @@ mod tests {
             first.0.load(Ordering::SeqCst),
             0,
             "the waker from the earlier poll is stale and must not be used"
+        );
+    }
+
+    /// A long-lived parent handing out short-lived children must not grow.
+    ///
+    /// This is the shape the type exists for — a subsystem giving each task its
+    /// own child — so a slot retained per child would grow the parent's
+    /// registry for the life of the program and lengthen every later `cancel`.
+    #[test]
+    fn a_parent_does_not_accumulate_dead_children() {
+        let parent = CancellationToken::new();
+        for _ in 0..10_000 {
+            let child = parent.child_token();
+            assert!(!child.is_cancelled());
+        }
+        let slots = parent.live_child_slots();
+        assert!(
+            slots < 128,
+            "a parent handed out 10,000 short-lived children and kept {slots} slots"
         );
     }
 

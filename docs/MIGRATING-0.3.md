@@ -145,8 +145,8 @@ let mut status = git();
 let mut diff = git();
 ```
 
-Note that runite's public API report does not track derived trait impls, so
-this change does not appear in `docs/public-api.md`.
+Derived impls are tracked from 0.3 on, in `docs/public-api-traits.md`; this
+particular removal predates that file, so it shows up in neither report.
 
 ## Silent behavior changes
 
@@ -374,6 +374,17 @@ belongs to exactly one turn, and the join is structural rather than
 approximate.
 
 `TurnId` is opaque and comparable; identifiers increase and are never reused.
+
+`runite::current_runtime_id()` is the coarser half of the same join:
+a `RuntimeId` names one thread's event loop for the life of the process, which
+is what separates records from several runtimes in one log. Both render exactly
+as they appear in the `turn_id` and `runtime_id` fields of runite's own trace
+events — that correspondence is the promise, and nothing else about the values
+is specified.
+
+`time::monotonic_now()` reads the clock the runtime schedules its own deadlines
+on, so a measurement taken beside a `time::sleep` is on the same timebase rather
+than on `Instant::now`'s.
 
 ### Watching several signal kinds on one stream
 

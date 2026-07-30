@@ -364,18 +364,78 @@ impl<S> TlsStream<S> {
         &self.conn
     }
 
-    /// Consumes the stream and returns the transport and the session state.
+    /// Consumes the stream and returns everything it was holding.
     ///
-    /// Ciphertext this stream had staged but not yet written is dropped, so a
-    /// stream taken apart without a successful
-    /// [`flush`](crate::io::AsyncWriteExt::flush) may lose records the peer
-    /// never sees.
-    pub fn into_parts(self) -> (S, Connection) {
-        (self.io, self.conn)
+    /// Both ciphertext buffers come back with the transport and the session,
+    /// because neither can be reconstructed from the other two: rustls has
+    /// already deframed what is in
+    /// [`buffered_ciphertext`](TlsParts::buffered_ciphertext) out of the
+    /// transport, and it has already produced
+    /// [`staged_ciphertext`](TlsParts::staged_ciphertext) out of the
+    /// [`Connection`]. Dropping either one desynchronizes the record stream
+    /// from the session by however many bytes it held, which surfaces later as
+    /// a decrypt failure that looks like the peer's fault.
+    ///
+    /// See [`TlsParts`] for what a caller resuming the session has to do with
+    /// each of them.
+    pub fn into_parts(self) -> TlsParts<S> {
+        let mut staged_ciphertext = self.outgoing;
+        staged_ciphertext.drain(..self.outgoing_start);
+        TlsParts {
+            io: self.io,
+            connection: self.conn,
+            buffered_ciphertext: self.incoming[self.incoming_start..self.incoming_end].to_vec(),
+            staged_ciphertext,
+        }
     }
 
     fn staged(&self) -> usize {
         self.outgoing.len() - self.outgoing_start
+    }
+}
+
+/// The pieces of a [`TlsStream`], returned by [`TlsStream::into_parts`].
+///
+/// A session can be resumed from these, but only if both ciphertext buffers are
+/// honoured: write [`staged_ciphertext`](Self::staged_ciphertext) to the
+/// transport before anything else, and feed
+/// [`buffered_ciphertext`](Self::buffered_ciphertext) to
+/// [`Connection::read_tls`] before reading the transport again. Either buffer
+/// is routinely non-empty on a busy stream — a read stops as soon as rustls
+/// accepts one batch of records, so the tail of a 16 KiB transport read is
+/// normally still waiting.
+///
+/// Non-exhaustive so that a future buffer, should the implementation grow one,
+/// does not have to be another silent loss.
+#[non_exhaustive]
+pub struct TlsParts<S> {
+    /// The transport the session was running over.
+    pub io: S,
+    /// The rustls session state, including any plaintext it has already
+    /// decrypted and not yet handed out.
+    pub connection: Connection,
+    /// Ciphertext read from `io` that `connection` has not consumed yet.
+    ///
+    /// These bytes are no longer in the transport. Reading `io` without
+    /// replaying them into [`Connection::read_tls`] starts the record stream
+    /// mid-record.
+    pub buffered_ciphertext: Vec<u8>,
+    /// Ciphertext `connection` produced that has not reached `io` yet.
+    ///
+    /// These bytes are no longer in the session. The peer never sees them
+    /// unless they are written to `io` ahead of anything the resumed session
+    /// produces.
+    pub staged_ciphertext: Vec<u8>,
+}
+
+impl<S> fmt::Debug for TlsParts<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsParts")
+            .field("handshaking", &self.connection.is_handshaking())
+            .field("staged_ciphertext", &self.staged_ciphertext.len())
+            .field("buffered_ciphertext", &self.buffered_ciphertext.len())
+            .finish_non_exhaustive()
     }
 }
 

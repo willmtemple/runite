@@ -1,0 +1,22 @@
+error[E0277]: `Rc<()>` cannot be sent between threads safely
+ --> tests/ui/fail/cancel_on_drop_send.rs:6:19
+  |
+6 |     assert_send::<runite::CancelOnDrop<runite::IntervalHandle>>();
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Rc<()>` cannot be sent between threads safely
+  |
+  = help: within `CancelOnDrop<IntervalHandle>`, the trait `Send` is not implemented for `Rc<()>`
+note: required because it appears within the type `PhantomData<Rc<()>>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `CancelOnDrop<IntervalHandle>`
+ --> src/platform/runtime_shared/handles.rs
+  |
+  | pub struct CancelOnDrop<H: TimerCancel> {
+  |            ^^^^^^^^^^^^
+note: required by a bound in `assert_send`
+ --> tests/ui/fail/cancel_on_drop_send.rs:1:19
+  |
+1 | fn assert_send<T: Send>() {}
+  |                   ^^^^ required by this bound in `assert_send`
