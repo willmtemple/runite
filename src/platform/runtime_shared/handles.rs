@@ -286,10 +286,13 @@ impl<H: TimerCancel> CancelOnDrop<H> {
     /// consumed, so nothing cancels, and the returned token behaves as it did
     /// before it was wrapped.
     pub fn into_inner(self) -> H {
+        // A type with a `Drop` impl cannot be destructured, so the guard is
+        // neutralised rather than taken apart: `ManuallyDrop` suppresses the
+        // cancellation and the token is cloned back out. That is what the
+        // `Clone` bound on `TimerCancel` buys — no `unsafe` here, and no
+        // `Option` field forcing a fallible `Deref` on the guard.
         let this = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `this` is not dropped, so `handle` is moved out exactly once
-        // and the `Drop` impl below never runs for it.
-        unsafe { std::ptr::read(&this.handle) }
+        this.handle.clone()
     }
 
     /// Cancels the timer now rather than at the end of the scope.
@@ -317,7 +320,12 @@ impl<H: TimerCancel> Drop for CancelOnDrop<H> {
 /// Sealed in practice: implemented only for [`TimeoutHandle`] and
 /// [`IntervalHandle`], whose `cancel` is idempotent and thread-safe by way of
 /// the generation check.
-pub trait TimerCancel {
+///
+/// `Clone` is a bound because a timer token only *names* a timer — duplicating
+/// one cannot change what cancelling does, which is why both handles are
+/// already `Clone` — and it is what lets [`CancelOnDrop::into_inner`] hand the
+/// token back out of a `Drop` type without `unsafe`.
+pub trait TimerCancel: Clone {
     /// Cancels the timer this token identifies.
     fn cancel_timer(&self);
 }

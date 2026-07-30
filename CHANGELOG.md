@@ -373,7 +373,10 @@ changes.
   It matters most for intervals, where an uncancelled timer keeps the runtime
   alive and a leaked one stops `run()` from ever returning. The guard is not
   `Clone`, and `into_inner` releases the timer to a longer-lived owner without
-  cancelling. ([#8](https://github.com/willmtemple/runite/issues/8))
+  cancelling. The `TimerCancel` trait the guard is generic over requires
+  `Clone`, which is what lets `into_inner` hand the token back with no `unsafe`
+  and without making the guard's `Deref` fallible.
+  ([#8](https://github.com/willmtemple/runite/issues/8))
 
 - `task::is_retryable`, which reports whether a `spawn_blocking` refusal is
   worth retrying: `true` only for a momentarily full queue, `false` for a

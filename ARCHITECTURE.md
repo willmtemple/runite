@@ -480,6 +480,17 @@ This is sound for arbitrary borrowed buffers, but it is not zero-copy. A hot-pat
 ownership of a stable allocation to the operation (tokio-uring style) and registered buffers are
 tracked in the project's GitHub issues.
 
+The rule is about every resource the kernel operation owns, not only bytes.
+`close_descriptor` is the case where the resource *is* the descriptor:
+`IORING_OP_CLOSE` is the one opcode absent from `duplicate_sqe_fd`'s
+`uses_descriptor` set, so its SQE names the caller's real descriptor rather
+than a duplicate the ring can retire on its own. The `OwnedFd` is therefore
+moved into the completion callback like any staging buffer, and the callback
+decides from the CQE whether the kernel performed the close — releasing the
+descriptor only when it did not. Holding it in the future instead would run
+`OwnedFd::drop` on the cancellation path against a number the ring has already
+closed or is about to (`src/sys/linux/fs.rs`, `tests/close_cancel.rs`).
+
 # Subprocesses
 
 On Linux, child process exit is represented as fd readiness. `Command::spawn` opens a pidfd for the

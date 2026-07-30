@@ -24,7 +24,8 @@ Portable default items: **1001**
 - `WorkerJoin: Future<Output = Result<(), WorkerJoinError>>`
 - `WorkerJoinError::{is_setup_panicked, is_runtime_panicked}`
 - `JoinHandle::{abort, is_finished, abort_handle}` and `AbortHandle::{abort, is_finished}`
-- `TimeoutHandle::cancel` and `IntervalHandle::cancel`
+- `TimeoutHandle::cancel` and `IntervalHandle::cancel`, plus `cancel_on_drop` on both and `CancelOnDrop::{into_inner, cancel}` reached through it
+- `TimerCancel: Clone`, which is what makes `CancelOnDrop::into_inner` total
 - `Builder`/`Runtime` construction and every loop entry point on them, plus `os::linux::BuilderExt` reached through a `Builder` on Linux
 - Windows handle/socket adoption traits and `os::windows::fs`/`signal::windows` APIs
 

@@ -207,6 +207,55 @@ struct IoUringProbe {
     ops: [IoUringProbeOp; 256],
 }
 
+// These are hand-written mirrors of `include/uapi/linux/io_uring.h`, and the
+// kernel reads and writes them through a shared mapping: nothing about a
+// mismatch is diagnosable at the point it goes wrong. An SQE field added or
+// reordered here would silently displace every field after it *and* resize the
+// SQE mmap, which `IoUring::new_with_profile` sizes with
+// `size_of::<IoUringSqe>()`. The numbers below are the kernel's, so a mirror
+// that drifts fails to compile.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<IoSqringOffsets>() == 40 && align_of::<IoSqringOffsets>() == 8);
+    assert!(size_of::<IoCqringOffsets>() == 40 && align_of::<IoCqringOffsets>() == 8);
+
+    assert!(size_of::<IoUringParams>() == 120 && align_of::<IoUringParams>() == 8);
+    assert!(offset_of!(IoUringParams, features) == 20);
+    assert!(offset_of!(IoUringParams, sq_off) == 40);
+    assert!(offset_of!(IoUringParams, cq_off) == 80);
+
+    assert!(size_of::<IoUringSqe>() == 64 && align_of::<IoUringSqe>() == 8);
+    assert!(offset_of!(IoUringSqe, opcode) == 0);
+    assert!(offset_of!(IoUringSqe, flags) == 1);
+    assert!(offset_of!(IoUringSqe, ioprio) == 2);
+    assert!(offset_of!(IoUringSqe, fd) == 4);
+    assert!(offset_of!(IoUringSqe, off) == 8);
+    assert!(offset_of!(IoUringSqe, addr) == 16);
+    assert!(offset_of!(IoUringSqe, len) == 24);
+    assert!(offset_of!(IoUringSqe, op_flags) == 28);
+    assert!(offset_of!(IoUringSqe, user_data) == 32);
+    assert!(offset_of!(IoUringSqe, buf_index) == 40);
+    assert!(offset_of!(IoUringSqe, personality) == 42);
+    assert!(offset_of!(IoUringSqe, file_index) == 44);
+    assert!(offset_of!(IoUringSqe, pad2) == 48);
+
+    assert!(size_of::<IoUringCqe>() == 16 && align_of::<IoUringCqe>() == 8);
+    assert!(offset_of!(IoUringCqe, user_data) == 0);
+    assert!(offset_of!(IoUringCqe, res) == 8);
+    assert!(offset_of!(IoUringCqe, flags) == 12);
+
+    assert!(size_of::<IoUringProbeOp>() == 8 && align_of::<IoUringProbeOp>() == 4);
+    assert!(offset_of!(IoUringProbeOp, op) == 0);
+    assert!(offset_of!(IoUringProbeOp, flags) == 2);
+
+    assert!(size_of::<IoUringProbe>() == 16 + 256 * 8);
+    assert!(offset_of!(IoUringProbe, ops) == 16);
+
+    assert!(size_of::<KernelTimespec>() == 16 && align_of::<KernelTimespec>() == 8);
+    assert!(offset_of!(KernelTimespec, tv_nsec) == 8);
+};
+
 impl Default for IoUringProbe {
     fn default() -> Self {
         Self {
@@ -1371,9 +1420,29 @@ impl IoUring {
 
 impl Drop for IoUring {
     fn drop(&mut self) {
-        // Close first: once the last duplicate is gone, the kernel quiesces
-        // operations before their completion-owned storage can be dropped.
-        // The mappings are then unmapped exactly once.
+        // This drop does not make in-flight operations safe, and closing the
+        // ring fd does not either: `close(2)` on an io_uring fd kills the
+        // context reference and queues the teardown work, then returns, so
+        // requests the kernel still holds are torn down afterwards, on its own
+        // schedule. Anything the kernel could still write into must therefore
+        // already be unreachable by the time we get here. `Driver::drop` is
+        // what establishes that — it releases the ring only when
+        // `quiesce_operations` has reaped every completion, and leaks both the
+        // ring and the callback storage when it cannot prove that. Outside the
+        // unit tests the only other drop is the pre-created ring in
+        // `recreate_ring_on_current_thread`, which has never carried a user
+        // submission; the process-wide fallback ring lives in a `static` and is
+        // never dropped at all.
+        //
+        // What is local to this impl is only the unmapping: each mapping is
+        // released exactly once, and the mappings outlive the close because the
+        // kernel holds its own reference to the ring pages.
+        //
+        // SAFETY: every pointer here came from a successful `mmap_ring` during
+        // construction and is unmapped at the length recorded alongside it;
+        // `ring_fd` came from `io_uring_setup`. `IoUring` is neither `Copy` nor
+        // `Clone`, so this runs once per ring, and under `IORING_FEAT_SINGLE_MMAP`
+        // the shared CQ pointer is deliberately not unmapped a second time.
         unsafe {
             libc::close(self.ring_fd);
             libc::munmap(self.sqes_ptr.cast(), self.sqes_size);
