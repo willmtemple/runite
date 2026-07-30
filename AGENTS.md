@@ -12,7 +12,7 @@ instead of invoking tools directly:
 
 | Task | Command |
 |------|---------|
-| Full local gate (fmt, lint, test, workflow lint) | `mise run check` |
+| Full local gate (fmt, lint, test, workflow lint, licences) | `mise run check` |
 | Build / test / lint / bench / coverage | `mise run build` / `test` / `lint` / `bench` / `coverage` |
 | Public API report / drift check | `mise run api-report` / `api-report-check` |
 | Verify release artifacts | `mise run package-verify` |

@@ -726,3 +726,37 @@ mod hyper_reads {
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
+
+/// The module documentation hands the reader a `Cargo.toml` line, and a wrong
+/// one costs them a panic at first use rather than a compile error. This is the
+/// one property of that snippet a test can hold: rustls's defaults include
+/// `aws-lc-rs`, so a snippet that adds a provider without switching them off
+/// enables two, and rustls then refuses to pick either.
+#[test]
+fn the_documented_provider_snippet_enables_exactly_one_provider() {
+    let doc = include_str!("mod.rs");
+    let snippet = doc
+        .lines()
+        .map(|line| line.trim_start_matches("//!").trim())
+        .skip_while(|line| *line != "```toml")
+        .take_while(|line| !line.starts_with("```") || *line == "```toml")
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        snippet.contains("rustls"),
+        "expected a rustls Cargo.toml snippet in the module docs, found: {snippet}"
+    );
+    assert!(
+        snippet.contains("default-features = false"),
+        "the snippet must disable rustls's defaults, which include the \
+         `aws-lc-rs` provider: {snippet}"
+    );
+    let providers = ["ring", "aws-lc-rs"]
+        .into_iter()
+        .filter(|provider| snippet.contains(&format!("\"{provider}\"")))
+        .count();
+    assert_eq!(
+        providers, 1,
+        "the snippet must name exactly one provider feature: {snippet}"
+    );
+}

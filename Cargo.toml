@@ -119,6 +119,13 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
   "tls12",
 ] }
+# Not used directly -- this is a floor. `rcgen` reaches `time` twice, and
+# everything at or below 0.3.45 has RUSTSEC-2026-0009, a stack exhaustion when
+# parsing RFC 2822 input. The MSRV-aware resolver picks 0.3.45 on its own, so
+# pinning 0.3.47 in `Cargo.lock` alone lasted exactly until the next
+# regeneration; only a requirement here survives one. Nothing published depends
+# on it: `time` is dev-only, so this bounds a test-time hazard, not a consumer's.
+time = "0.3.47"
 trybuild = "1"
 
 [[example]]

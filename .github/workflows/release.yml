@@ -174,17 +174,14 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
-          # The publish-shaped artifacts, not the workspace-packaged ones. The
-          # workspace path rewrites the embedded Cargo.lock to reference the
-          # locally packaged proc-macro so the unpacked tree can be verified
-          # before upload; `cargo publish` resolves it from the registry
-          # instead. Comparing crates.io against the workspace artifact would
-          # compare a checksum the published crate can never have, and a
-          # mismatch here is detected only after the first upload and re-raised
-          # on every rerun.
+          # The artifacts the step above verified are the ones `cargo publish`
+          # uploads: the embedded Cargo.lock records the sibling proc-macro
+          # `.crate` by checksum, and that file is what gets published, so the
+          # registry ends up reporting the same digest. `release-verify`
+          # asserts that rather than assuming it.
           python3 - "$version" "$GITHUB_OUTPUT" \
-            "target/xtask-release/publish-shape/package/runite-${version}.crate" \
-            "target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate" \
+            "target/xtask-release/package/package/runite-${version}.crate" \
+            "target/xtask-release/package/package/runite-proc-macros-${version}.crate" \
             "${ALLOW_CHECKSUM_MISMATCH:-false}" <<'PY'
           import hashlib
           import json
@@ -210,21 +207,7 @@ jobs:
                   raise
               if published["yanked"]:
                   raise SystemExit(f"{name}@{version} exists but is yanked; refusing release")
-              # `runite` cannot be packaged in publish shape until its exact
-              # proc-macro dependency is on the registry, so on the ordinary
-              # path its artifact does not exist yet. Reaching here means the
-              # version is already published, which only happens on a rerun --
-              # and a rerun that got far enough to publish `runite` also got
-              # far enough to publish the proc-macro, so the artifact will have
-              # been built by the publish-shape step below. If it somehow was
-              # not, say so rather than crashing on a missing file.
-              path = pathlib.Path(artifact)
-              if not path.exists():
-                  raise SystemExit(
-                      f"{name}@{version} is already published, but {artifact} was not built, "
-                      "so its checksum cannot be compared. Re-run after `xtask publish-shape`."
-                  )
-              local = hashlib.sha256(path.read_bytes()).hexdigest()
+              local = hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest()
               if published["checksum"] != local:
                   message = (
                       f"{name}@{version} exists with checksum {published['checksum']}, "
@@ -269,8 +252,7 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2153 # VERSION comes from the step's `env:` block
           version=${VERSION#v}
-          # Publish-shaped, for the same reason as the detection step above.
-          artifact="target/xtask-release/publish-shape/package/runite-proc-macros-${version}.crate"
+          artifact="target/xtask-release/package/package/runite-proc-macros-${version}.crate"
           python3 - "$version" "$artifact" <<'PY'
           import hashlib
           import json
@@ -324,13 +306,6 @@ jobs:
           done
           echo "Timed out waiting for runite-proc-macros@${version} in the Cargo index" >&2
           exit 1
-      # Only possible now. Packaging `runite` resolves `runite-proc-macros` at
-      # an exact version from the registry, so this cannot run in the pre-flight
-      # gate for a version whose proc-macro has not been published -- which is
-      # every new release. The artifact is what the post-publication checksum
-      # comparison reads.
-      - name: Build runite in publish shape
-        run: cargo run --quiet --package xtask -- publish-shape runite
       - name: Publish runite
         if: steps.published.outputs.runite == 'missing'
         run: cargo publish --locked --package runite

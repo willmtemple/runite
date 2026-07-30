@@ -1,5 +1,8 @@
 # cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
-# Run locally with `cargo deny check`.
+# Run locally with `mise run deny`, which passes `--all-features`. A bare
+# `cargo deny check` resolves only the default features, whose graph has no
+# rustls, ring, rustls-webpki, untrusted or subtle in it, and so answers a
+# question CI is not asking.
 
 [advisories]
 version = 2
