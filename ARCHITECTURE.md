@@ -842,3 +842,35 @@ cursor, preventing acknowledged short writes from being split across cursor move
 `io::compat::FuturesCompat<T>` maps the corresponding
 `futures_io` traits back to the runtime and handles empty vectored operations
 without polling the foreign implementation.
+
+With the optional `rustls` feature, `tls::TlsStream<S>` implements the same four
+traits over any transport that implements them, driving a sans-I/O rustls
+connection. It is an adapter, not a second I/O path: the record layer is a state
+machine over memory, and the only runtime-shaped decisions are where the two
+ciphertext buffers live.
+
+Both exist for the buffer-ownership rule above. Records rustls produces are
+copied into a buffer the stream owns and offered to the transport as one slice,
+unchanged until the transport has accepted all of it — a completion-based
+backend tells a re-poll from a new write by that slice's address and length, so
+handing it a different one would let the same ciphertext be submitted twice.
+Nothing is appended to the buffer while any of it is outstanding, and no
+plaintext is accepted from the caller until it is empty. That ordering is also
+what makes an abandoned write safe: a write future dropped while a record is
+half-delivered has accepted no plaintext of its own, and the next writer resumes
+the same record. In the other direction, ciphertext read from the transport is
+held until rustls has taken every byte, because rustls's deframer consumes only
+what it can use.
+
+There is no third buffer for plaintext. Reads copy straight out of rustls's own
+receive buffer into the caller's, including hyper's cursor — which cannot be
+reached through `AsyncRead` at all, since it exposes uninitialized memory. The
+alternative, a scratch buffer between them, would have to be sized for a TLS
+record and would be paid for on every read poll of every connection.
+
+`poll_close` is not a transport shutdown. It sends `close_notify` and waits for
+the transport to accept it before closing the transport's write direction, which
+is what lets the peer distinguish the end of a message from a truncation;
+`poll_flush` never sends it and leaves the session writable. A transport EOF is
+reported to rustls as such, so a stream that ends without `close_notify` fails
+with `UnexpectedEof` rather than reading as a clean end of data.

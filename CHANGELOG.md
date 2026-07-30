@@ -162,6 +162,43 @@ changes.
   runtime-backed writer in a pointer cannot silently make its writes
   cancellation-unsafe. ([#35](https://github.com/willmtemple/runite/issues/35))
 
+- TLS, behind the new optional `rustls` feature. `tls::TlsConnector` and
+  `tls::TlsAcceptor` perform client and server handshakes over anything
+  implementing runite's `AsyncRead` + `AsyncWrite`, and hand back a `TlsStream`
+  that is itself such a transport — so a `TcpStream`, a Unix socket, or a test
+  duplex all work, and with the `hyper` feature also on, hyper speaks HTTPS.
+  Previously an application on runite could not reach an `https://` endpoint
+  without leaving the runtime: `hyper-rustls` depends on `tokio-rustls`, which
+  drags in a second reactor that nothing on this thread ever drives.
+  ([#48](https://github.com/willmtemple/runite/issues/48))
+
+  **The cryptographic provider is the application's choice.** runite depends on
+  `rustls` with no provider feature enabled, because picking `aws-lc-rs` or
+  `ring` has build, licensing, and certification consequences that are not a
+  runtime's to decide. An application that enables neither gets rustls's panic
+  about being unable to determine the process-level `CryptoProvider` when it
+  builds a config; the `tls` module documentation says so and how to fix it.
+  Trust anchors are left alone for the same reason: the module takes a finished
+  `ClientConfig` or `ServerConfig`. Note that neither provider is the option
+  that avoids a C toolchain — both compile C in a build script; `ring` needs a C
+  compiler, `aws-lc-rs` also wants CMake.
+
+  **`rustls` is re-exported as `runite::tls::rustls`.** The public signatures are
+  written in rustls's types, so they cannot be used without naming the exact
+  build runite links against; use that path rather than a `rustls` dependency of
+  your own that cargo may or may not unify. The consequence is that a `rustls`
+  0.24 is a breaking change for runite, and will land in a major release rather
+  than a patch.
+
+  Two details are worth knowing before use. Ciphertext is staged in a buffer the
+  stream owns and re-offered to the transport as the identical slice until it is
+  fully accepted, because a completion-based backend identifies a re-polled
+  write by exactly that; the cost is one copy per direction, and the benefit is
+  that a write future abandoned mid-record leaves no truncated record behind.
+  And `poll_close` sends `close_notify` before closing the transport's write
+  direction, which is what lets a peer tell the end of a message from a
+  truncation — a plain transport shutdown does not.
+
 ### Fixed
 
 - Socket read and write deadlines no longer fail outright when the kernel

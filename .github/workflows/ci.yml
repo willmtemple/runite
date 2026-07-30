@@ -60,6 +60,16 @@ jobs:
         run: |
           cargo check --workspace --all-targets --no-default-features --features futures-compat
           cargo check --workspace --all-targets --no-default-features --features hyper
+          cargo check --workspace --all-targets --no-default-features --features rustls
+      # The library alone, with no --all-targets. runite depends on rustls with
+      # no crypto provider and the dev-dependencies pick `ring`; --all-targets
+      # unifies that feature back into the library build, so every check above
+      # compiles a configuration no user gets. This is the published one.
+      - name: Check the library without a crypto provider
+        run: |
+          cargo check --no-default-features --features rustls
+          ! cargo tree --no-default-features --features rustls -e normal --prefix none \
+            | grep -qE '^(ring|aws-lc-rs) '
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Docs

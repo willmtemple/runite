@@ -194,6 +194,7 @@ for the full threading and scaling model.
 | ---------------- | ------- | --------------------------------------------------------------------- |
 | `hyper`          | off     | `hyper` 1.x integration: transport impls for `TcpStream` (and `UnixStream` on Unix) plus the `hyper_rt` executor/timer for server and HTTP/2 use. |
 | `futures-compat` | off     | `io::compat` adapters to/from the `futures-io` traits.                |
+| `rustls`         | off     | `tls::TlsConnector`/`TlsAcceptor`/`TlsStream`: TLS client and server sessions over any runite transport, and over `hyper` when that feature is on too. runite depends on `rustls` with **no** provider feature — the application chooses `ring` or `aws-lc-rs` — and re-exports it as `runite::tls::rustls`, so a `rustls` major release is a breaking change for runite. |
 
 ## Configuration
 

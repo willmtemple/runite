@@ -141,8 +141,13 @@
 //! - `futures-compat` — adapters between `runite`'s I/O traits and the
 //!   `futures-io` ecosystem (see the `io::compat` module, enabled by this
 //!   feature).
+//! - `rustls` — TLS client and server streams over `runite` transports (see
+//!   the `tls` module, enabled by this feature). The cryptographic provider
+//!   is the application's to choose: runite depends on [`rustls`] with no
+//!   provider feature, so an application must enable one or install it itself.
 //!
 //! [`hyper`]: https://docs.rs/hyper
+//! [`rustls`]: https://docs.rs/rustls
 //!
 //! # Platform support
 //!
@@ -254,6 +259,8 @@ pub mod sync;
 pub(crate) mod sys;
 pub mod task;
 pub mod time;
+#[cfg(feature = "rustls")]
+pub mod tls;
 
 #[cfg(test)]
 mod logic_safety_tests;
