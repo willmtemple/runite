@@ -1877,6 +1877,29 @@ mod tests {
         ));
     }
 
+    /// A rejection is what a consumer chasing backpressure counts, so it is
+    /// reported through `metrics::snapshot().counters.remote_tasks_rejected`.
+    /// Nothing else in the suite can drive that counter: the default queue
+    /// holds 65536 tasks.
+    #[test]
+    fn a_refused_remote_task_is_counted() {
+        let handle = handle_with_capacity(1);
+        let rejected = &handle.shared.counters.remote_tasks_rejected;
+
+        assert!(handle.queue_macrotask(|| {}).is_ok());
+        assert_eq!(rejected.load(Ordering::Relaxed), 0);
+
+        assert!(matches!(
+            handle.queue_macrotask(|| {}),
+            Err(QueueError::Full)
+        ));
+        assert_eq!(
+            rejected.load(Ordering::Relaxed),
+            1,
+            "the refused task should be counted"
+        );
+    }
+
     #[test]
     fn closed_thread_returns_closed_error() {
         let handle = handle_with_capacity(4);

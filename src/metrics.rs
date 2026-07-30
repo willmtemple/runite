@@ -268,10 +268,12 @@ pub fn snapshot() -> Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, snapshot};
-    use crate::{queue_macrotask, run, spawn};
-    use std::cell::Cell;
+    use super::{Counters, Snapshot, snapshot};
+    use crate::{queue_macrotask, queue_microtask, run, spawn};
+    use std::cell::{Cell, RefCell};
+    use std::future::poll_fn;
     use std::rc::Rc;
+    use std::task::{Poll, Waker};
     use std::time::Duration;
 
     /// A thread with no runtime reads zero rather than panicking or installing
@@ -299,19 +301,32 @@ mod tests {
             spawn(async {});
             spawn(async {});
             seen.set(snapshot());
-            ticker.cancel();
+            // Cancelled from the next turn, not this one: peaks are sampled at
+            // the turn boundary, so a timer armed and cancelled inside one
+            // macrotask would never be seen by `peaks.armed_timers`.
+            queue_macrotask(move || ticker.cancel());
         });
         run();
 
-        let observed = observed.get().gauges;
+        let inside = observed.get().gauges;
         assert!(
-            observed.live_tasks >= 2,
+            inside.live_tasks >= 2,
             "both spawned tasks should be live, saw {}",
-            observed.live_tasks
+            inside.live_tasks
         );
         assert_eq!(
-            observed.armed_timers, 1,
+            inside.armed_timers, 1,
             "the interval should be armed exactly once"
+        );
+
+        let after = snapshot();
+        assert_eq!(
+            after.gauges.armed_timers, 0,
+            "the cancelled interval should leave the heap"
+        );
+        assert_eq!(
+            after.peaks.armed_timers, 1,
+            "the peak should remember the armed interval"
         );
     }
 
@@ -343,6 +358,7 @@ mod tests {
         spawn(async {
             crate::yield_now().await;
         });
+        queue_macrotask(|| {});
         run();
 
         let after = snapshot().counters;
@@ -359,61 +375,78 @@ mod tests {
             "a yielding task runs as microtasks"
         );
         assert!(
+            after.macrotasks_run > before.macrotasks_run,
+            "the queued macrotask should have run"
+        );
+        assert!(
             after.task_polls >= after.task_wakes,
             "a wake schedules at most one poll, so polls cannot trail wakes"
         );
     }
 
-    /// A wake that coalesces into an already-queued poll is not counted: it
-    /// caused no new work, and counting it would make coalescing look like
-    /// extra activity rather than less.
+    /// A coalesced wake is counted as coalesced and not as a wake. Both numbers
+    /// mean what they say only if the split holds, so this pins each side of it
+    /// exactly: the first wake schedules a poll and raises `task_wakes` alone,
+    /// the second finds that poll already queued and raises `coalesced_wakes`
+    /// alone.
     #[test]
-    fn coalesced_wakes_are_not_counted_twice() {
-        let before = snapshot().counters;
+    fn a_wake_arriving_while_a_poll_is_queued_is_counted_as_coalesced() {
+        let waker: Rc<RefCell<Option<Waker>>> = Rc::new(RefCell::new(None));
+        let counts: Rc<Cell<[Counters; 3]>> = Rc::new(Cell::new(Default::default()));
 
-        let handle = spawn(async {
-            crate::yield_now().await;
-        });
-        // Extra wakes while the poll is already queued must not raise the
-        // count; the task is scheduled exactly once.
-        handle.abort_handle();
-        run();
-
-        let after = snapshot().counters;
-        assert!(
-            after.task_wakes >= before.task_wakes,
-            "wake counts never decrease"
-        );
-    }
-
-    /// A coalesced wake is counted as coalesced, not as a wake. Both numbers
-    /// mean what they say only if the split holds.
-    #[test]
-    fn coalesced_wakes_are_counted_separately_from_scheduled_ones() {
-        use crate::queue_microtask;
-
-        let before = snapshot().counters;
-
-        queue_macrotask(|| {
-            let handle = spawn(async {
-                crate::yield_now().await;
+        let parked = Rc::clone(&waker);
+        let observed = Rc::clone(&counts);
+        queue_macrotask(move || {
+            let slot = Rc::clone(&parked);
+            let polls = Cell::new(0u32);
+            spawn(async move {
+                poll_fn(move |context| {
+                    *slot.borrow_mut() = Some(context.waker().clone());
+                    if polls.replace(1) == 0 {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
             });
-            // The task is queued for its first poll right now. Waking it again
-            // before that poll runs must land in `coalesced_wakes`.
-            let waker = handle.abort_handle();
-            drop(waker);
-            queue_microtask(|| {});
+
+            // Runs a turn later, by which point the task has been polled once
+            // and parked: nothing is queued for it, so the first wake below
+            // schedules and the second cannot.
+            queue_macrotask(move || {
+                let waker = parked
+                    .borrow()
+                    .clone()
+                    .expect("the parked task should have left its waker");
+                let before = snapshot().counters;
+                waker.wake_by_ref();
+                let scheduled = snapshot().counters;
+                waker.wake_by_ref();
+                let coalesced = snapshot().counters;
+                observed.set([before, scheduled, coalesced]);
+            });
         });
         run();
 
-        let after = snapshot().counters;
-        assert!(
-            after.task_wakes > before.task_wakes,
-            "the task was scheduled at least once"
+        let [before, scheduled, coalesced] = counts.get();
+        assert_eq!(
+            scheduled.task_wakes,
+            before.task_wakes + 1,
+            "the first wake schedules a poll"
         );
-        assert!(
-            after.coalesced_wakes >= before.coalesced_wakes,
-            "coalesced wakes never decrease"
+        assert_eq!(
+            scheduled.coalesced_wakes, before.coalesced_wakes,
+            "a wake that schedules a poll is not a coalesced wake"
+        );
+        assert_eq!(
+            coalesced.task_wakes, scheduled.task_wakes,
+            "the second wake scheduled nothing, so it must not raise `task_wakes`"
+        );
+        assert_eq!(
+            coalesced.coalesced_wakes,
+            scheduled.coalesced_wakes + 1,
+            "the second wake found the poll already queued and must be counted as coalesced"
         );
     }
 
@@ -436,23 +469,44 @@ mod tests {
     /// Every driver operation ends exactly once, so completions rise while the
     /// outstanding gauge returns to zero. A gauge that does not fall while
     /// this does not rise is a leaked operation.
+    ///
+    /// Reads a file rather than sleeping: a timer is served from the timer heap
+    /// and submits nothing to the driver, so a sleeping task leaves both
+    /// numbers at zero and proves nothing about either.
     #[test]
     fn operations_complete_and_the_outstanding_gauge_returns_to_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "runite-metrics-ops-{}-{:?}.txt",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"payload").expect("scratch file should be writable");
+
         let before = snapshot().counters;
 
-        spawn(async {
-            crate::time::sleep(std::time::Duration::from_millis(1)).await;
+        let read_path = path.clone();
+        spawn(async move {
+            let contents = crate::fs::read(&read_path).await.expect("read should work");
+            assert_eq!(contents, b"payload");
         });
         run();
 
         let after = snapshot();
+        let _ = std::fs::remove_file(&path);
+
         assert!(
-            after.counters.operations_completed >= before.operations_completed,
-            "completions never decrease"
+            after.counters.operations_completed > before.operations_completed,
+            "the read should have completed at least one driver operation, saw {} then {}",
+            before.operations_completed,
+            after.counters.operations_completed
         );
         assert_eq!(
             after.gauges.outstanding_operations, 0,
             "nothing should remain outstanding once the loop drains"
+        );
+        assert!(
+            after.peaks.outstanding_operations >= 1,
+            "the peak should remember the operation that was in flight"
         );
     }
 
@@ -504,8 +558,6 @@ mod tests {
     /// reactive work rather than to I/O or timers.
     #[test]
     fn a_microtask_heavy_turn_is_classified_as_microtask_bound() {
-        use crate::queue_microtask;
-
         let before = snapshot().counters;
 
         queue_macrotask(|| {
@@ -521,8 +573,56 @@ mod tests {
         let after = snapshot().counters;
         assert!(after.turns > before.turns, "turns should have advanced");
         assert!(
-            after.microtask_bound_turns >= before.microtask_bound_turns,
-            "the classification never decreases"
+            after.microtask_bound_turns > before.microtask_bound_turns,
+            "a turn that ran 2000 microtasks should be classified microtask-bound"
         );
+    }
+
+    /// The queue-depth gauges are levels, and from outside the loop they read
+    /// zero because the loop has drained. A snapshot taken mid-turn is the only
+    /// thing that observes them at all — and the peaks are the only way to see
+    /// afterwards how deep they got.
+    #[test]
+    fn queue_depth_gauges_report_what_is_queued() {
+        let observed = Rc::new(Cell::new(Snapshot::default()));
+
+        let seen = Rc::clone(&observed);
+        queue_macrotask(move || {
+            for _ in 0..3 {
+                queue_microtask(|| {});
+            }
+            queue_macrotask(|| {});
+            queue_macrotask(|| {});
+            // Onto this thread's own cross-thread queue, which is drained at
+            // the start of the next turn rather than now.
+            crate::current_thread_handle()
+                .queue_macrotask(|| {})
+                .expect("the remote queue should accept one task");
+            for _ in 0..4 {
+                spawn(async {});
+            }
+            seen.set(snapshot());
+        });
+        run();
+
+        let inside = observed.get().gauges;
+        assert_eq!(
+            inside.microtask_queue_depth, 7,
+            "three microtasks plus one first poll for each of four spawned tasks"
+        );
+        assert_eq!(inside.local_macrotask_queue_depth, 2);
+        assert_eq!(inside.remote_macrotask_queue_depth, 1);
+        assert_eq!(
+            inside.ready_tasks, 4,
+            "every spawned task is queued to poll"
+        );
+
+        let peaks = snapshot().peaks;
+        assert_eq!(
+            peaks.microtask_queue_depth, 7,
+            "the peak should remember the checkpoint backlog"
+        );
+        assert_eq!(peaks.local_macrotask_queue_depth, 2);
+        assert_eq!(peaks.ready_tasks, 4);
     }
 }
