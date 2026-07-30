@@ -249,37 +249,49 @@ fn a_turn_woken_by_a_timer_reports_the_timer_and_the_park() {
         runite::block_on(runite::time::sleep(NAP));
     });
 
+    // The turn that dispatched the timer, rather than the longest park.
+    //
+    // Those are the same turn on io_uring and kqueue, and not always on
+    // Windows: the waitable timer's APC can wake the completion port marginally
+    // before `monotonic_now()` agrees the deadline has passed, so the parked
+    // turn observes nothing — correctly reported as `spurious`, since it is —
+    // and the timer lands a turn later. Asserting the sequence rather than the
+    // property made this look like a classification bug on the one platform
+    // where the classification was telling the truth.
     let woken = records
+        .iter()
+        .find(|record| record.timers >= 1)
+        .expect("the sleeping loop should have dispatched its timer");
+    assert_eq!(
+        woken.wake, "timer",
+        "the turn that dispatched the timer was woken by it, not by a \
+         notification or an I/O completion"
+    );
+    assert!(
+        records.iter().all(|record| record.wake != "io"),
+        "nothing here submits a driver operation, so no turn may be \
+         attributed to one"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.wait_ns as u128 >= NAP.as_nanos() / 2),
+        "the park before the wake should be reported"
+    );
+
+    // Whichever turn reported the long park, its `runnable_ns` must not include
+    // it: that is the regression that would make an idle loop look like it is
+    // doing 50ms of work per turn. Taken from the longest park rather than from
+    // `woken`, because those are not the same turn everywhere.
+    let longest_park = records
         .iter()
         .max_by_key(|record| record.wait_ns)
         .expect("the sleeping loop should have produced turn records");
     assert!(
-        woken.wait_ns as u128 >= NAP.as_nanos() / 2,
-        "the park before the wake should be reported, saw {}ns",
-        woken.wait_ns
-    );
-    assert_eq!(
-        woken.wake, "timer",
-        "a sleep is woken by its timer, not by a spurious or notified wake"
-    );
-    assert!(
-        woken.timers >= 1,
-        "the wake should carry the timer it dispatched"
-    );
-
-    // The turn that performed the park is the one before it. Its `runnable_ns`
-    // must not include the park: this is the regression that would make an
-    // idle loop look like it is doing 50ms of work per turn.
-    let parked = records
-        .iter()
-        .filter(|record| record.turn_id < woken.turn_id)
-        .max_by_key(|record| record.turn_id)
-        .expect("a park is always performed by an earlier turn");
-    assert!(
-        parked.runnable_ns * 2 < woken.wait_ns,
+        longest_park.runnable_ns * 2 < longest_park.wait_ns,
         "the park must not be counted as runnable work, saw {}ns runnable against a {}ns park",
-        parked.runnable_ns,
-        woken.wait_ns
+        longest_park.runnable_ns,
+        longest_park.wait_ns
     );
 }
 
