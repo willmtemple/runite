@@ -1428,10 +1428,11 @@ impl Drop for IoUring {
         // already be unreachable by the time we get here. `Driver::drop` is
         // what establishes that — it releases the ring only when
         // `quiesce_operations` has reaped every completion, and leaks both the
-        // ring and the callback storage when it cannot prove that. The other
-        // reachable drop is the pre-created ring in
+        // ring and the callback storage when it cannot prove that. Outside the
+        // unit tests the only other drop is the pre-created ring in
         // `recreate_ring_on_current_thread`, which has never carried a user
-        // submission.
+        // submission; the process-wide fallback ring lives in a `static` and is
+        // never dropped at all.
         //
         // What is local to this impl is only the unmapping: each mapping is
         // released exactly once, and the mappings outlive the close because the
