@@ -24,14 +24,24 @@ enum ApiFeatureSet {
     Default,
     Hyper,
     FuturesCompat,
+    Rustls,
     All,
 }
 
-const API_FEATURE_SETS: [ApiFeatureSet; 4] = [
+const API_FEATURE_SETS: [ApiFeatureSet; 5] = [
     ApiFeatureSet::Default,
     ApiFeatureSet::Hyper,
     ApiFeatureSet::FuturesCompat,
+    ApiFeatureSet::Rustls,
     ApiFeatureSet::All,
+];
+
+/// Every optional feature, in report order. `All` is derived from these rather
+/// than listed, so adding a feature above cannot leave the checks behind.
+const OPTIONAL_FEATURE_SETS: [ApiFeatureSet; 3] = [
+    ApiFeatureSet::Hyper,
+    ApiFeatureSet::FuturesCompat,
+    ApiFeatureSet::Rustls,
 ];
 
 impl ApiFeatureSet {
@@ -40,6 +50,7 @@ impl ApiFeatureSet {
             Self::Default => "default",
             Self::Hyper => "hyper",
             Self::FuturesCompat => "futures-compat",
+            Self::Rustls => "rustls",
             Self::All => "all-features",
         }
     }
@@ -72,11 +83,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         let default = feature_sets
             .get(&ApiFeatureSet::Default)
             .expect("default API must be collected");
-        for feature_set in [
-            ApiFeatureSet::Hyper,
-            ApiFeatureSet::FuturesCompat,
-            ApiFeatureSet::All,
-        ] {
+        for feature_set in OPTIONAL_FEATURE_SETS
+            .iter()
+            .copied()
+            .chain([ApiFeatureSet::All])
+        {
             let enabled = feature_sets
                 .get(&feature_set)
                 .expect("enabled API must be collected");
@@ -97,7 +108,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         let all_features = feature_sets
             .get(&ApiFeatureSet::All)
             .expect("all-features API must be collected");
-        for feature_set in [ApiFeatureSet::Hyper, ApiFeatureSet::FuturesCompat] {
+        for feature_set in OPTIONAL_FEATURE_SETS {
             let enabled = feature_sets
                 .get(&feature_set)
                 .expect("enabled API must be collected");
@@ -157,6 +168,9 @@ fn run_public_api(target: Target, feature_set: ApiFeatureSet) -> Result<BTreeSet
         }
         ApiFeatureSet::FuturesCompat => {
             command.args(["--no-default-features", "--features", "futures-compat"]);
+        }
+        ApiFeatureSet::Rustls => {
+            command.args(["--no-default-features", "--features", "rustls"]);
         }
         ApiFeatureSet::All => {
             command.arg("--all-features");
@@ -406,7 +420,8 @@ fn api_probe_manifest(root: &Path) -> String {
          [features]\n\
          hyper = [\"runite/hyper\"]\n\
          futures-compat = [\"runite/futures-compat\"]\n\
-         all-features = [\"hyper\", \"futures-compat\"]\n\n\
+         rustls = [\"runite/rustls\"]\n\
+         all-features = [\"hyper\", \"futures-compat\", \"rustls\"]\n\n\
          [dependencies]\n\
          runite = {{ path = \"{path}\", default-features = false }}\n"
     )
@@ -538,8 +553,9 @@ fn render(surfaces: &[ApiSurface]) -> String {
     out.push_str(
         "The portable default section is the exact intersection of the four \
          supported targets. A target's default surface is that section plus its \
-         target delta. The `hyper`, `futures-compat`, and combined all-features \
-         surfaces are reconstructed by adding their labeled additions. This \
+         target delta. The `hyper`, `futures-compat`, `rustls`, and combined \
+         all-features surfaces are reconstructed by adding their labeled \
+         additions. This \
          decomposition makes platform-only APIs an \
          explicit review boundary: deltas are reserved for genuine OS interop \
          (`fd`, Unix sockets/signals, Windows handles/sockets/signals and \
@@ -547,19 +563,21 @@ fn render(surfaces: &[ApiSurface]) -> String {
     );
     out.push_str("## Surface summary\n\n");
     out.push_str(
-        "| Target | Default | `hyper` | `futures-compat` | All features | Default target delta |\n",
+        "| Target | Default | `hyper` | `futures-compat` | `rustls` | All features | \
+         Default target delta |\n",
     );
-    out.push_str("| --- | ---: | ---: | ---: | ---: | ---: |\n");
+    out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for surface in surfaces {
         let default = surface.api(ApiFeatureSet::Default);
         let target_delta = default.difference(&portable).count();
         out.push_str(&format!(
-            "| {} (`{}`) | {} | {} | {} | {} | {} |\n",
+            "| {} (`{}`) | {} | {} | {} | {} | {} | {} |\n",
             surface.target.label,
             surface.target.triple,
             default.len(),
             surface.api(ApiFeatureSet::Hyper).len(),
             surface.api(ApiFeatureSet::FuturesCompat).len(),
+            surface.api(ApiFeatureSet::Rustls).len(),
             surface.api(ApiFeatureSet::All).len(),
             target_delta
         ));
@@ -603,11 +621,11 @@ fn render(surfaces: &[ApiSurface]) -> String {
             &modules,
         );
     }
-    for feature_set in [
-        ApiFeatureSet::Hyper,
-        ApiFeatureSet::FuturesCompat,
-        ApiFeatureSet::All,
-    ] {
+    for feature_set in OPTIONAL_FEATURE_SETS
+        .iter()
+        .copied()
+        .chain([ApiFeatureSet::All])
+    {
         for surface in surfaces {
             let additions = surface
                 .api(feature_set)
