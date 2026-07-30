@@ -93,10 +93,55 @@ fn main() {
 }
 ```
 
+Both of those start the thread's runtime implicitly and panic if it cannot be
+started. `Builder` makes startup explicit and returns the failure instead:
+
+```rust
+fn main() -> std::io::Result<()> {
+    let runtime = runite::Builder::new().build()?;
+    runtime.run();
+    Ok(())
+}
+```
+
+A runtime is configured by the call that creates it, so `build()` must be the
+thread's first runtime call — inside a `#[runite::main]` body it reports
+`AlreadyExists`, because the attribute has already started one. Pass the
+settings to the attribute instead:
+
+```rust,ignore
+// Linux only: `ring_entries` sizes the io_uring submission queue, which kqueue
+// and IOCP have no equivalent of. On macOS or Windows this is a compile error
+// naming the platform, not a setting that quietly does nothing.
+#[runite::main(ring_entries = 32)]
+async fn main() {
+    // 32 submission entries instead of the default 256, to leave locked memory
+    // for a profiler attached to the same process.
+}
+```
+
+The same setting on a hand-built runtime, where a startup failure can be
+handled rather than raised:
+
+```rust,ignore
+use runite::os::linux::BuilderExt; // Linux only, as above.
+
+fn main() -> std::io::Result<()> {
+    let runtime = runite::Builder::new().ring_entries(32).build()?;
+    runtime.run();
+    Ok(())
+}
+```
+
 ## What you get
 
-- **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`),
-  `#[runite::test]`, and `block_on` for driving one future to completion.
+- **Entry points:** `#[runite::main]` (works on `fn main` or `async fn main`)
+  and `#[runite::test]`, either of which can carry the runtime's settings —
+  `#[runite::main(ring_entries = 32)]`; `block_on` for driving one future to
+  completion; and `try_block_on`/`Builder::build` when a startup failure should
+  be reported rather than raised. The attributes start the runtime before your
+  body runs, so `Builder::build` inside one is refused; it is for a
+  hand-written `fn main`.
 - **Event loop:** `run`, `run_until_stalled`, `run_ready_tasks`, `queue_macrotask`,
   `queue_microtask`, `spawn`, `yield_now`, and `current_turn` for a key that joins
   your own diagnostics to the loop iteration that produced them.

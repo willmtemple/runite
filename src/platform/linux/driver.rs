@@ -225,11 +225,20 @@ pub struct Driver {
     /// token and dropped only when the original CQE proves the kernel released
     /// the referenced storage.
     pending_cancel_tokens: RefCell<HashMap<u64, u64>>,
+    /// Submission-queue size this driver was created with. Retained because a
+    /// worker's ring is minted on the parent thread and rebuilt on the worker
+    /// itself; without it the rebuild would silently fall back to the default
+    /// and undo the configuration the worker inherited.
+    ring_entries: u32,
 }
 
 /// Creates a new driver and its paired [`ThreadNotifier`].
-pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
-    let ring = IoUring::new(256)?;
+///
+/// `ring_entries` has already been validated by
+/// [`check_ring_entries`](super::uring::check_ring_entries); callers that have
+/// no opinion pass [`DEFAULT_RING_ENTRIES`](super::uring::DEFAULT_RING_ENTRIES).
+pub fn create_driver(ring_entries: u32) -> io::Result<(Driver, ThreadNotifier)> {
+    let ring = IoUring::new(ring_entries)?;
     tracing::debug!(
         target: trace_targets::DRIVER,
         event = "create_driver",
@@ -278,6 +287,7 @@ pub fn create_driver() -> io::Result<(Driver, ThreadNotifier)> {
             io_completed: Cell::new(false),
             completions: RefCell::new(HashMap::new()),
             pending_cancel_tokens: RefCell::new(HashMap::new()),
+            ring_entries,
         },
         ThreadNotifier { inner: notifier },
     ))
@@ -360,6 +370,12 @@ impl Driver {
         }
     }
 
+    /// Submission-queue entries the kernel allocated for this thread's ring.
+    #[cfg(test)]
+    pub(crate) fn ring_sq_entries(&self) -> u32 {
+        self.ring().sq_entries()
+    }
+
     #[cfg(test)]
     fn replace_ring_for_test(&mut self, replacement: IoUring) -> IoUring {
         self.ring
@@ -369,7 +385,7 @@ impl Driver {
     }
 
     fn recreate_ring_on_current_thread(&self) -> io::Result<()> {
-        let replacement = IoUring::new(256)?;
+        let replacement = IoUring::new(self.ring_entries)?;
         let (new_target, eventfd_active) = if self.supported_ops.get().supports(IORING_OP_MSG_RING)
         {
             (
@@ -990,8 +1006,9 @@ fn decode_token_kind(token: u64) -> Option<CompletionKind> {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::super::uring::{
-        IORING_OP_MSG_RING, IORING_OP_NOP, IORING_OP_TIMEOUT, IORING_OP_TIMEOUT_REMOVE, IoUring,
-        IoUringCqe, ScriptedIoUringEnter, SupportedOps, override_supported_ops,
+        DEFAULT_RING_ENTRIES, IORING_OP_MSG_RING, IORING_OP_NOP, IORING_OP_TIMEOUT,
+        IORING_OP_TIMEOUT_REMOVE, IoUring, IoUringCqe, ScriptedIoUringEnter, SupportedOps,
+        override_supported_ops,
     };
     use super::{Notifier as _, ReadyEvents, WakeTarget, create_driver, monotonic_now};
     use std::io;
@@ -1037,7 +1054,8 @@ mod tests {
 
     #[test]
     fn probe_runs_and_returns_bitmap() {
-        let (driver, _notifier) = create_driver().expect("driver should initialize");
+        let (driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         let ops = driver.supported_ops();
 
         assert!(
@@ -1049,7 +1067,8 @@ mod tests {
     #[test]
     fn unsupported_op_returns_unsupported_error() {
         let _override = override_supported_ops(SupportedOps::only([IORING_OP_NOP]));
-        let (driver, _notifier) = create_driver().expect("driver should initialize");
+        let (driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
 
         let completed = Arc::new(AtomicBool::new(false));
         let completed_for_callback = Arc::clone(&completed);
@@ -1094,7 +1113,8 @@ mod tests {
         for errno in [libc::EAGAIN, libc::EBUSY] {
             let _override =
                 override_supported_ops(SupportedOps::only([IORING_OP_NOP, IORING_OP_MSG_RING]));
-            let (mut driver, _notifier) = create_driver().expect("driver should initialize");
+            let (mut driver, _notifier) =
+                create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
             driver.defer_submissions = true;
             let script = ScriptedIoUringEnter::new([Err(errno), Ok(2)]);
             let replacement = IoUring::new_with_enter(8, Box::new(script.clone()))
@@ -1148,7 +1168,8 @@ mod tests {
 
     #[test]
     fn transient_wait_preserves_drained_timer_readiness() {
-        let (mut driver, _notifier) = create_driver().expect("driver should initialize");
+        let (mut driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         driver.defer_submissions = true;
         let script = ScriptedIoUringEnter::new([Err(libc::EAGAIN), Ok(1)]);
         let replacement = IoUring::new_with_enter(8, Box::new(script.clone()))
@@ -1188,7 +1209,8 @@ mod tests {
 
     #[test]
     fn shutdown_flushes_cancel_and_drains_original_terminal_cqe() {
-        let (mut driver, _notifier) = create_driver().expect("driver should initialize");
+        let (mut driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         driver.defer_submissions = true;
         let script = ScriptedIoUringEnter::new([Ok(2)]);
         let replacement = IoUring::new_with_enter(8, Box::new(script.clone()))
@@ -1233,10 +1255,12 @@ mod tests {
 
     #[test]
     fn notifier_wakes_target_ring() {
-        let (sender, _) = create_driver().expect("sender driver should initialize");
+        let (sender, _) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("sender driver should initialize");
         sender.bind_current_thread();
 
-        let (target, notifier) = create_driver().expect("target driver should initialize");
+        let (target, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("target driver should initialize");
         notifier.notify().expect("notify should succeed");
 
         let ready = loop {
@@ -1254,7 +1278,8 @@ mod tests {
 
     #[test]
     fn notifier_fd_closes_with_target_driver() {
-        let (target, notifier) = create_driver().expect("target driver should initialize");
+        let (target, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("target driver should initialize");
         let target_guard = notifier
             .inner
             .target
@@ -1289,7 +1314,8 @@ mod tests {
 
     #[test]
     fn teardown_is_safe_during_panicking_tracing_subscriber() {
-        let (driver, notifier) = create_driver().expect("driver should initialize");
+        let (driver, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tracing::subscriber::with_default(PanickingSubscriber, move || {
                 tracing::error!(
@@ -1313,7 +1339,8 @@ mod tests {
 
     #[test]
     fn teardown_recovers_poisoned_notifier_lock() {
-        let (driver, notifier) = create_driver().expect("driver should initialize");
+        let (driver, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         let inner = Arc::clone(&notifier.inner);
         assert!(
             thread::spawn(move || {
@@ -1338,7 +1365,8 @@ mod tests {
 
     #[test]
     fn notifier_wakes_target_ring_from_plain_thread() {
-        let (target, notifier) = create_driver().expect("target driver should initialize");
+        let (target, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("target driver should initialize");
 
         thread::spawn(move || {
             notifier.notify().expect("notify should succeed");
@@ -1361,7 +1389,8 @@ mod tests {
     #[test]
     fn capability_matrix_eventfd_fallback_wakes_target_ring() {
         let _override = override_supported_ops(SupportedOps::all_except([IORING_OP_MSG_RING]));
-        let (target, notifier) = create_driver().expect("target driver should initialize");
+        let (target, notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("target driver should initialize");
         assert!(matches!(
             notifier
                 .inner
@@ -1431,7 +1460,8 @@ mod tests {
 
     #[test]
     fn unchanged_timer_deadline_does_not_stage_an_update() {
-        let (mut driver, _notifier) = create_driver().expect("driver should initialize");
+        let (mut driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         driver.defer_submissions = true;
         let deadline = monotonic_now().expect("clock should work") + Duration::from_secs(1);
 
@@ -1460,7 +1490,8 @@ mod tests {
 
     #[test]
     fn fatal_timer_submission_error_is_propagated() {
-        let (mut driver, _notifier) = create_driver().expect("driver should initialize");
+        let (mut driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         driver.defer_submissions = true;
         let script = ScriptedIoUringEnter::new([Err(libc::EIO)]);
         let replacement =
@@ -1482,7 +1513,8 @@ mod tests {
 
     #[test]
     fn timeout_reports_deadlines() {
-        let (driver, _notifier) = create_driver().expect("driver should initialize");
+        let (driver, _notifier) =
+            create_driver(DEFAULT_RING_ENTRIES).expect("driver should initialize");
         let deadline = monotonic_now().expect("clock should work") + Duration::from_millis(20);
         driver
             .rearm_timer(Some(deadline))

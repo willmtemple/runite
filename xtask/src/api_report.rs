@@ -205,12 +205,16 @@ fn validate_surface(
         "pub trait runite::os::unix::process::CommandExt",
         "pub mod runite::signal::unix",
     ];
+    let linux_items = [
+        "pub mod runite::os::linux",
+        "pub trait runite::os::linux::BuilderExt",
+    ];
 
     if target.triple.contains("windows") {
         for needle in windows_items {
             require_api(default, target, needle)?;
         }
-        for needle in unix_items {
+        for needle in unix_items.iter().chain(&linux_items) {
             reject_api(default, target, needle)?;
         }
     } else {
@@ -219,6 +223,15 @@ fn validate_surface(
         }
         for needle in windows_items {
             reject_api(default, target, needle)?;
+        }
+        // `os::linux` is the only surface that splits the Unix targets, so it
+        // is checked from both sides rather than only asserted present.
+        for needle in linux_items {
+            if target.triple.contains("linux") {
+                require_api(default, target, needle)?;
+            } else {
+                reject_api(default, target, needle)?;
+            }
         }
     }
     Ok(())
@@ -248,18 +261,19 @@ fn reject_api(surface: &BTreeSet<String>, target: Target, needle: &str) -> Resul
 
 /// Items exempted from the "every Unix surface is identical" rule.
 ///
-/// **This list should be empty.** An entry is a deliberate, temporary
-/// admission that a public item exists on one Unix target and not another,
-/// which is a portability divergence rather than an OS extension — the
-/// difference being that an OS extension is permanent and named for its
-/// platform, while these are simply unfinished.
+/// **This list should be empty**, and is. An entry here is a suspended
+/// promise: a public item that exists on one Unix target and not another
+/// because the work is unfinished, so each one must name the issue that
+/// deletes it again.
 ///
-/// Every entry must name the issue that removes it.
-/// Public surfaces allowed to exist on some Unix targets but not others.
-///
-/// Deliberately empty. An entry here is a promise that every Unix target
-/// exposes the same public API, suspended — so each one needs an issue that
-/// will delete it again.
+/// An `os::linux` / `os::unix` / `os::windows` module is *not* an exemption
+/// and must never be listed here. Those modules are the sanctioned way to
+/// expose API that only one platform can implement — permanent, named for the
+/// platform in the path a caller has to type, and checked from both sides by
+/// `validate_surface`, which requires each one on its own targets and rejects
+/// it everywhere else. An exemption is the opposite: unnamed, unchecked, and
+/// meant to disappear. `is_platform_extension` recognises the `os::*` modules;
+/// this list exists only for the divergences it cannot.
 const PORTABILITY_EXEMPTIONS: &[(&str, &str)] = &[];
 
 fn is_exempt(line: &str) -> bool {
@@ -269,23 +283,19 @@ fn is_exempt(line: &str) -> bool {
 }
 
 fn validate_portability(surfaces: &[ApiSurface]) -> Result<(), String> {
+    // The Unix targets are held to a stricter standard than the portable
+    // intersection below: everything except a deliberate Unix split must match
+    // exactly, so a `#[cfg(target_os)]` that leaks a difference between Linux
+    // and macOS is caught even though both are Unix.
     let mut unix_surfaces = surfaces
         .iter()
         .filter(|surface| !surface.target.triple.contains("windows"));
     if let Some(reference) = unix_surfaces.next() {
         for surface in unix_surfaces {
             for feature_set in API_FEATURE_SETS {
-                let left: Vec<_> = reference
-                    .api(feature_set)
-                    .iter()
-                    .filter(|line| !is_exempt(line))
-                    .collect();
-                let right: Vec<_> = surface
-                    .api(feature_set)
-                    .iter()
-                    .filter(|line| !is_exempt(line))
-                    .collect();
-                if left != right {
+                if unix_comparable_part(reference, feature_set)
+                    != unix_comparable_part(surface, feature_set)
+                {
                     return Err(format!(
                         "{} and {} {} public surfaces differ outside genuine OS extension naming",
                         reference.target.triple,
@@ -326,10 +336,41 @@ fn validate_portability(surfaces: &[ApiSurface]) -> Result<(), String> {
     Ok(())
 }
 
+/// A target's surface with only its deliberate Unix splits removed.
+///
+/// Deliberately *not* `is_platform_extension`: most of what that excuses —
+/// `os::unix`, `fd`, `net::unix`, `signal::unix` — is common to every Unix
+/// target, and leaving those lines in the comparison is what makes a
+/// `#[cfg(target_os)]` hidden inside one of them fail this check. Only the
+/// namespaces that are Linux-only by design come out.
+fn unix_comparable_part(surface: &ApiSurface, feature_set: ApiFeatureSet) -> BTreeSet<&str> {
+    surface
+        .api(feature_set)
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !is_unix_split(surface.target, line))
+        .collect()
+}
+
+/// Public API that exists on some Unix targets and not others on purpose.
+///
+/// io_uring tuning has no kqueue counterpart, so `os::linux` is the one
+/// namespace in this category. It is an OS extension, not a
+/// [`PORTABILITY_EXEMPTIONS`] entry: it is permanent, the platform is in the
+/// path the caller types, and `validate_surface` requires it on Linux while
+/// rejecting it on macOS and Windows, so widening the split fails there.
+fn is_unix_split(target: Target, line: &str) -> bool {
+    is_exempt(line)
+        || (target.triple.contains("linux")
+            && (line.contains("runite::os::linux")
+                // Like `Command::pre_exec`, `BuilderExt::ring_entries` renders
+                // as an inherent-looking method on its receiver.
+                || line.starts_with("pub fn runite::Builder::ring_entries")))
+}
+
 fn is_platform_extension(target: Target, line: &str) -> bool {
-    // Same source of truth as the Unix-surface comparison: an exempted item is
-    // not an OS extension, it is unfinished, and both checks have to agree on
-    // that or one of them fails while the other passes.
+    // An exempted item is not an OS extension, it is unfinished — but both
+    // checks have to agree on that, or one fails while the other passes.
     if is_exempt(line) {
         return true;
     }
@@ -344,7 +385,10 @@ fn is_platform_extension(target: Target, line: &str) -> bool {
             || line.starts_with("pub fn runite::fs::OpenOptions::security_qos_flags")
             || line.starts_with("pub fn runite::fs::OpenOptions::share_mode")
     } else {
-        line.contains("std::os::fd")
+        // The Linux-only namespaces are excused here too, so this check and
+        // the Unix-identity one above cannot disagree about what is approved.
+        is_unix_split(target, line)
+            || line.contains("std::os::fd")
             || line.contains("std::os::unix")
             || line.contains("runite::fd")
             || line.contains("runite::net::unix")
@@ -459,6 +503,23 @@ fn issue_9_traits<
     R: runite::io::AsyncRead + runite::io::AsyncBufRead + runite::io::AsyncSeek,
     W: runite::io::AsyncWrite,
 >() {
+}
+
+fn builder_contract() -> std::io::Result<()> {
+    let builder: runite::Builder = runite::Builder::new();
+    let runtime: runite::Runtime = builder.build()?;
+    runtime.run();
+    runtime.run_until_stalled();
+    runtime.run_ready_tasks();
+    let _: u32 = runtime.block_on(async { 1u32 });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_builder_contract() {
+    use runite::os::linux::BuilderExt;
+
+    let _: runite::Builder = runite::Builder::new().ring_entries(32);
 }
 
 #[cfg(unix)]
@@ -582,6 +643,9 @@ fn render(surfaces: &[ApiSurface]) -> String {
          - `JoinHandle::{abort, is_finished, abort_handle}` and \
          `AbortHandle::{abort, is_finished}`\n\
          - `TimeoutHandle::cancel` and `IntervalHandle::cancel`\n\
+         - `Builder`/`Runtime` construction and every loop entry point on \
+         them, plus `os::linux::BuilderExt` reached through a `Builder` on \
+         Linux\n\
          - Windows handle/socket adoption traits and \
          `os::windows::fs`/`signal::windows` APIs\n\n",
     );
@@ -725,6 +789,18 @@ mod tests {
         assert!(!is_platform_extension(
             target("x86_64-pc-windows-msvc"),
             "pub fn runite::fs::read()"
+        ));
+    }
+
+    #[test]
+    fn os_linux_is_an_extension_only_on_linux() {
+        assert!(is_platform_extension(
+            target("aarch64-unknown-linux-gnu"),
+            "pub trait runite::os::linux::BuilderExt"
+        ));
+        assert!(!is_platform_extension(
+            target("aarch64-apple-darwin"),
+            "pub trait runite::os::linux::BuilderExt"
         ));
     }
 }

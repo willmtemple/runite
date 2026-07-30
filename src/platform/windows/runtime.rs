@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use super::driver::{self, Driver, DriverId};
 use crate::platform::runtime_shared as shared;
+use crate::platform::runtime_shared::RuntimeConfig;
 
 pub use shared::{
     AbortHandle, CancelOnDrop, IntervalHandle, JoinHandle, QueueError, RuntimeId, ThreadHandle,
@@ -31,8 +32,9 @@ pub use shared::{
 pub(crate) struct WindowsRuntime;
 
 impl shared::Runtime for WindowsRuntime {
-    fn create_driver_pair()
-    -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
+    fn create_driver_pair(
+        _config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn shared::DriverBackend>, Box<dyn shared::Notifier>)> {
         let (driver, notifier) = driver::create_driver()?;
         Ok((Box::new(driver), Box::new(notifier)))
     }
@@ -105,6 +107,10 @@ where
     Exit: FnOnce() + 'static,
 {
     shared::spawn_worker::<WindowsRuntime, Init, Exit>(initial_task, on_exit)
+}
+
+pub fn build_runtime(config: RuntimeConfig) -> io::Result<()> {
+    shared::build_runtime::<WindowsRuntime>(config)
 }
 
 pub fn run() {

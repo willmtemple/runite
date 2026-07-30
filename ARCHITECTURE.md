@@ -53,6 +53,24 @@ Lazy initialization contract:
   `ThreadState` — on Linux, that includes an `io_uring` ring. Ordinary threads retain that state
   across sequential driver entries and release it at thread teardown; runtime-owned workers
   perform explicit teardown before their thread function returns.
+- `Builder::build()` is the same installation performed eagerly, from a `RuntimeConfig`
+  (`src/platform/runtime_shared/config.rs`) rather than the defaults, and returning the driver's
+  error instead of panicking on it. Because the driver is created during installation, the
+  configuration can only be supplied by the call that installs: a `build()` on a thread that
+  already has a `ThreadState` reports `ErrorKind::AlreadyExists` rather than accepting settings it
+  cannot apply. The `Runtime` it returns is a `!Send` token, not an owner — dropping it leaves the
+  thread's state installed, exactly as returning from `run()` does.
+- `#[runite::main]` and `#[runite::test]` (`proc_macros/src/entry.rs`) expand to `build()` when the
+  attribute carries settings, and to the lazy free functions when it does not. They install the
+  runtime before the annotated body runs, so without this the settings would be unreachable from
+  the crate's headline entry point. Because a proc macro cannot see the target, the expansion picks
+  between the configured and default builders with `cfg`, and emits `compile_error!` naming the
+  platform on the targets that lack the knob — the default builder is still emitted there so that
+  message is the only diagnostic.
+- The config is stored on `ThreadState` and read by `spawn_worker`, which passes it to the worker's
+  driver and installs it on the worker thread, so it propagates down a worker tree. On Linux the
+  driver also retains its ring size, because a worker's ring is minted on the parent thread and
+  rebuilt on the worker in `bind_current_thread`.
 
 ## Scaling across cores
 
@@ -534,8 +552,13 @@ pre-5.18 kernels use the watched `eventfd` notifier instead of `MSG_RING`;
 data-path opcodes use nonblocking `IORING_OP_POLL_ADD` readiness. No fallback
 parks a runtime thread or a blocking-pool worker on socket data.
 
-On Linux, `Driver::create_driver` initializes an `io_uring` ring and records the
+On Linux, `Driver::create_driver` initializes an `io_uring` ring with 256 submission-queue entries
+by default, or the size set through `os::linux::BuilderExt::ring_entries`, and records the
 process-wide `IORING_REGISTER_PROBE` result from `src/platform/linux/uring.rs`.
+Sizes that are not a power of two in `2..=32768` are rejected by `Builder::build` rather than
+passed through: `io_uring_setup(2)` rounds up and, under the `IORING_SETUP_CLAMP` the runtime
+always sets, caps silently, and the reason to name a size is a locked-memory budget that a
+silently larger ring would blow.
 The supported-op bitmap is cached behind a `OnceLock` because kernel opcode support cannot change
 under a running process, and probing once per runtime thread would waste syscalls.
 

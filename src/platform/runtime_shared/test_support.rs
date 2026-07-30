@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use super::state::{teardown_thread, try_with_installed_thread};
 use super::{
-    DriverBackend, IntervalHandle, Notifier, ReadyEvents, Runtime, SendTask, block_on,
-    current_thread_handle, interval, queue_future, queue_microtask, queue_task, run, spawn_worker,
-    timeout, yield_now,
+    DriverBackend, IntervalHandle, Notifier, ReadyEvents, Runtime, RuntimeConfig, SendTask,
+    block_on, current_thread_handle, interval, queue_future, queue_microtask, queue_task, run,
+    spawn_worker, timeout, yield_now,
 };
 use crate::op::completion::completion_for_current_thread;
 
@@ -1408,7 +1408,9 @@ impl MockRuntimeHarness {
 pub(crate) struct MockRuntime;
 
 impl Runtime for MockRuntime {
-    fn create_driver_pair() -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)> {
+    fn create_driver_pair(
+        _config: RuntimeConfig,
+    ) -> io::Result<(Box<dyn DriverBackend>, Box<dyn Notifier>)> {
         let control = active_mock_factory()?.take_driver();
         Ok((
             Box::new(MockDriver {
