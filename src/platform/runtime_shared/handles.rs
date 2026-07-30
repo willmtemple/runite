@@ -288,6 +288,19 @@ impl IntervalHandle {
 /// });
 /// runite::run();
 /// ```
+///
+/// # Thread affinity
+///
+/// Deliberately `!Send`, unlike the token it wraps. Cancelling a timer from a
+/// thread other than the one that created it is a documented no-op — the
+/// generation check fails — so a guard whose entire contract is "dropping this
+/// cancels" would silently do nothing if it were dropped elsewhere, leaving the
+/// timer armed and the runtime unable to go idle. The compiler refuses instead:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<runite::CancelOnDrop<runite::IntervalHandle>>();
+/// ```
 #[derive(Debug)]
 #[must_use = "the timer is cancelled as soon as this guard is dropped"]
 pub struct CancelOnDrop<H: TimerCancel> {
