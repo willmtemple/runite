@@ -151,7 +151,8 @@ impl Drop for InheritedStdinHandoff {
 /// from losing bytes, and it matches every other runite reader. The cost is
 /// that input keeps being consumed while nothing awaits it, which matters to
 /// code that reads the terminal outside runite or switches it to raw mode.
-/// Dropping the handle releases the waiter and lets the reader go idle.
+/// Dropping the handle releases its waiter; the reader goes idle once no
+/// handle holds one.
 ///
 /// `next_line` keeps partial lines on the handle but leaves bytes after a
 /// newline in the shared process buffer.

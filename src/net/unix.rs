@@ -663,8 +663,8 @@ impl UnixDatagram {
     /// Closes the descriptor, on Linux ordering the close behind operations
     /// already submitted against it.
     ///
-    /// macOS has no asynchronous close: there the descriptor is closed
-    /// synchronously and only the outcome reporting is gained.
+    /// macOS has no asynchronous close, and this type has no sharing to report
+    /// on, so there this does exactly what dropping the handle does.
     ///
     /// See [`fs::File::close_descriptor`](crate::fs::File::close_descriptor) for what this buys over
     /// dropping the handle. A datagram socket owns its descriptor outright and

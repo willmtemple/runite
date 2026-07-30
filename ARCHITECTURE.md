@@ -403,8 +403,11 @@ terminal stream error and also releases the iterator and runtime liveness (`src/
 
 `Stdin` has a separate process-wide contract. One lazily started dedicated
 reader owns a duplicate input handle and reads only while at least one waiter
-exists, into a bounded 64 KiB shared buffer. Cancelling one `Stdin` read removes
-that handle's waiter but never discards process bytes. Multiple handles compete
+exists, into a bounded 64 KiB shared buffer. Cancelling one `Stdin` read does
+not retract it — the handle keeps the operation and its waiter for its next read
+to claim, which is how cancellation avoids discarding process bytes, and which
+means the reader goes on filling the shared buffer with nothing awaiting it.
+Dropping the handle is what releases the waiter. Multiple handles compete
 for the same stream. An inherited child temporarily pauses the reader; Windows
 rejects an inherited-console spawn with `WouldBlock` while a console read is
 active because that host read cannot always be cancelled losslessly

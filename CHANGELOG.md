@@ -445,14 +445,18 @@ changes.
   and its waiter, the reader thread goes on filling the shared buffer, and the
   handle's next read claims that same operation. The consequence a terminal
   application has to plan for — input continuing to be consumed while nothing
-  awaits it — is stated too, and a test pins it.
+  awaits it — is stated too, and a test pins it. `ARCHITECTURE.md` stated the
+  same superseded contract in the same words and has been corrected with it.
 
 - The six socket `close_descriptor` methods promised, without qualification, to
   order the close behind operations already submitted against the descriptor.
   Only Linux does that; macOS and Windows close synchronously. The caveat lived
   only in `fs::File::close_descriptor`'s body, one link away, and that method's
   own summary line was unqualified as well. All seven summaries now name Linux,
-  and each socket carries the platform sentence directly.
+  and each socket carries the platform sentence directly: the five shareable
+  ones still report `Closed` versus `StillShared` off-Linux, while
+  `UnixDatagram` — which owns its descriptor outright and never reports
+  `StillShared` — says plainly that on macOS it does what dropping does.
 
 - `fd::read_chunks` said a caller `Break` "returns `Ok(())`" seven lines above
   the paragraph explaining the `Drain` it actually returns. It now names

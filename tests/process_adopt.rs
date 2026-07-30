@@ -142,6 +142,11 @@ fn adopting_a_nonexistent_process_fails() {
 #[cfg(unix)]
 #[test]
 fn an_out_of_range_pid_is_rejected_as_invalid_input() {
+    // The `raw_os_error` assertions are the load-bearing ones. Both of these
+    // values also make the kernel answer `EINVAL`, which is itself
+    // `InvalidInput` — so checking the kind alone would pass just as well with
+    // the validation deleted. Absence of an OS error is what shows the argument
+    // was rejected before any syscall, which is what the doc claims.
     let zero = Child::from_pid(0).expect_err("zero is not a process identifier");
     assert_eq!(zero.kind(), std::io::ErrorKind::InvalidInput);
     assert!(
@@ -153,4 +158,8 @@ fn an_out_of_range_pid_is_rejected_as_invalid_input() {
     // beyond it while still fitting the `u32` parameter.
     let huge = Child::from_pid(u32::MAX).expect_err("u32::MAX exceeds pid_t");
     assert_eq!(huge.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        huge.raw_os_error().is_none(),
+        "a value beyond `pid_t` never reaches the kernel: {huge:?}"
+    );
 }
