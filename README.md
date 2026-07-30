@@ -299,9 +299,10 @@ much sparser there. The other targets emit the same events on every platform the
 
 Every event is emitted in release builds as well as debug. Steady-state events used to be
 compiled out of release entirely, which meant the builds you would actually profile were the
-ones with nothing to see. With no subscriber installed, a `tracing` event costs a relaxed load
-of a shared static and a not-taken branch — field expressions are never evaluated — so the
-events are present without being paid for.
+ones with nothing to see. With no subscriber installed, a `tracing` event costs its interest
+check and nothing else; field expressions are never evaluated. That is small rather than free —
+`queue_microtask`'s callsite measures ~17 marginal instructions per microtask against ~540 for
+the microtask itself — and it is the price of the events existing in a release build at all.
 
 Two consequences worth knowing:
 
@@ -387,12 +388,18 @@ operation of this runtime that reached a terminal result inside the turn's wall-
 including ones finished on a blocking-pool thread. That makes it useful for accounting and
 useless for attribution, which is why `wake` does not read it.
 
-The record costs nothing when nothing is collecting: the queue depths are not sampled, the
-cross-thread queue is not locked, and the driver park is not timed. All of that sits behind the
-same interest check every other event site makes — which means the check answers on target and
-level only. Select turn records with `runite::runtime` at `TRACE`; a filter that decides by
-field name or value can accept the record's callsite while declining the guard's, and then
-no record is produced at all.
+The record costs nothing when nothing is collecting: the clock is not read, the queue depths are
+not sampled, the cross-thread queue is not locked, and the driver park is not timed. All of that
+sits behind the same interest check every other event site makes — which means the check answers
+on target and level only. Select turn records with `runite::runtime` at `TRACE`; a filter that
+decides by field name or value can accept the record's callsite while declining the guard's, and
+then no record is produced at all. What a dormant loop does still pay per turn — the interest
+checks themselves and the unconditional `runite::metrics` counters, about 150 instructions on an
+otherwise empty turn — is enumerated item by item in `ARCHITECTURE.md`.
+
+The one thing that gate costs is the `microtask_bound_turns` counter, which is derived from the
+same clock reads and so advances only while turn records are being collected. Every other counter
+in `runite::metrics` is maintained unconditionally.
 
 For CPU profiling, build with `--release` and use `perf` / `cargo flamegraph` against an
 example or benchmark binary.

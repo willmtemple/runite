@@ -138,14 +138,21 @@ pub(crate) struct MacroTask {
     /// report queue-wait time when the task is dequeued.
     ///
     /// `None` unless a subscriber was actually collecting scheduler traces at
-    /// the moment of the push. Reading the clock is a real syscall — around
-    /// 20-30ns on every backend — and this is per macrotask, so it must not
+    /// the moment of the push. Reading the clock is a vDSO call at best —
+    /// around 20-30ns on every backend — and a real syscall on a host whose
+    /// clocksource is not the TSC, and this is per macrotask, so it must not
     /// happen just because the build has tracing linked in. The check that
     /// produces this is the same not-taken branch every other trace site pays.
     ///
     /// The consequence is that queue-wait timing begins once a subscriber is
     /// installed rather than retroactively: tasks already queued at that
     /// moment are dequeued without it.
+    ///
+    /// The `Option` is present in release builds, where 0.2's
+    /// `cfg(debug_assertions)` `Duration` was absent, which takes `MacroTask`
+    /// from 16 bytes to 32. That is the price of not having a
+    /// `cfg`-divergent layout, and it buys removing a clock read per macrotask
+    /// push that no gate covered.
     pub(crate) queued_at: Option<Duration>,
 }
 
@@ -198,8 +205,16 @@ pub(crate) struct RuntimeCounters {
     pub(crate) tasks_cancelled: AtomicU64,
     pub(crate) coalesced_wakes: AtomicU64,
     /// Turns whose microtask drain took more of the turn than everything else
-    /// put together. Two clock reads per *turn* — not per microtask — which is
-    /// far below the driver poll that opens the same turn.
+    /// put together.
+    ///
+    /// The odd one out: every other counter here is maintained
+    /// unconditionally, and this one advances only while something is
+    /// collecting turn records. It is derived from four clock reads per turn,
+    /// which measured ~465 instructions against ~1320 for an entire dormant
+    /// turn, so maintaining it on the dormant path was most of the turn
+    /// machinery's cost. See [`Counters::microtask_bound_turns`].
+    ///
+    /// [`Counters::microtask_bound_turns`]: crate::metrics::Counters::microtask_bound_turns
     pub(crate) microtask_bound_turns: AtomicU64,
     pub(crate) task_polls: AtomicU64,
     pub(crate) task_wakes: AtomicU64,
@@ -353,7 +368,7 @@ impl ThreadState {
 
     /// Tasks queued for polling but not yet polled.
     pub(crate) fn ready_tasks(&self) -> usize {
-        self.shared.ready_tasks.load(Ordering::Acquire)
+        self.shared.ready_tasks.load(Ordering::Relaxed)
     }
 
     /// Records the peaks of gauges that are cheapest to sample at a turn
@@ -391,6 +406,16 @@ pub(crate) struct ThreadShared {
     // enqueued from remote threads, keeping the microtask queue free from
     // cross-thread interference.
     pub(crate) remote_macrotasks: RemoteQueue,
+    /// Driver operations submitted and not yet terminally completed.
+    ///
+    /// `AcqRel`/`Acquire` throughout, and load-bearing: this is the other half
+    /// of the idle-commit protocol in
+    /// [`commit_idle`](super::scheduler::commit_idle). A cross-thread
+    /// completion enqueues its wake under the remote-queue lock and only then
+    /// decrements this, so the release here is what makes that enqueue visible
+    /// to the acquiring idle check. Unlike [`Self::counters`] and
+    /// [`Self::ready_tasks`], a stale read decides whether live tasks get
+    /// cancelled.
     pub(crate) pending_ops: AtomicUsize,
     /// Cumulative activity counters. Maintained at the mutation sites that
     /// perform the work, so reading them walks nothing. Relaxed throughout:
@@ -402,6 +427,13 @@ pub(crate) struct ThreadShared {
     /// Maintained rather than derived: counting them would mean walking the
     /// task registry, and a snapshot that walks is work that distorts the idle
     /// measurement it exists to take.
+    ///
+    /// Relaxed, for the same reason as [`Self::counters`] and unlike
+    /// [`Self::pending_ops`]: every write is inside `with_installed_thread` on
+    /// a `!Send` `FutureTask`, so writer and reader are the same thread and
+    /// there is nothing to synchronize *with*. It is an atomic only because it
+    /// lives on shared state. On aarch64 the difference is `ldadd` against
+    /// `ldaddal` on the wake and poll paths.
     pub(crate) ready_tasks: AtomicUsize,
     /// High-water marks for the gauges worth knowing the worst case of.
     ///
@@ -949,10 +981,22 @@ fn remote_queue_capacity() -> usize {
 /// Panics if the platform driver cannot be created. Entry points that want to
 /// report that failure instead use [`try_ensure_current_thread`] first.
 pub(crate) fn with_current_thread<R: Runtime, T>(f: impl FnOnce(&ThreadState) -> T) -> T {
-    if let Err(error) = try_ensure_current_thread::<R>() {
-        panic!("runtime driver should initialize: {error:?}");
+    // One thread-local lookup on the already-installed path, which is every
+    // call after the first. `try_ensure_current_thread` followed by
+    // `with_installed_thread` reads the same `Cell` twice, and this is the
+    // accessor behind `queue_microtask` and `queue_macrotask`.
+    let mut ptr = current_thread_ptr();
+    if ptr.is_null() {
+        if let Err(error) = install_lazy_state::<R>(RuntimeConfig::default()) {
+            panic!("runtime driver should initialize: {error:?}");
+        }
+        ptr = current_thread_ptr();
+        assert!(!ptr.is_null(), "runtime state not installed on this thread");
     }
-    with_installed_thread(f)
+    // SAFETY: `ptr` is non-null per the lazy-init branch above and points to a
+    // `ThreadState` owned by this thread until final TLS teardown. The borrow
+    // is confined to `f`.
+    unsafe { f(&*ptr) }
 }
 
 /// Installs this thread's runtime state if it is not installed already,

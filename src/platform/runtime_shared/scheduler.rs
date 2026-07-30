@@ -786,15 +786,22 @@ impl Wake for BlockOnWaker {
 /// waiting-macrotask condition is re-checked at each threshold multiple rather
 /// than warning on count alone.
 fn drain_microtasks<R: Runtime>() {
-    let started = std::time::Instant::now();
+    let started = turn_timestamp();
     let mut microtasks_run: u64 = 0;
     let mut warned = false;
+    // The counter lives on `ThreadShared`, so one handle taken at the first
+    // microtask keeps the rest of the checkpoint off the thread-local lookup
+    // that `with_installed_thread` performs; an empty checkpoint takes none.
+    // The bump stays inside the loop so a microtask that reads
+    // `metrics::snapshot` sees the checkpoint's progress rather than its
+    // starting value.
+    let mut shared: Option<Arc<ThreadShared>> = None;
     while let Some(task) = pop_microtask() {
         run_guarded(task);
         microtasks_run += 1;
-        with_installed_thread(|state| {
-            RuntimeCounters::bump(&state.shared.counters.microtasks_run);
-        });
+        let shared =
+            shared.get_or_insert_with(|| with_installed_thread(|state| Arc::clone(&state.shared)));
+        RuntimeCounters::bump(&shared.counters.microtasks_run);
         if !warned
             && microtasks_run.is_multiple_of(MICROTASK_STARVATION_THRESHOLD)
             && macrotask_waiting::<R>()
@@ -812,11 +819,13 @@ fn drain_microtasks<R: Runtime>() {
             );
         }
     }
-    let drained = started.elapsed();
-    TURN.with(|turn| {
-        turn.microtask_drain
-            .set(turn.microtask_drain.get() + drained)
-    });
+    if let Some(started) = started {
+        let drained = turn_elapsed(started);
+        TURN.with(|turn| {
+            turn.microtask_drain
+                .set(turn.microtask_drain.get() + drained)
+        });
+    }
 }
 
 /// Returns whether a macrotask is waiting to run on this thread: a queued
@@ -973,6 +982,43 @@ fn turn_records_enabled() -> bool {
     tracing::enabled!(target: trace_targets::RUNTIME, tracing::Level::TRACE)
 }
 
+/// Reads the monotonic clock, but only while something is collecting turn
+/// records.
+///
+/// Every clock read the turn machinery performs goes through this function and
+/// [`turn_elapsed`], which is what makes the dormant cost testable rather than
+/// merely asserted: both count themselves under `cfg(test)`, so removing the
+/// gate fails
+/// [`dormant_turn_records_cost_nothing`](super::test_support::dormant_turn_records_cost_nothing).
+/// A new site calling `Instant::now` directly is not counted and would not
+/// fail it — which is exactly how the four reads got here — so the count is
+/// worth something only for as long as these two stay the turn path's only
+/// clock reads.
+///
+/// The gating matters more here than anywhere else in the turn path because
+/// there are four reads per turn — one either side of the microtask drain, one
+/// either side of the turn — and they fire whether or not the microtask queue
+/// had anything in it. Ungated they measured ~465 marginal instructions per
+/// turn against ~1320 for the whole dormant turn without them. `Instant::now`
+/// is a vDSO call at best and a real syscall on a host whose clocksource is
+/// `hpet` or `acpi_pm`, against a `tracing::enabled!` that is a relaxed load of
+/// a shared static and a compare.
+fn turn_timestamp() -> Option<Instant> {
+    turn_records_enabled().then(|| {
+        note_turn_sample();
+        Instant::now()
+    })
+}
+
+/// Closes a span opened by [`turn_timestamp`].
+///
+/// Separate from `Instant::elapsed` only so the second read of the pair is
+/// counted too.
+fn turn_elapsed(started: Instant) -> Duration {
+    note_turn_sample();
+    started.elapsed()
+}
+
 #[cfg(test)]
 thread_local! {
     /// How many times this thread has done work that only the turn record
@@ -1097,7 +1143,10 @@ struct TurnGuard {
     id: TurnId,
     previous: Option<TurnId>,
     entry: &'static str,
-    started: Instant,
+    /// When the turn began, taken only while something is collecting turn
+    /// records. `None` is the dormant path: no clock read here, none at the
+    /// close, and consequently no `microtask_bound_turns` maintenance.
+    started: Option<Instant>,
     /// Everything sampled at the start of the turn — present only while
     /// something is collecting turn records. `None` is the dormant path, and
     /// beyond the branch that produced it that path does no extra work at all.
@@ -1169,12 +1218,18 @@ impl TurnGuard {
         // goes away in between.
         let parked = PARKED.with(Cell::take);
 
+        // This one read decides whether the turn is timed at all; the close
+        // consults `started` rather than asking `tracing` again, so a
+        // subscriber installed mid-turn cannot produce a record whose
+        // `runnable_ns` was never measured.
+        let started = turn_timestamp();
+
         let opening = try_with_installed_thread(|state| {
             let state = state?;
             RuntimeCounters::bump(&state.shared.counters.turns);
-            if !turn_records_enabled() {
-                return None;
-            }
+            // An untimed turn has no record to open: `runnable_ns` is the one
+            // field nothing else can supply.
+            started?;
             note_turn_sample();
             let counters = &state.shared.counters;
             Some(TurnOpening {
@@ -1193,7 +1248,7 @@ impl TurnGuard {
             id,
             previous,
             entry,
-            started: Instant::now(),
+            started,
             opening,
         }
     }
@@ -1315,33 +1370,34 @@ fn wake_reason(parked: bool, drained: &TurnDrained) -> &'static str {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        // Two clock reads per *turn*, not per microtask. A turn already opens
-        // with a driver poll, so this is far below the noise floor — and
-        // without it "the reactive graph is what this turn spent its time on"
-        // is unanswerable, which is the question a consumer sitting in the
-        // microtask checkpoint actually has.
-        let elapsed = self.started.elapsed();
-        let drained = TURN.with(|activity| activity.microtask_drain.get());
-        // The same predicate that bumps `microtask_bound_turns`, so the record
-        // explains the counter rather than inviting a second interpretation.
-        let microtask_bound = drained * 2 > elapsed;
+        // Timing the turn is what makes "the reactive graph is what this turn
+        // spent its time on" answerable, and it was also most of the cost of
+        // the turn machinery — four clock reads with the microtask drain's
+        // pair, ~465 instructions against ~1320 for a whole dormant turn. So
+        // it is bought rather than assumed: nothing here runs unless something
+        // is collecting, and `microtask_bound_turns` is the price, since a
+        // clock-derived counter cannot be maintained without the clock.
+        let close = self.started.map(|started| {
+            let elapsed = turn_elapsed(started);
+            let microtask_drain = TURN.with(|activity| activity.microtask_drain.get());
+            TurnClose {
+                elapsed,
+                microtask_drain,
+                // The same predicate the record reports, so the counter and
+                // the record cannot invite two interpretations.
+                microtask_bound: microtask_drain * 2 > elapsed,
+            }
+        });
         try_with_installed_thread(|state| {
             if let Some(state) = state {
-                if microtask_bound {
+                if close.as_ref().is_some_and(|close| close.microtask_bound) {
                     RuntimeCounters::bump(&state.shared.counters.microtask_bound_turns);
                 }
                 state.observe_peaks();
             }
         });
-        if let Some(opening) = self.opening.take() {
-            self.emit(
-                &opening,
-                TurnClose {
-                    elapsed,
-                    microtask_drain: drained,
-                    microtask_bound,
-                },
-            );
+        if let (Some(opening), Some(close)) = (self.opening.take(), close) {
+            self.emit(&opening, close);
         }
         CURRENT_TURN.with(|current| current.set(self.previous));
     }
@@ -1353,14 +1409,11 @@ impl Drop for TurnGuard {
 /// reads either side of a blocking syscall are nothing next to the syscall
 /// itself, but a dormant build should pay for neither.
 fn park_in_driver(state: &ThreadState) {
-    if !turn_records_enabled() {
-        state.driver.wait().expect("driver wait should succeed");
-        return;
-    }
-    note_turn_sample();
-    let started = Instant::now();
+    let started = turn_timestamp();
     state.driver.wait().expect("driver wait should succeed");
-    PARKED.with(|parked| parked.set(Some(started.elapsed())));
+    if let Some(started) = started {
+        PARKED.with(|parked| parked.set(Some(turn_elapsed(started))));
+    }
 }
 
 /// RAII guard that marks the current thread as actively driving its event loop
@@ -1530,10 +1583,13 @@ fn pop_microtask() -> Option<LocalTask> {
 }
 
 fn pop_macrotask<R: Runtime>() -> Option<LocalTask> {
-    let entry = with_installed_thread(|state| state.local_macrotasks.borrow_mut().pop_front())?;
-    with_installed_thread(|state| {
-        RuntimeCounters::bump(&state.shared.counters.macrotasks_run);
-    });
+    let entry = with_installed_thread(|state| {
+        let entry = state.local_macrotasks.borrow_mut().pop_front();
+        if entry.is_some() {
+            RuntimeCounters::bump(&state.shared.counters.macrotasks_run);
+        }
+        entry
+    })?;
     if let Some(queued_at) = entry.queued_at {
         let wait = deadline_from_now::<R>(Duration::ZERO).saturating_sub(queued_at);
         tracing::trace!(

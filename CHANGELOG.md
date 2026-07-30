@@ -149,12 +149,19 @@ changes.
   *begins*, so `wake` and `wait_ns` describe one event and `runnable_ns` never
   counts sleeping as work.
 
-  The record is free when nothing is collecting — no queue-depth sampling, no
-  lock on the cross-thread queue, no clock read around the driver park — and
-  the counts are differences of counters the runtime already maintained, so
-  nothing new happens per task or per microtask. The dormant path counts the
-  samples it takes under test, so that claim fails a test rather than quietly
-  becoming untrue. Turn records are selected by target and level, not by field
+  The record is free when nothing is collecting — no clock read at all, no
+  queue-depth sampling, no lock on the cross-thread queue — and its counts are
+  differences of counters `runite::metrics` maintains anyway, so the record
+  itself adds nothing per task or per microtask. The dormant path counts the
+  samples and clock reads it takes under test and
+  `dormant_turn_records_cost_nothing` asserts the count is zero, so that half
+  fails a test rather than quietly becoming untrue; `cargo bench --bench
+  runtime`'s `turn/dormant` against `turn/collecting` puts a number on it. What
+  a dormant loop does still pay is the interest check and the counters
+  themselves, enumerated in `ARCHITECTURE.md` and measured under *Fixed* below.
+  The price of the gate is `metrics::snapshot`'s `microtask_bound_turns`, which
+  is derived from the turn timing and so advances only while turn records are
+  being collected. Turn records are selected by target and level, not by field
   predicate: the guard is a separate callsite with no fields.
   ([#50](https://github.com/willmtemple/runite/issues/50))
 - `AsyncReadExt::read_to_string`, which had no trait-level equivalent — it
@@ -219,6 +226,57 @@ changes.
   or close.
 
 ### Fixed
+
+- The per-turn record added above does not read the clock on a dormant loop.
+  Earlier in this cycle it did: `TurnGuard` timed every turn and
+  `drain_microtasks` timed every microtask checkpoint — the latter whether or
+  not the queue had anything in it — outside the `tracing::enabled!` gate that
+  already covered the park timing and the queue-depth sampling. None of that
+  reached a release, but the numbers are worth recording, because they are what
+  the gate is worth. Marginal cost of one macrotask turn on x86_64 with a TSC
+  clocksource, `perf stat -r 5` over 100k and 400k turns: 1001 → 1784
+  instructions and ~790 → ~1425 cycles against 0.2.0, of which the four reads
+  are 466 and ~425. Gated, the same loop is 1318 instructions and ~1000 cycles.
+  Wall clock, min-of-9 over 2M turns pinned to one core, 506 → 662 → 545
+  ns/turn, and `cargo bench --bench runtime`'s `queueable/macrotask` goes from
+  809 µs to 569 µs per 1000 turns. On a host whose clocksource is `hpet` or
+  `acpi_pm` rather than the TSC each read is a real syscall, not a vDSO call,
+  and four per turn dominate the loop outright.
+
+  `metrics::snapshot`'s `microtask_bound_turns` is derived from those reads and
+  therefore now advances only while turn records are being collected. That is a
+  behaviour change to a counter, documented on the counter, and the honest
+  price of the gate: a classification that needs the turn timed cannot be
+  maintained on a path that reads no clock. Every other counter is unaffected.
+
+  Every timing site on the turn path now goes through one pair of helpers that
+  count themselves under `cfg(test)`, so removing the gate fails
+  `dormant_turn_records_cost_nothing` rather than only dropping a queue-depth
+  sample. `cargo bench --bench runtime` gains `turn/dormant` and
+  `turn/collecting`: one workload with the collector off and on, so the
+  dormant-path cost of the diagnostics is a number rather than a claim.
+
+- Maintaining the new counters costs less per unit of work than the first cut
+  of them did. `FutureTask`'s wake and poll paths made four separate
+  thread-local lookups where one would do, `with_current_thread` read the same
+  thread-local twice on the path behind `queue_microtask` and
+  `queue_macrotask`, and the microtask drain re-resolved the thread on every
+  microtask to reach a counter that lives on shared state. Marginally, 563 →
+  540 instructions and ~253 → ~242 cycles per microtask against 0.2.0's 520 and
+  ~226. Of the 20 that remain, the counters are ~3 and the `queue_microtask`
+  trace callsite is ~17 — 0.2.0 compiled that callsite out of release builds
+  behind `cfg(debug_assertions)` and 0.3 deliberately does not, which is a
+  diagnostics decision rather than an accident. Wall clock, min-of-7 over 4M
+  microtasks pinned to one core, does not separate the three: 105 ns on 0.2.0,
+  105 before this change, 103 after. No opt-out is offered — a feature flag or
+  a runtime switch would cost more in public API and in conditional paths than
+  three instructions per microtask save.
+
+  `ready_tasks` also drops from `AcqRel`/`Acquire` to `Relaxed`. Every write is
+  on a `!Send` `FutureTask` under `with_installed_thread` and the only readers
+  are on the same thread, so there was nothing to synchronize with; on aarch64
+  it was `ldaddal` where `ldadd` suffices. `pending_ops`, the adjacent field
+  that *does* need its ordering for the idle-commit protocol, now says so.
 
 - Socket read and write deadlines no longer fail outright when the kernel
   lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
@@ -355,10 +413,11 @@ changes.
   `microtask_bound_turns` counts turns whose microtask drain took longer than
   everything else in the turn combined, which is how a consumer learns the
   loop's time went to reactive work rather than to I/O or timers — a
-  distinction wake counts cannot make. It costs two clock reads per *turn*, not
-  per microtask, well below the driver poll that opens the same turn. Peaks are
-  sampled once per turn for the same reason, so a queue that spikes and drains
-  within a single turn can be missed.
+  distinction wake counts cannot make. It needs the turn and its microtask
+  checkpoint timed, which is four clock reads per turn, so it is the one
+  counter here that advances only while turn records are being collected.
+  Peaks are sampled once per turn rather than at every mutation, so a queue
+  that spikes and drains within a single turn can be missed.
 
   They are three types rather than one flat struct on purpose: a flat struct
   invites subtracting a gauge or reading a counter as a level, and a consumer

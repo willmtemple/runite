@@ -84,13 +84,10 @@ impl FutureTask {
             });
             return;
         }
-        with_installed_thread(|state| {
-            super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
-            state.shared.ready_tasks.fetch_add(1, Ordering::AcqRel);
-        });
-
         let task = Rc::clone(self);
         with_installed_thread(|state| {
+            super::state::RuntimeCounters::bump(&state.shared.counters.task_wakes);
+            state.shared.ready_tasks.fetch_add(1, Ordering::Relaxed);
             state
                 .local_microtasks
                 .borrow_mut()
@@ -100,19 +97,21 @@ impl FutureTask {
 
     fn poll(self: Rc<Self>) {
         self.queued.set(false);
-        with_installed_thread(|state| {
-            state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
-        });
 
         // An abort that landed while this task sat in the microtask queue has
-        // already taken the future; nothing left to poll.
-        let Some(mut future) = self.future.borrow_mut().take() else {
+        // already taken the future; nothing left to poll — but the task has
+        // still left the ready queue.
+        let taken = self.future.borrow_mut().take();
+        with_installed_thread(|state| {
+            state.shared.ready_tasks.fetch_sub(1, Ordering::Relaxed);
+            if taken.is_some() {
+                super::state::RuntimeCounters::bump(&state.shared.counters.task_polls);
+            }
+        });
+        let Some(mut future) = taken else {
             return;
         };
 
-        with_installed_thread(|state| {
-            super::state::RuntimeCounters::bump(&state.shared.counters.task_polls);
-        });
         let mut context = Context::from_waker(&self.waker);
         // Isolate task panics: a future that unwinds must not tear down the
         // event loop that is polling it. Catch the unwind here, report it, and
@@ -184,7 +183,7 @@ pub(crate) fn cancel_tasks_for_shutdown(mut tasks: Vec<Rc<FutureTask>>) {
             let join_waker = task.shared.mark_cancelled()?;
             if task.queued.replace(false) {
                 with_installed_thread(|state| {
-                    state.shared.ready_tasks.fetch_sub(1, Ordering::AcqRel);
+                    state.shared.ready_tasks.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             let future = task.future.borrow_mut().take();

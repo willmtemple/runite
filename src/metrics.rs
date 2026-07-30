@@ -35,6 +35,19 @@
 //! Taking a snapshot reads counters that already exist and walks nothing. That
 //! matters more than it sounds: the act of measuring an idle runtime must not
 //! be work, or it becomes part of what is being measured.
+//!
+//! *Maintaining* them is not free, and the honest figures are small: one
+//! relaxed atomic increment at each mutation site, plus [`Peaks`] sampled once
+//! per turn — six relaxed compare-exchange loops that short-circuit to a load
+//! when nothing rose. Marginally, ~3 instructions per microtask against ~540
+//! for the microtask itself, and ~50 per turn against ~1320 for a whole
+//! dormant turn. So there is no opt-out and no feature flag: the switch would
+//! cost more in API surface than it saves.
+//!
+//! [`Counters::microtask_bound_turns`] is the exception in both directions. It
+//! needs the turn timed, which is four clock reads a dormant loop must not pay,
+//! so it advances only while something is collecting turn records
+//! (`runite::runtime` at `TRACE`). See its own documentation.
 
 use crate::platform::runtime_shared::state::try_with_installed_thread;
 
@@ -152,6 +165,21 @@ pub struct Counters {
     /// `queue_microtask` — rather than to I/O, timers, or macrotask handlers.
     /// That distinction is otherwise invisible: wake counts say something woke
     /// up, not what the wake then spent its time on.
+    ///
+    /// # This counter only advances while turn records are collected
+    ///
+    /// Unlike every other field here. Classifying a turn means timing it and
+    /// timing its microtask checkpoint — four clock reads per turn, which
+    /// measured ~465 instructions against ~1320 for an entire dormant turn,
+    /// and which are a real syscall rather than a vDSO call on a host whose
+    /// clocksource is not the TSC. A runtime that no one is watching does not
+    /// pay that, so on a dormant loop this stays where it was and `turns` keeps
+    /// rising past it.
+    ///
+    /// Install a subscriber that accepts `runite::runtime` at `TRACE` — the
+    /// same selection that produces the per-turn record — for the whole window
+    /// you intend to measure, and difference two snapshots taken inside it.
+    /// Turns before the subscriber arrives are not retroactively classified.
     pub microtask_bound_turns: u64,
     /// Cross-thread macrotasks refused because the remote queue was full.
     ///
@@ -499,17 +527,22 @@ mod tests {
         );
     }
 
-    /// A turn spent overwhelmingly in the microtask checkpoint is classified as
-    /// microtask-bound, which is what tells a consumer the loop's time went to
-    /// reactive work rather than to I/O or timers.
+    /// `microtask_bound_turns` is the one counter that does not advance on a
+    /// dormant loop, because classifying a turn means timing it.
+    ///
+    /// The direction that matters is the zero: it is what a reader of
+    /// [`Counters::microtask_bound_turns`] is promised, and what says the turn
+    /// path really does read no clock. The positive direction is covered by
+    /// `microtask_bound_turns_follow_the_turn_record_gate`, which installs a
+    /// collector.
     #[test]
-    fn a_microtask_heavy_turn_is_classified_as_microtask_bound() {
+    fn a_microtask_heavy_turn_is_not_classified_with_nothing_collecting() {
         use crate::queue_microtask;
 
         let before = snapshot().counters;
 
         queue_macrotask(|| {
-            // Enough microtask work that the drain dominates its turn.
+            // Enough microtask work that the drain would dominate its turn.
             for _ in 0..2_000 {
                 queue_microtask(|| {
                     std::hint::black_box(0u64);
@@ -520,9 +553,9 @@ mod tests {
 
         let after = snapshot().counters;
         assert!(after.turns > before.turns, "turns should have advanced");
-        assert!(
-            after.microtask_bound_turns >= before.microtask_bound_turns,
-            "the classification never decreases"
+        assert_eq!(
+            after.microtask_bound_turns, before.microtask_bound_turns,
+            "a turn nothing timed cannot be classified"
         );
     }
 }
