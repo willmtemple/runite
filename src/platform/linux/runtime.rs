@@ -206,6 +206,14 @@ mod tests {
         assert_eq!(current_sq_entries(), 8);
     }
 
+    /// The synchronous shape is a separate arm of the attribute's expansion —
+    /// the one a `#[runite::main(ring_entries = ..)] fn main()` uses — so it
+    /// gets the same readback.
+    #[runite_proc_macros::test(ring_entries = 8, crate = "crate")]
+    fn the_sync_test_attribute_configures_the_ring_it_names() {
+        assert_eq!(current_sq_entries(), 8);
+    }
+
     /// The bare attribute must keep installing the default runtime.
     #[runite_proc_macros::test(crate = "crate")]
     async fn the_bare_test_attribute_leaves_the_ring_at_its_default() {

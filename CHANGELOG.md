@@ -278,6 +278,15 @@ changes.
   it was `ldaddal` where `ldadd` suffices. `pending_ops`, the adjacent field
   that *does* need its ordering for the idle-commit protocol, now says so.
 
+- `CancellationToken::cancelled` no longer leaks a `Waker` for every future
+  that is polled and dropped. A `select!` arm drops one on every iteration, so
+  a long-lived task looping over `select! { _ = token.cancelled() => .., msg =
+  rx.recv() => .. }` grew the token's waiter list by one entry per message and
+  left `cancel` walking every stale one. Each waiter is now tagged and removes
+  its own registration on drop. A future re-polled by a different task also
+  registers the waker it was last polled with, rather than keeping the one from
+  its first poll.
+
 - Socket read and write deadlines no longer fail outright when the kernel
   lacks the opcode underneath them. `recv_timeout`, `send_timeout`,
   `recv_from_timeout`, and `connect_stream_timeout` submitted an

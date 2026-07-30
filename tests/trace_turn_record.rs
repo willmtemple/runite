@@ -188,6 +188,37 @@ fn a_collecting_subscriber_receives_identified_turn_records() {
     );
 }
 
+/// The `turn_id` field carries the same value [`runite::current_turn`] returns
+/// inside that turn.
+///
+/// This is the join the API exists for: an application stamps its own record
+/// with `current_turn()` and lines it up against runite's. Neither half is
+/// worth anything if they can drift, and nothing else here compares them —
+/// the tests above check `runtime_id` against the API but only check `turn_id`
+/// against itself.
+#[test]
+fn the_record_turn_id_is_what_current_turn_returns() {
+    let mut stamped = None;
+    let records = records_from(true, || {
+        stamped = runite::block_on(async { runite::current_turn() });
+    });
+
+    let stamped = stamped
+        .expect("a task body runs inside a turn")
+        .to_string()
+        .parse::<u64>()
+        .expect("TurnId renders as the numeric identity the field carries");
+    let ids = records
+        .iter()
+        .map(|record| record.turn_id)
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&stamped),
+        "the turn the task stamped should be one of the turns recorded: \
+         stamped {stamped}, recorded {ids:?}"
+    );
+}
+
 /// A subscriber that declines TRACE receives no turn records.
 ///
 /// This says nothing about what the loop *did* — `tracing` would filter the

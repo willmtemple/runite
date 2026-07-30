@@ -16,11 +16,65 @@ fn no_turn_outside_the_event_loop() {
     );
 }
 
-/// Work that runs inside one turn observes one identifier, and a microtask and
-/// the task that queued it share it — that sharing is the whole point, since a
-/// reactive flush happens in the microtask checkpoint of the turn that drove it.
+/// Everything drained in one checkpoint observes one identifier: two
+/// microtasks, a microtask queued by a microtask, and a task polled alongside
+/// them. That sharing is what the identifier is for — a consumer joining its
+/// own records against runite's has nothing if two rows from the same turn
+/// disagree.
 #[test]
-fn work_in_one_turn_shares_one_identifier() {
+fn all_work_in_one_turn_observes_one_identifier() {
+    type Observations = Rc<RefCell<Vec<(&'static str, Option<TurnId>)>>>;
+
+    let observed: Observations = Rc::new(RefCell::new(vec![]));
+
+    // Queued before the loop starts, so the first turn's checkpoint drains all
+    // of it — including the poll of the spawned task, which is itself a
+    // microtask, and the microtask the first one queues, because the checkpoint
+    // drains to quiescence.
+    let recorder = Rc::clone(&observed);
+    runite::queue_microtask(move || {
+        recorder
+            .borrow_mut()
+            .push(("first", runite::current_turn()));
+        let nested = Rc::clone(&recorder);
+        runite::queue_microtask(move || {
+            nested.borrow_mut().push(("nested", runite::current_turn()));
+        });
+    });
+    let recorder = Rc::clone(&observed);
+    runite::queue_microtask(move || {
+        recorder
+            .borrow_mut()
+            .push(("second", runite::current_turn()));
+    });
+    let recorder = Rc::clone(&observed);
+    runite::spawn(async move {
+        recorder.borrow_mut().push(("task", runite::current_turn()));
+    });
+    runite::run();
+
+    let observed = observed.borrow();
+    assert_eq!(
+        observed.len(),
+        4,
+        "every callback should have run: {observed:?}"
+    );
+    let (_, first) = observed[0];
+    let first = first.expect("a microtask runs inside a turn");
+    for (what, turn) in observed.iter() {
+        assert_eq!(
+            turn.expect("every callback here runs inside a turn"),
+            first,
+            "{what} ran in the same checkpoint and must report the same turn: {observed:?}"
+        );
+    }
+}
+
+/// A microtask queued by a macrotask drains in the *next* turn, because the
+/// macrotask is the last phase of its own. The ordering guarantee is
+/// unaffected, but the identifiers differ — see [`runite::current_turn`].
+#[test]
+fn a_microtask_queued_by_a_macrotask_lands_in_the_next_turn() {
     type Observations = Rc<RefCell<Vec<(&'static str, Option<TurnId>)>>>;
 
     let observed: Observations = Rc::new(RefCell::new(vec![]));

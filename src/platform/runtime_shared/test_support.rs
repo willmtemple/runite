@@ -17,7 +17,7 @@ use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;
@@ -1625,11 +1625,12 @@ pub fn zero_interval_fires_once_per_turn_without_spinning<R: Runtime>() {
 /// Answers `enabled` and nothing else, so a workload can be run with the turn
 /// record either wanted or declined.
 ///
-/// Only `enabled` is implemented, and `register_callsite` is deliberately not.
-/// Interest is cached per callsite and can outlive a scoped dispatcher, so a
-/// subscriber that answered definitively for a callsite could leave the second
-/// workload in this file inheriting the first one's answer. Consulting
-/// `enabled` per event is slower and is the point.
+/// `register_callsite` is left at its default, which answers definitively
+/// (`always`/`never`) from `enabled`. That answer is cached per callsite for
+/// the whole process and outlives this scoped dispatcher, so the two workloads
+/// below cannot rely on the cache: each calls
+/// [`settle_turn_record_gate`](super::scheduler::settle_turn_record_gate) to
+/// re-resolve it against the subscriber it just installed.
 struct TurnInterest {
     collect: bool,
 }
@@ -1658,10 +1659,46 @@ impl tracing::Subscriber for TurnInterest {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+/// Interested in nothing, and never dropped.
+///
+/// While `tracing` has only one registered dispatcher it resolves callsite
+/// interest against whichever thread first reaches the callsite, so a
+/// concurrent test with no subscriber can cache a definitive answer for the
+/// turn-record gate that no scoped subscriber can then override. Registering a
+/// second dispatcher that stays alive forces `tracing` to combine every live
+/// dispatcher instead, which yields `sometimes` whenever the two disagree —
+/// and `sometimes` is resolved per event against the calling thread's own
+/// subscriber, which is what these two workloads need.
+struct Bystander;
+
+impl tracing::Subscriber for Bystander {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 /// Runs a loop that parks in the driver and returns how many turn-record
 /// samples it took.
 fn turn_samples_for_parking_loop<R: Runtime>(collect: bool) -> u64 {
+    static BYSTANDER: OnceLock<tracing::Dispatch> = OnceLock::new();
+    BYSTANDER.get_or_init(|| tracing::Dispatch::new(Bystander));
+
     tracing::subscriber::with_default(TurnInterest { collect }, || {
+        super::scheduler::settle_turn_record_gate(collect);
         super::scheduler::reset_turn_samples();
         // A pending timer is what makes `run` park rather than return idle, so
         // this exercises the park-timing branch as well as the per-turn
